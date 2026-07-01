@@ -17,7 +17,7 @@ import net from 'node:net';
 import { WebSocket } from 'ws';
 
 import { serveHost, generateHostIdentity } from '../src/index.js';
-import { makeRegisterAuth, registerSignerFromStatic } from '../src/registerAuth.js';
+import { makeRegisterAuth, registerSignerFromStatic, addressForRegisterKey } from '../src/registerAuth.js';
 import { randomBytes } from '../src/bytes.js';
 
 // 4007: a reach register without a valid signed auth is refused (link/server types.ts).
@@ -50,19 +50,21 @@ function health(port: number): Promise<boolean> {
   });
 }
 
-interface LinkProc { port: number; url: string; kill: () => void }
-async function spawnLink(): Promise<LinkProc> {
+interface LinkProc { port: number; url: string; origin: string; kill: () => void }
+async function spawnLink(env: Record<string, string> = {}): Promise<LinkProc> {
   const port = await getFreePort();
   const proc: ChildProcess = spawn(process.execPath, ['--import', 'tsx', SERVER_ENTRY], {
     cwd: CLIENT_ROOT,
-    env: { ...process.env, LINK_PORT: String(port), LINK_IP_RATE_PER_MIN: '0', LINK_RELAY_IDLE_SEC: '120' },
+    env: { ...process.env, LINK_PORT: String(port), LINK_IP_RATE_PER_MIN: '0', LINK_RELAY_IDLE_SEC: '120', ...env },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   let stderr = '';
   proc.stderr?.on('data', (d: Buffer) => (stderr += d.toString()));
   const deadline = Date.now() + 9000;
   while (Date.now() < deadline) {
-    if (await health(port)) return { port, url: `ws://127.0.0.1:${port}/v1/link`, kill: () => proc.kill('SIGKILL') };
+    if (await health(port)) {
+      return { port, url: `ws://127.0.0.1:${port}/v1/link`, origin: `127.0.0.1:${port}`, kill: () => proc.kill('SIGKILL') };
+    }
     await sleep(150);
   }
   proc.kill('SIGKILL');
@@ -105,7 +107,11 @@ class Raw {
 }
 
 test('anti-squat (raw frames): unsigned refused, TOFU-pinned, wrong key refused, same key replaces, replay refused', async () => {
-  const link = await spawnLink();
+  // Opaque-address mode: this test uses an arbitrary address to exercise the TOFU
+  // pin / same-key / replay rules directly. (The key-committed address model is
+  // exercised by the dedicated binding test below.)
+  const link = await spawnLink({ LINK_BIND_ADDRESS_TO_KEY: '0' });
+  const o = link.origin;
   const address = 'addr-squat-test';
   const genuine = registerSignerFromStatic(randomBytes(32));
   const squatter = registerSignerFromStatic(randomBytes(32)); // a DIFFERENT key
@@ -118,13 +124,13 @@ test('anti-squat (raw frames): unsigned refused, TOFU-pinned, wrong key refused,
 
     // 2) The genuine host registers signed → pinned (TOFU).
     const a = await Raw.connect(link.url);
-    a.send({ type: 'register', address, auth: makeRegisterAuth(genuine, address) });
+    a.send({ type: 'register', address, auth: makeRegisterAuth(genuine, address, o) });
     await a.next('registered');
 
     // 3) A squatter that KNOWS the address but signs with a different key is
     //    refused, and the genuine registration is untouched (still resolves to it).
     const b = await Raw.connect(link.url);
-    b.send({ type: 'register', address, auth: makeRegisterAuth(squatter, address) });
+    b.send({ type: 'register', address, auth: makeRegisterAuth(squatter, address, o) });
     assert.equal((await b.next('error')).error, 'address_pinned', 'a wrong-key re-register is rejected');
     const probe = await Raw.connect(link.url);
     probe.send({ type: 'resolve', address });
@@ -132,7 +138,7 @@ test('anti-squat (raw frames): unsigned refused, TOFU-pinned, wrong key refused,
 
     // 4) The genuine host reconnects (SAME key, fresh frame, new socket): accepted,
     //    and the prior socket is retired with 4005.
-    const reAuth = makeRegisterAuth(genuine, address);
+    const reAuth = makeRegisterAuth(genuine, address, o);
     const c = await Raw.connect(link.url);
     c.send({ type: 'register', address, auth: reAuth });
     await c.next('registered');
@@ -142,6 +148,35 @@ test('anti-squat (raw frames): unsigned refused, TOFU-pinned, wrong key refused,
     const d = await Raw.connect(link.url);
     d.send({ type: 'register', address, auth: reAuth });
     assert.equal((await d.next('error')).error, 'register_stale', 'a replayed register frame is rejected');
+  } finally {
+    link.kill();
+    await sleep(100);
+  }
+});
+
+test('address-key binding (raw frames): the committed address is required; a mismatched address (and any squatter) is refused', async () => {
+  // Default mode: the server binds the address to the register key.
+  const link = await spawnLink();
+  const o = link.origin;
+  const genuine = registerSignerFromStatic(randomBytes(32));
+  const boundAddress = addressForRegisterKey(genuine.pub);
+  try {
+    // An arbitrary (non-committed) address is refused even with a valid signature.
+    const bad = await Raw.connect(link.url);
+    bad.send({ type: 'register', address: 'not-the-commitment', auth: makeRegisterAuth(genuine, 'not-the-commitment', o) });
+    assert.equal(await bad.closed, CLOSE_REGISTER_AUTH, 'a non-committed address is refused with 4007');
+
+    // The committed address base64url(sha256(pub)) registers.
+    const a = await Raw.connect(link.url);
+    a.send({ type: 'register', address: boundAddress, auth: makeRegisterAuth(genuine, boundAddress, o) });
+    await a.next('registered');
+
+    // A squatter cannot produce a key that hashes to the victim's address, so it can
+    // never even craft a passable frame for it — the squat race is impossible.
+    const squatter = registerSignerFromStatic(randomBytes(32));
+    const s = await Raw.connect(link.url);
+    s.send({ type: 'register', address: boundAddress, auth: makeRegisterAuth(squatter, boundAddress, o) });
+    assert.equal(await s.closed, CLOSE_REGISTER_AUTH, 'a squatter is refused at the binding check');
   } finally {
     link.kill();
     await sleep(100);
@@ -160,12 +195,17 @@ test('anti-squat (real serveHost): a live host cannot be displaced by a squatter
   });
   try {
     assert.equal(host.registeredCount, 1, 'the host registered (signed) with the uplink');
+    // serveHost derives its address as the commitment to its register key, so on a
+    // binding-enforcing Link (the default) the address is spoof-PROOF.
+    assert.equal(host.address, addressForRegisterKey(registerSignerFromStatic(host.hostStatic.priv).pub));
 
-    // A squatter that learned the address tries to take it over with its own key.
+    // A squatter that learned the address tries to take it over with its own key. It
+    // cannot even craft a frame that passes binding (its key does not hash to the
+    // address), so it is refused at the binding check (4007) — the squat never lands.
     const squatter = registerSignerFromStatic(randomBytes(32));
     const s = await Raw.connect(link.url);
-    s.send({ type: 'register', address: host.address, auth: makeRegisterAuth(squatter, host.address) });
-    assert.equal((await s.next('error')).error, 'address_pinned', 'the squatter is refused');
+    s.send({ type: 'register', address: host.address, auth: makeRegisterAuth(squatter, host.address, link.origin) });
+    assert.equal(await s.closed, CLOSE_REGISTER_AUTH, 'the squatter is refused');
 
     // The live host is undisturbed: it still registers, and a resolve still finds
     // the genuine host (not the squatter's).

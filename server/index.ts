@@ -18,6 +18,11 @@ function main(): void {
       relayHourlyBytes: config.relayHourlyBytes,
       relayTrickleBps: config.relayTrickleBps,
       relayIdleSec: config.relayIdleSec,
+      // Access control: open (any signed host) vs closed (allowlisted keys only).
+      mode: config.allowedRegisterKeys.size > 0 ? 'closed' : 'open',
+      allowedRegisterKeys: config.allowedRegisterKeys.size,
+      bindAddressToKey: config.bindAddressToKey,
+      origin: config.origin || '(from Host header)',
     });
   });
 

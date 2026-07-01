@@ -20,7 +20,7 @@
 // The exact bytes signed here are reproduced byte-for-byte by Link's own verifier
 // (link/server/registerAuth.ts). Keep the two in lock-step.
 
-import { ed25519PublicKey, ed25519Sign, hkdfSha256 } from './crypto.js';
+import { ed25519PublicKey, ed25519Sign, hkdfSha256, sha256d } from './crypto.js';
 import { Writer, toB64url, randomBytes, utf8 } from './bytes.js';
 
 // Domain-separation tag prefixed to every signed message. Bumping the version
@@ -46,11 +46,22 @@ export interface RegisterAuth {
 }
 
 // The canonical bytes signed: a fixed domain tag, then LENGTH-PREFIXED address,
-// decimal timestamp and nonce. Length-prefixing makes the encoding unambiguous
-// for any field contents (no delimiter can be smuggled in). Link rebuilds these
-// exact bytes before verifying.
-export function registerSigningMessage(address: string, ts: number, nonce: string): Uint8Array {
-  return new Writer().bytes(REGISTER_DOMAIN).lenStr(address).lenStr(String(ts)).lenStr(nonce).finish();
+// decimal timestamp, nonce, and the Link `origin` (the uplink authority this frame
+// is for). Length-prefixing makes the encoding unambiguous for any field contents
+// (no delimiter can be smuggled in). Binding the origin means a captured frame does
+// not verify at a different Link. An empty origin binds nothing. Link rebuilds
+// these exact bytes before verifying — keep the two in lock-step.
+export function registerSigningMessage(address: string, ts: number, nonce: string, origin = ''): Uint8Array {
+  return new Writer().bytes(REGISTER_DOMAIN).lenStr(address).lenStr(String(ts)).lenStr(nonce).lenStr(origin).finish();
+}
+
+// The routing address a register key commits to: base64url(SHA-256(registerPub)).
+// A host derives its address this way so the address is a commitment to a key no
+// one else holds; a Link that enforces binding then rejects any register whose
+// address is not this, making the routing layer spoof-PROOF (not merely
+// spoof-survivable). `registerPub` is the 32-byte Ed25519 register public key.
+export function addressForRegisterKey(registerPub: Uint8Array): string {
+  return toB64url(sha256d(registerPub));
 }
 
 // Derive the long-lived Ed25519 registration signer from a 32-byte x25519 static
@@ -63,10 +74,13 @@ export function registerSignerFromStatic(x25519Priv: Uint8Array): RegisterSigner
 
 // Build the auth object for a `register` frame: a fresh timestamp + nonce, signed
 // over the canonical message. Call this for EVERY register/re-register so each
-// frame is unique (the server rejects a stale/replayed timestamp).
-export function makeRegisterAuth(signer: RegisterSigner, address: string): RegisterAuth {
+// frame is unique (the server rejects a stale/replayed timestamp). `origin` is the
+// uplink authority (host[:port]) the frame is being sent to, bound into the
+// signature so it cannot be replayed at another Link; omit only where the server
+// is known not to enforce origin binding.
+export function makeRegisterAuth(signer: RegisterSigner, address: string, origin = ''): RegisterAuth {
   const ts = Date.now();
   const nonce = toB64url(randomBytes(NONCE_BYTES));
-  const sig = signer.sign(registerSigningMessage(address, ts, nonce));
+  const sig = signer.sign(registerSigningMessage(address, ts, nonce, origin));
   return { alg: 'ed25519', pub: toB64url(signer.pub), ts, nonce, sig: toB64url(sig) };
 }

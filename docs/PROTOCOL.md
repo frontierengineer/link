@@ -40,7 +40,7 @@ the protocol, so a host never exposes an inbound port.
 
 | Noun | What it is | Entropy | Who sees it | Secret? |
 |---|---|---|---|---|
-| **address** | The host's routing handle — its "phone number". A client resolves it to be introduced. Stable; reused across reconnections. | High (≥128-bit random) | Link + anyone the host hands it to | **No.** Knowing it lets you *ask* to connect; entry is gated by the handshake. |
+| **address** | The host's routing handle — its "phone number". A client resolves it to be introduced. Stable; reused across reconnections. | High — `base64url(SHA-256(register key))` by default (a commitment to a key nobody else holds), or any ≥128-bit random handle in legacy opaque mode | Link + anyone the host hands it to | **No.** Knowing it lets you *ask* to connect; entry is gated by the handshake. |
 | **pairing code** | A short, single-use secret shown when a host opens pairing (a QR, or typed). Proves, this one time, that the client is the intended one. | Low (e.g. 6 chars) | **Only the two endpoints** | **Yes** — and it is **never sent to Link in any form, raw or hashed.** It is only ever a SPAKE2 input. |
 | **credential** | What a client persists after first pairing: a 256-bit `token`, the host's pinned static public key, and the address. Used for all later reconnections — no code ever again. | High | **Only the client** (it is a secret at rest) | **Yes** |
 
@@ -55,9 +55,14 @@ names one live relay so the three parties can refer to the same introduction.
 
 ## 3. Transport & framing
 
-- One WebSocket per socket, to `wss://<link-host>/v1/link`. (TLS terminates at
-  whatever fronts Link — e.g. Cloudflare; Link itself speaks `ws`. See
-  [DEPLOY.md](./DEPLOY.md).)
+- One WebSocket per socket, at `/v1/link`. The transport is a **plain WebSocket**
+  (`ws`) carrying **message-layer**-encrypted frames — it is *not* a "secure
+  WebSocket", and Link's confidentiality/integrity/authenticity do **not** come from
+  the transport. Every relayed byte is already sealed end-to-end (SPAKE2 then Noise)
+  before it reaches the socket, so a plain-`ws` Link loses nothing. Clients usually
+  dial `wss://<link-host>/v1/link` only because a TLS-terminating front (e.g.
+  Cloudflare) sits ahead of Link for ordinary web hygiene; Link itself speaks `ws`.
+  See [DEPLOY.md](./DEPLOY.md) and [SECURITY.md](./SECURITY.md).
 - **Control frames** are UTF-8 **text** frames carrying one JSON object with a
   `type` field. Max 4096 bytes. Used during introduction.
 - **Relay frames** are **binary** frames. The instant a socket goes into the
@@ -82,8 +87,14 @@ frame travels.
 | `relay` | L→H | `linkId` | "Dial back a fresh relay socket for `linkId`." |
 | `accept` | H→L | `linkId` | Sent on a **new** socket: "this socket is the host's relay end for `linkId`." |
 | `relaying` | L→C and L→H | `linkId` | "The splice is live. Everything after this is opaque payload." |
-| `usage` | L→H | `linkId`, `used`, `throttled` | Relay quota telemetry (only if the hourly-quota knob is on). `used` is a 0–1 fraction. |
+| `usage` | L→H | `connections[]` | Relay usage for **every** connection this host owns, each a 0–1 `used` fraction + `throttled` (or `unlimited` when no quota is configured). Never absolute bytes, never the limit. Sent two ways with this same shape: **pushed** on a tier crossing / throttle flip, and **pulled** in reply to `getUsage`. |
+| `getUsage` | H→L | — | "Report the usage of every connection I own." No link selector — a host only ever gets its own connections. Reply is a `usage`. |
 | `error` | L→C / L→H | `error` | A **non-fatal** problem (e.g. `unknown_address`). The socket stays open. |
+
+Each entry in a `usage` message's `connections` array is
+`{ "linkId": …, "used": 0..1, "throttled": bool }` when the operator set an hourly
+quota, or `{ "linkId": …, "unlimited": true }` when they did not — so "no limit" is
+explicit and a byte budget can never be inferred from the wire.
 
 Fatal problems are signalled by a WebSocket **close code** instead (see §7).
 
@@ -165,10 +176,15 @@ forge it, or join it.
 ```
 
 The signature is over the canonical byte string
-`"frontier-link-register-v1" ‖ len(address) ‖ len(ts) ‖ len(nonce)` (each `len(x)`
-is a 4-byte big-endian length followed by the UTF-8 bytes). Link:
+`"frontier-link-register-v1" ‖ len(address) ‖ len(ts) ‖ len(nonce) ‖ len(origin)`
+(each `len(x)` is a 4-byte big-endian length followed by the UTF-8 bytes). `origin`
+is the Link authority the frame is meant for (the `host[:port]` the client dialed);
+binding it means a captured, still-fresh frame does **not** verify at a *different*
+Link. Link:
 
-1. Verifies the Ed25519 signature and that `ts` is within ±5 min of its clock.
+1. Verifies the Ed25519 signature (rebuilding the message with its **own** origin,
+   from the request's `Host` header or a configured value) and that `ts` is within
+   ±5 min of its clock.
 2. **Trust-on-first-use:** the first `register` for an `address` pins `pub`.
 3. Every later `register` for that address must use the **same** `pub` and a
    **strictly newer** `ts`. A different key → `address_pinned` (refused, the genuine
@@ -177,6 +193,21 @@ is a 4-byte big-endian length followed by the UTF-8 bytes). Link:
 So learning an address is not enough to steal it — you must hold its key. The pin
 is memory-only and lasts exactly as long as the registration (a host holds its
 socket and re-registers with the same key on reconnect).
+
+**Address-key binding (default on).** By default Link additionally requires the
+`address` to be the **commitment** to the register key:
+`address == base64url(SHA-256(pub))`. A register whose address is not that is
+refused (`4007`). This makes the routing layer spoof-*proof*, not merely
+spoof-survivable: a squatter cannot even present a frame for your address, because
+no key it holds hashes to it — the race in step 3 disappears. Operators who want the
+legacy opaque-address model (any high-entropy operator-chosen handle) disable it
+(`LINK_BIND_ADDRESS_TO_KEY=0`).
+
+**Open vs closed (default open).** In **open** mode any host with a valid signature
+may register (today's behaviour). In **closed** mode the operator supplies an
+**allowlist** of authorized register keys (config only — no dynamic pairing state);
+a genuine signature whose `pub` is not on the list is refused with `4010`. See
+[DEPLOY.md](./DEPLOY.md).
 
 ## 7. Relay lifecycle & close codes
 
@@ -194,7 +225,8 @@ Fatal conditions close the WebSocket with an application code (4000–4999):
 | 4004 | idle timeout | The relay sat with no traffic past the idle window. |
 | 4005 | replaced | A newer, validly-signed socket re-registered this address; this older one is retired. |
 | 4006 | slow peer | The peer stopped draining and too much piled up in its send buffer. |
-| 4007 | register auth | `register` lacked a valid signature, or it failed/was stale. |
+| 4007 | register auth | `register` lacked a valid signature, it failed/was stale, or (with binding on) its address was not the commitment to its key. |
+| 4010 | register unauthorized | The signature was valid, but the relay is in **closed** mode and this host's register key is not on the operator's allowlist. |
 
 `error` frames (non-fatal, socket stays open): `unknown_address` (resolve found
 nothing), `unknown_link` (accept named no pending link), `address_pinned`,
@@ -208,7 +240,10 @@ In memory only, never on disk, no accounts:
   pin.
 - **live links** — for each: the two sockets, byte counters, and rate-limit state.
 
-A restart forgets everything; hosts re-register and clients reconnect. The entire
+The closed-mode **allowlist** and the address-binding / origin knobs are static
+operator **config**, not per-host state — Link still holds nothing durable and
+coordinates nothing across replicas. A restart forgets everything; hosts
+re-register and clients reconnect. The entire
 service is one small stateless relay — which is what makes "run your own, and the
 'it can't read anything' claim is checkable" true.
 

@@ -77,9 +77,14 @@ transparently rides out a reconnect.
 | `code?: string` | **first pair**: the short pairing code — keys SPAKE2 only, never sent to the relay |
 | `credential?: DeviceCredential` | **reconnect**: token + pinned host static key + address |
 | `recoveryKey?: string` | **recover**: a high-entropy secret to enroll a brand-new device from nothing |
-| `onState?` | `connecting`→`connected`→`reconnecting`→… |
+| `onState?` | `connecting`→`connected`→`reconnecting`→… ; terminal `failed` or `revoked` |
 | `onRequest?` | handle host-initiated requests on this client |
 | `dial?` | per-attempt timeouts (`connectTimeoutMs`, `controlTimeoutMs`) |
+
+If the host has **revoked** this device, reconnect is refused with a typed
+`DeviceRevokedError` (and `state` → `revoked`): the managed connection stops
+retrying instead of spinning forever, so the app can forget the credential and
+re-pair.
 
 Exactly one of `code` / `credential` / `recoveryKey` selects the mode.
 `Connection`: `request(cmd)`, `send(evt)`, `onMessage(fn)`, `credential`,
@@ -94,16 +99,25 @@ host handshake, and issues/verifies credentials.
 | option | meaning |
 |---|---|
 | `uplinks: string[]` | relay URLs to register with |
-| `address?: string` | the routing address (defaults to a fresh random one — persist it) |
+| `address?: string` | the routing address (defaults to the **commitment to the register key**, `base64url(SHA-256(key))`, so it's spoof-proof; override for the legacy opaque model) |
 | `hostStatic?: KeyPair` | the host's static identity (defaults fresh — persist `.priv`) |
 | `pairingCode?: string` | open pairing immediately (else call `setPairingCode`) |
 | `recoveryKey?: string` | enable cold-start recovery with this high-entropy secret |
 | `tokens?: TokenStore` | a persisted device store (defaults empty) |
 | `onRequest?` / `onConnect?` / `onLog?` | app protocol / per-session hook / structured logs |
+| `onUsage?` | per-connection relay usage — a 0–1 fraction + `throttled`, or `unlimited` when the relay sets no quota; fires on Link's pushes **and** in answer to `requestUsage()` |
 | `maxPairAttempts?` | wrong-guess lockout per code (default 5) |
 
 `Host`: `address`, `hostStatic`, `hostStaticPub`, `tokens`, `sessions`,
-`registeredCount`, `setPairingCode(code|null)`, `revoke(keyId)`, `stop()`.
+`registeredCount`, `setPairingCode(code|null)`, `revoke(keyId)`, `requestUsage()`,
+`stop()`.
+
+**Usage telemetry.** Link reports usage only in **relative** terms — a fraction of
+the hourly allowance per connection, or `unlimited` — never absolute bytes and never
+its own limit config, so a byte budget can't be reverse-engineered. `onUsage`
+receives the usage of *every* connection this host owns; call `requestUsage()` to
+pull the current values on demand (the answer arrives on `onUsage` with the same
+shape as an unprompted push).
 
 ## Security properties
 
@@ -131,8 +145,11 @@ host handshake, and issues/verifies credentials.
   nothing — the same flow as pairing, with the recovery key as the authenticator
   (concurrency-capped but intentionally not permanently locked out, so it can't be
   DoS'd).
-- **Revocation.** Drop the token (`host.revoke(keyId)`); the next reconnect is
-  refused, live sessions unaffected until they drop.
+- **Revocation.** Drop the token (`host.revoke(keyId)`); the next reconnect finds no
+  token and is refused. The host sends the refused device a **typed** signal, so the
+  client surfaces a terminal `DeviceRevokedError` / `revoked` state (distinguishable
+  from a transient drop) and stops retrying instead of looping forever. Revocation
+  lives at the host, never at the relay.
 - **Untrusted-relay hardening.** Every socket is capped at the relay's 16 MiB frame
   ceiling; a tampered frame tears down *and closes* its socket; and a host bounds
   concurrent relay dial-backs per uplink (default 64) so a malicious relay can't
@@ -182,13 +199,16 @@ npm test          # typecheck + unit (KAT) + the end-to-end self-test
   concurrent attempts at K) and the relay dial-back cap (a flood of relay requests
   opens at most N concurrent dial-backs, held through the handshake).
 - **`test/registerAuth.test.ts`** — signed-registration interop (@noble sign ↔ Node
-  verify) and the full anti-squat sequence against a real relay (unsigned refused,
-  TOFU-pinned, wrong-key refused, same-key replaces, replay refused).
+  verify), the full anti-squat sequence against a real relay (unsigned refused,
+  TOFU-pinned, wrong-key refused, same-key replaces, replay refused), and
+  **address-key binding** (only the committed address registers; a squatter can't
+  even craft a passable frame).
 - **`test/e2e.selftest.ts`** — spawns **two real relay processes**, registers a host
   with both, then: pair (address rendezvous + 6-char code) over uplink A → sealed
-  request → **kill A, fail over to B by token reconnect** → fresh token reconnect →
-  **revoke → next connect refused.** Prints PASS/FAIL per stage; non-zero exit on
-  any failure.
+  request → **pull usage (per-connection, `unlimited`)** → **kill A, fail over to B
+  by token reconnect** → fresh token reconnect → **revoke → reconnect refused with a
+  typed `DeviceRevokedError` + terminal `revoked` state (no endless retry).** Prints
+  PASS/FAIL per stage; non-zero exit on any failure.
 
 ## License
 

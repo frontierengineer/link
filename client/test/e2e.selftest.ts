@@ -17,9 +17,11 @@ import {
   connect,
   serveHost,
   generateHostIdentity,
+  DeviceRevokedError,
   type Connection,
   type Host,
   type ConnState,
+  type LinkUsage,
 } from '../src/index.js';
 
 // ── tiny stage harness ──
@@ -116,6 +118,7 @@ async function main(): Promise<void> {
   let host: Host | undefined;
   let conn: Connection | undefined;
   const states: ConnState[] = [];
+  const usageReports: LinkUsage[][] = [];
 
   await stage('1. spawn two Link server instances (A, B)', async () => {
     [linkA, linkB] = await Promise.all([spawnLink('A'), spawnLink('B')]);
@@ -130,6 +133,7 @@ async function main(): Promise<void> {
       pairingCode: PAIR_CODE,
       maxPairAttempts: 5,
       onRequest: (cmd) => cmd, // echo
+      onUsage: (conns) => usageReports.push(conns),
     });
     assert.equal(host.registeredCount, 2, 'registered to both uplinks');
   });
@@ -154,6 +158,22 @@ async function main(): Promise<void> {
   await stage('4. sealed request round-trips', async () => {
     const reply = await conn!.request({ echo: 'hello-1', n: 7 });
     assert.deepEqual(reply, { echo: 'hello-1', n: 7 }, 'host echoed the sealed request');
+  });
+
+  await stage('4b. host pulls usage: one connection, reported "unlimited" (no quota configured)', async () => {
+    host!.requestUsage();
+    // The pull answers on onUsage, once per uplink; find the uplink that owns the
+    // live connection. No quota is set on these relays, so it must be `unlimited`
+    // (never a zero fraction, which would leak that a limit exists).
+    const deadline = Date.now() + 4000;
+    let owned: LinkUsage[] | undefined;
+    while (Date.now() < deadline && !owned) {
+      owned = usageReports.find((r) => r.length > 0);
+      if (!owned) await sleep(50);
+    }
+    assert.ok(owned, 'a usage report named at least one connection');
+    assert.equal(owned!.length, 1, 'the host owns exactly one live connection');
+    assert.equal('unlimited' in owned![0]! && owned![0]!.unlimited, true, 'reported as unlimited, not a byte count or a zero fraction');
   });
 
   await stage('5. kill uplink A -> client fails over to B and token-reconnects', async () => {
@@ -181,20 +201,26 @@ async function main(): Promise<void> {
     assert.deepEqual(reply, { echo: 'reconnected' });
   });
 
-  await stage('7. revoke the device -> the next connect is refused', async () => {
+  await stage('7. revoke the device -> the reconnect fails auth: typed DeviceRevokedError + terminal "revoked", no endless retry', async () => {
     const cred = conn!.credential!;
     conn!.close();
     assert.equal(host!.revoke(cred.keyId), true, 'token revoked');
+    // autoReconnect is ON (default): a revoked device used to retry forever. Now the
+    // host's typed refusal makes the client STOP — connect() rejects with a
+    // DeviceRevokedError and the state surfaces the terminal 'revoked'.
+    const seen: ConnState[] = [];
     await assert.rejects(
       connect({
         uplinks: [linkB!.url],
         address: cred.address,
         credential: cred,
-        autoReconnect: false,
+        onState: (st) => seen.push(st),
         dial: { connectTimeoutMs: 4000, controlTimeoutMs: 4000 },
       }),
-      'a revoked credential must not be able to reconnect',
+      (e: unknown) => e instanceof DeviceRevokedError,
+      'a revoked credential is refused with a typed DeviceRevokedError',
     );
+    assert.ok(seen.includes('revoked'), 'the client surfaced the terminal "revoked" state');
   });
 
   // cleanup

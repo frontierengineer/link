@@ -7,13 +7,14 @@
 // Everything below composes the audited layers: linkClient (transport),
 // secureChannel (Noise + sealed stream), pairing (SPAKE2 + credentials).
 
-import { establish, HostUplinks, type Reach, type DialOptions } from './linkClient.js';
+import { establish, HostUplinks, type Reach, type DialOptions, type LinkUsage } from './linkClient.js';
 import {
   Mode,
   reconnectInitiator,
   reconnectResponder,
   SecureSession,
   SessionClosedError,
+  DeviceRevokedError,
   decodeHeader,
   type RequestHandler,
   type SessionOptions,
@@ -30,9 +31,9 @@ import {
   type IssuedDevice,
 } from './pairing.js';
 import { x25519Keygen, type KeyPair } from './crypto.js';
-import { registerSignerFromStatic } from './registerAuth.js';
+import { registerSignerFromStatic, addressForRegisterKey } from './registerAuth.js';
 import type { Pipe } from './pipe.js';
-import { utf8, toB64url, fromB64url, randomBytes } from './bytes.js';
+import { utf8, toB64url, fromB64url } from './bytes.js';
 
 export { Mode, SecureSession } from './secureChannel.js';
 export {
@@ -53,9 +54,14 @@ export {
   registerSignerFromStatic,
   makeRegisterAuth,
   registerSigningMessage,
+  addressForRegisterKey,
   type RegisterSigner,
   type RegisterAuth,
 } from './registerAuth.js';
+// A revoked/unknown device's reconnect surfaces this (terminal, not transient).
+export { DeviceRevokedError } from './secureChannel.js';
+// Per-connection relay usage (fractions / unlimited) — see serveHost onUsage.
+export type { LinkUsage } from './linkClient.js';
 
 // Generate a fresh host static identity (x25519). The host persists the private
 // key; clients pin the public key on first pair. This is the host's long-term
@@ -64,7 +70,10 @@ export function generateHostIdentity(): KeyPair {
   return x25519Keygen();
 }
 
-export type ConnState = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'failed';
+// 'revoked' is terminal like 'failed', but specifically means the host refused this
+// device's credential (revoked / unknown) — the app should forget the credential
+// and drive the user back to pairing rather than retry.
+export type ConnState = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'failed' | 'revoked';
 
 export interface ConnectOptions {
   uplinks: string[];
@@ -161,7 +170,15 @@ class ManagedConnection implements Connection {
   // so a wrong code surfaces immediately to the caller.
   async startFirst(): Promise<void> {
     const initial = this.initialMode();
-    const outcome = await this.attempt(initial.reach, initial.runHandshake);
+    let outcome: { outcome: HandshakeOutcome; via: string };
+    try {
+      outcome = await this.attempt(initial.reach, initial.runHandshake);
+    } catch (e) {
+      // A revoked credential on the very first connect is terminal: reflect it in the
+      // state (for onState observers) before rejecting connect().
+      if (e instanceof DeviceRevokedError) this.setState('revoked');
+      throw e;
+    }
     this.adopt(outcome);
     void this.monitor();
   }
@@ -281,7 +298,15 @@ class ManagedConnection implements Connection {
           const r = await this.attempt({ address: this._address }, (p) => this.runReconnect(p, cred));
           this.adopt(r);
           break;
-        } catch {
+        } catch (e) {
+          // Revocation is terminal: the credential is refused at every uplink, so
+          // stop retrying, go to 'revoked', and let waiters fail instead of looping
+          // forever on a device the host has cut off.
+          if (e instanceof DeviceRevokedError) {
+            this.setState('revoked');
+            this.failWaiters(new Error('device revoked: the host refused this credential'));
+            return;
+          }
           await sleep(delay);
           delay = Math.min(delay * 2, maxDelay);
         }
@@ -394,6 +419,11 @@ export interface ServeHostOptions {
   onRequest?: RequestHandler;
   onConnect?: (session: SecureSession, info: { keyId?: string; via: string; mode: Mode }) => void;
   onLog?: (event: string, detail: Record<string, unknown>) => void;
+  // Relay usage telemetry for this host's connections, as RELATIVE fractions (or
+  // `unlimited` when the operator set no quota) — never absolute bytes. Fires both
+  // on Link's unprompted pushes and in answer to requestUsage() pulls, with the
+  // same per-connection shape.
+  onUsage?: (connections: LinkUsage[]) => void;
   maxPairAttempts?: number; // default 5
   handshakeTimeoutMs?: number;
   // Reap an accepted session after this many ms with no inbound frame (defense-
@@ -415,14 +445,28 @@ export interface Host {
   // Open / close / rotate the active pairing code (single-use; cleared on a
   // successful pair or after too many wrong guesses).
   setPairingCode(code: string | null): void;
+  // Cut a device off: drop its token so its next reconnect fails auth and is
+  // refused with a typed DeviceRevokedError (and any live session it holds ends when
+  // its pipe next turns over). Returns whether the device existed. This is the
+  // single revocation point — the host consults the token store on every reconnect.
   revoke(keyId: string | Uint8Array): boolean;
+  // Pull the current usage of every connection this host owns, on every uplink. The
+  // answer(s) arrive via onUsage (same shape as an unprompted push).
+  requestUsage(): void;
   stop(): Promise<void>;
 }
 
 // Stand up a host: register with every uplink and accept introduced clients.
 export async function serveHost(opts: ServeHostOptions): Promise<Host> {
   const hostStatic = opts.hostStatic ?? x25519Keygen();
-  const address = opts.address ?? toB64url(randomBytes(16));
+  // Sign every registration with a key derived from the host static identity, so the
+  // Link pins it (TOFU) and refuses any squatter that does not hold the same key.
+  const registerSigner = registerSignerFromStatic(hostStatic.priv);
+  // Default the address to the COMMITMENT to that register key. A Link that enforces
+  // address-key binding then rejects any register whose address is not this, so the
+  // address cannot be squatted or raced at all. An explicit opts.address overrides
+  // (for the legacy opaque-address model, or a Link with binding disabled).
+  const address = opts.address ?? addressForRegisterKey(registerSigner.pub);
   const tokens = opts.tokens ?? new TokenStore();
   const lockout = new CodeLockout(opts.maxPairAttempts ?? 5);
   const sessions = new Set<SecureSession>();
@@ -536,14 +580,12 @@ export async function serveHost(opts: ServeHostOptions): Promise<Host> {
 
   const uplinkMgr = new HostUplinks(opts.uplinks, {
     address,
-    // Sign every registration with a key derived from the host static identity, so
-    // the Link pins it (TOFU) and refuses any squatter that does not hold the same
-    // key. Derived, not the DH scalar itself; the address is unchanged.
-    registerSigner: registerSignerFromStatic(hostStatic.priv),
+    registerSigner,
     ...(opts.maxConcurrentDialBacks !== undefined ? { maxConcurrentDialBacks: opts.maxConcurrentDialBacks } : {}),
     // Return the handshake promise (don't `void` it) so HostUplinks holds the
     // dial-back slot for the whole introduced handshake — a hard concurrency cap.
     onIntroduced: (pipe, via) => onIntroduced(pipe, via),
+    ...(opts.onUsage ? { onUsage: opts.onUsage } : {}),
     ...(opts.onLog ? { onLog: opts.onLog } : {}),
   });
   await uplinkMgr.start();
@@ -567,6 +609,9 @@ export async function serveHost(opts: ServeHostOptions): Promise<Host> {
     },
     revoke(keyId: string | Uint8Array): boolean {
       return tokens.revoke(keyId);
+    },
+    requestUsage(): void {
+      uplinkMgr.requestUsage();
     },
     async stop(): Promise<void> {
       uplinkMgr.stop();

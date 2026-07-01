@@ -16,6 +16,10 @@ import {
   seal,
   open,
   SealedError,
+  DeviceRevokedError,
+  encodeRefusal,
+  parseRefusal,
+  RefuseReason,
   Mode,
 } from '../src/secureChannel.js';
 import { memoryPipePair, type Pipe } from '../src/pipe.js';
@@ -164,13 +168,26 @@ test('reconnect: a wrong device token fails the handshake', async () => {
   );
 });
 
-test('reconnect: an unknown/revoked keyId is refused immediately', async () => {
+test('reconnect: an unknown/revoked keyId is refused as a typed DeviceRevokedError', async () => {
   const [c, h] = memoryPipePair();
   const hostStatic = x25519Keygen();
+  // resolveToken → undefined (revoked/unknown): both ends must surface the typed,
+  // terminal DeviceRevokedError, so a client can tell "I've been cut off" apart from
+  // "the relay briefly dropped".
   await assert.rejects(
     runReconnect(c, h, { hostStaticPub: hostStatic.pub, token: randomBytes(32), keyId: randomBytes(16) }, hostStatic, () => undefined),
-    /unknown or revoked/,
+    (e: unknown) => e instanceof DeviceRevokedError && /unknown or revoked/.test((e as Error).message),
   );
+});
+
+test('refusal frame: encodes/parses the revoked reason and never collides with a Noise msg2', () => {
+  const frame = encodeRefusal(RefuseReason.revoked);
+  assert.equal(parseRefusal(frame), RefuseReason.revoked);
+  // A real Noise handshake message (>=48 bytes, random ephemeral) is never mistaken
+  // for a refusal, and neither is arbitrary sealed ciphertext.
+  assert.equal(parseRefusal(randomBytes(48)), null);
+  assert.equal(parseRefusal(randomBytes(6)), null);
+  assert.equal(parseRefusal(new Uint8Array(0)), null);
 });
 
 // The sealed-transport guarantees, tested directly on a matched key pair.

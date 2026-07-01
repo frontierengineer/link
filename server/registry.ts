@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { TokenBucket } from './bucket';
+import type { UsageEntry } from './types';
 
 // All state Link ever holds, in one in-memory registry. Nothing here survives a
 // restart, and that is the design: hosts re-register their address, clients
@@ -221,6 +222,26 @@ export class Registry<S> {
     link.lastActivity = this.now() + waitMs;
     const usage = this.usageEvent(link);
     return usage ? { waitMs, usage } : { waitMs };
+  }
+
+  // A single connection's usage in Link's outward vocabulary: a 0..1 fraction of
+  // the hourly allowance (+ the throttle flag) when a quota is configured, or an
+  // explicit `unlimited` when it is not — never absolute bytes, never the limit
+  // itself. Both the push (usageEvent) and the pull (usageForHost) speak this.
+  usageSnapshot(link: Link<S>): UsageEntry {
+    if (!link.quota) return { linkId: link.id, unlimited: true };
+    return { linkId: link.id, used: round4(1 - link.quota.fraction()), throttled: link.throttled };
+  }
+
+  // Every live connection owned by one host control socket, each broken out on its
+  // own. This is the "give me everything this host owns" pull: a host names no link
+  // id, so it can only ever see the usage of connections it actually holds.
+  usageForHost(hostControl: S): UsageEntry[] {
+    const out: UsageEntry[] = [];
+    for (const link of this.links.values()) {
+      if (link.state === 'relaying' && link.hostControl === hostControl) out.push(this.usageSnapshot(link));
+    }
+    return out;
   }
 
   // A usage event is due when the used fraction crossed a tier or the throttled

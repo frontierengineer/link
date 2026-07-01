@@ -38,6 +38,15 @@ export interface ResolveMessage {
   address: string;
 }
 
+// Host → Link, on the authenticated control socket: "report the usage of every
+// connection I own." There is deliberately NO link selector — a host pulls the
+// AGGREGATE for all of its live connections at once, so it can never probe a link
+// it does not own. The reply is a `usage` message (the SAME shape Link pushes
+// unprompted on tier crossings), so push and pull are interchangeable.
+export interface GetUsageMessage {
+  type: 'getUsage';
+}
+
 export interface RelayMessage {
   type: 'relay';
   linkId: string;
@@ -48,7 +57,20 @@ export interface AcceptMessage {
   linkId: string;
 }
 
-export type ClientMessage = RegisterMessage | ResolveMessage | RelayMessage | AcceptMessage;
+export type ClientMessage = RegisterMessage | ResolveMessage | RelayMessage | AcceptMessage | GetUsageMessage;
+
+// One connection's usage, spoken in RELATIVE terms only. Link never puts absolute
+// bytes or its own limit configuration on the wire, so a host cannot reverse-
+// engineer the operator's byte budget from what it sees:
+//   • quota configured  → `used` is the fraction of the hourly allowance consumed
+//     (0..1) and `throttled` says whether the connection is pinned to the trickle
+//     floor. `used` is a proportion, never a byte count.
+//   • no quota (self-hosted / unlimited) → `unlimited: true`. This is reported
+//     EXPLICITLY rather than as `used: 0`, so "no limit" is never confused with
+//     "limit that happens to be untouched".
+export type UsageEntry =
+  | { linkId: string; used: number; throttled: boolean }
+  | { linkId: string; unlimited: true };
 
 export type ServerMessage =
   | { type: 'registered'; address: string }
@@ -56,11 +78,12 @@ export type ServerMessage =
   | { type: 'arrived'; linkId: string; address: string }
   | { type: 'relay'; linkId: string }
   | { type: 'relaying'; linkId: string }
-  // Relay usage, pushed to the host's control socket only while the hourly quota
-  // knob is on. `used` is the fraction of the hourly allowance consumed (0..1) —
-  // fractions, never bytes, are Link's outward usage vocabulary — and `throttled`
-  // says whether the link is currently pinned to the trickle floor.
-  | { type: 'usage'; linkId: string; used: number; throttled: boolean }
+  // Relay usage for every live connection the receiving control socket owns, each
+  // broken out per connection. Sent two ways with the SAME shape: PUSHED unprompted
+  // when a connection crosses a usage tier or flips its throttle flag (rate-limited
+  // per connection), and PULLED on demand in reply to `getUsage`. See UsageEntry
+  // for why it is fractions/`unlimited`, never bytes or limits.
+  | { type: 'usage'; connections: UsageEntry[] }
   | { type: 'error'; error: string };
 
 // Application close codes (4000-4999). The close code is the protocol's way of
@@ -83,8 +106,13 @@ export const Close = {
   // A register was missing a valid signed `auth`, or its signature/timestamp did
   // not check out: the registrant cannot prove it holds the address's key, so it
   // is refused outright (distinct from 4005, which retires a SUPERSEDED but
-  // validly-signed socket).
+  // validly-signed socket). Also covers a register whose address is not the
+  // commitment to its own key when address-key binding is enforced.
   registerAuth: 4007,
+  // The register's signature was valid, but the relay is in CLOSED mode and this
+  // host's register key is not on the operator's allowlist. Distinct from 4007:
+  // the key is genuine, it is simply not authorized on this instance.
+  registerUnauthorized: 4010,
   // Reserved, never sent: 4001 (unused), 4008/4009 (former rate/quota closes —
   // those caps now SHAPE flow instead of closing). Kept reserved so they are
   // never reused to mean something new to an older client.

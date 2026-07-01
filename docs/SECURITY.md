@@ -124,6 +124,13 @@ per-direction monotonic counter nonce. Tampering fails the authentication tag; a
 replayed or reordered frame is rejected by the counter. Distinct keys per direction
 guarantee a nonce is never reused under a key.
 
+This is **message-layer** encryption on a **plain** WebSocket (`ws`) — *not* a
+"secure WebSocket", and the guarantee does **not** depend on TLS. A TLS-terminating
+front (so clients dial `wss://`) is ordinary web hygiene and may add a thin privacy
+layer against a passive on-path observer, but Link's confidentiality, integrity, and
+authenticity are already complete before a byte reaches the socket. Run Link over
+plain `ws` and you lose none of them.
+
 ## Anti-squat: even the routing layer is authenticated
 
 The address is not secret, so what stops someone who learns it from registering it
@@ -131,11 +138,40 @@ out from under the genuine host (a denial of rendezvous)? Every `register` is
 **signed** (Ed25519), and Link **pins** the key on first use (trust-on-first-use):
 thereafter only the holder of that key can register the address, and only with a
 strictly newer timestamp (so a captured frame can't be replayed). A party that
-knows the address but not the key is refused without disturbing the genuine holder.
-See [PROTOCOL.md §6](./PROTOCOL.md).
+knows the address but not the key is refused — and, if the genuine host registered
+first, without disturbing it. See [PROTOCOL.md §6](./PROTOCOL.md).
 
-(End-to-end crypto would stop impersonation even without this — but anti-squat
-protects the *introduction itself* from being hijacked or denied.)
+Three additive gates harden the **introduction plane** further. None touches the
+end-to-end crypto — a hostile Link is exactly as harmless with them as without — and
+all are pure config, so Link stays stateless and content-blind:
+
+- **Address-key binding (default on).** The address *is* the commitment to the
+  register key, `base64url(SHA-256(pub))`. A squatter can no longer even *present* a
+  frame for your address — no key it holds hashes to it — so the "who registers
+  first" race disappears and the routing layer becomes spoof-**proof**, not merely
+  spoof-survivable.
+- **Origin binding.** A register signature is bound to the specific Link authority
+  it is sent to, so a still-fresh frame captured at one Link cannot be replayed to a
+  different one.
+- **Closed mode.** An operator can require every register key to be on a supplied
+  allowlist, so only known hosts may register on that instance. This gates *who may
+  use the relay*; it does not weaken *anyone's* end-to-end guarantees.
+
+(End-to-end crypto would stop impersonation even without any of this — but the
+introduction plane protects the *introduction itself* from being hijacked or denied.)
+
+## Revoking a lost device
+
+A device authenticates on reconnect by **possessing its token** (the Noise PSK),
+looked up by `keyId`. Revoking a device is simply **dropping that token** from the
+host's store: the very next reconnect finds no token and is refused. Revocation
+lives entirely at the **host**, never at Link — Link is content-blind and never sees
+a token. So a lost phone is cut off the instant it is revoked, and stays cut off
+across host restarts (the store is the source of truth). The host tells the refused
+device so *distinguishably* — a typed "revoked" signal it can tell apart from a
+transient drop — so the client stops retrying and prompts a re-pair instead of
+spinning forever. That signal is a courtesy to the honest client; a revoked or
+hostile device learns only that it was revoked, which changes nothing it can do.
 
 ## What a malicious Link *can* do, and the answer
 

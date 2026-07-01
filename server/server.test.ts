@@ -5,7 +5,13 @@ import type { AddressInfo } from 'node:net';
 import { WebSocket, WebSocketServer } from 'ws';
 import type { Config } from './config';
 import { createLinkServer, type LinkServer } from './server';
-import { registerSigningMessage } from './registerAuth';
+import { registerSigningMessage, addressForRegisterKey } from './registerAuth';
+
+// The tests pin a fixed canonical origin so the hand-rolled signer and the server
+// agree on the origin bound into every register signature (in production the client
+// derives it from the uplink URL and the server from the Host header; here we just
+// fix both). Real client↔server origin interop is exercised by the e2e self-test.
+const TEST_ORIGIN = 'test.link';
 
 // A test host: a fresh Ed25519 keypair + an `auth` builder that mirrors the
 // client (link/client/src/registerAuth.ts). Signing here with Node's crypto and
@@ -13,14 +19,20 @@ import { registerSigningMessage } from './registerAuth';
 // self-test exercises @noble-sign ↔ Node-verify.
 function makeSigner(): {
   pub: string;
+  pubRaw: Buffer;
+  // The address this key COMMITS to (base64url(sha256(pub))), for binding tests.
+  boundAddress: string;
   auth: (address: string, ts?: number, nonce?: string) => { alg: 'ed25519'; pub: string; ts: number; nonce: string; sig: string };
 } {
   const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
   const pub = (publicKey.export({ format: 'jwk' }) as { x: string }).x;
+  const pubRaw = Buffer.from(pub, 'base64url');
   return {
     pub,
+    pubRaw,
+    boundAddress: addressForRegisterKey(pubRaw),
     auth(address, ts = Date.now(), nonce = crypto.randomBytes(16).toString('base64url')) {
-      const sig = crypto.sign(null, registerSigningMessage(address, ts, nonce), privateKey).toString('base64url');
+      const sig = crypto.sign(null, registerSigningMessage(address, ts, nonce, TEST_ORIGIN), privateKey).toString('base64url');
       return { alg: 'ed25519', pub, ts, nonce, sig };
     },
   };
@@ -35,6 +47,11 @@ function config(overrides: Partial<Config> = {}): Config {
     relayIdleSec: 300,
     ipRatePerMin: 0,
     trustProxy: false,
+    allowedRegisterKeys: new Set<string>(),
+    // Default the anti-squat tests to the legacy opaque-address model so they can use
+    // arbitrary addresses; the dedicated binding tests turn this on explicitly.
+    bindAddressToKey: false,
+    origin: TEST_ORIGIN,
     ...overrides,
   };
 }
@@ -44,6 +61,17 @@ function sleep(ms: number): Promise<void> {
 }
 
 interface Frame { data: Buffer; isBinary: boolean }
+
+interface UsageConn { linkId: string; used?: number; throttled?: boolean; unlimited?: boolean }
+
+// Pull one connection's entry out of an aggregate `usage` message (the shape both
+// the push and the getUsage pull now carry: `{ type:'usage', connections:[...] }`).
+function usageOf(msg: Record<string, unknown>, linkId: string): UsageConn {
+  const conns = (msg.connections ?? []) as UsageConn[];
+  const entry = conns.find((c) => c.linkId === linkId);
+  assert.ok(entry, `usage report carries an entry for ${linkId}`);
+  return entry;
+}
 
 // A tiny protocol client: JSON control messages land in a queue keyed off
 // `type`; anything else (binary, or text that is not JSON — i.e. relayed
@@ -157,16 +185,16 @@ async function start(overrides: Partial<Config> = {}): Promise<{
 // Establish a relaying link: host registers an address (signed), a client
 // resolves it and asks for a relay, the host dials back the dedicated relay
 // socket.
-async function establishRelay(s: Awaited<ReturnType<typeof start>>): Promise<{
+async function establishRelay(s: Awaited<ReturnType<typeof start>>, address = 'addr-1'): Promise<{
   hostControl: Client; hostRelay: Client; client: Client; linkId: string;
 }> {
   const hostControl = await s.connect();
   const host = makeSigner();
-  hostControl.send({ type: 'register', address: 'addr-1', auth: host.auth('addr-1') });
+  hostControl.send({ type: 'register', address, auth: host.auth(address) });
   await hostControl.next('registered');
 
   const client = await s.connect();
-  client.send({ type: 'resolve', address: 'addr-1' });
+  client.send({ type: 'resolve', address });
   const found = await client.next('found');
   const linkId = found.linkId as string;
 
@@ -369,18 +397,18 @@ test('relay: a frame bigger than the whole burst just waits for tokens instead o
 test('relay: quota exhaustion drops to the trickle floor — frames keep flowing and the host control socket hears about it', async () => {
   const s = await start({ relayHourlyBytes: 2000, relayTrickleBps: 1024 }); // trickle burst 2048
   try {
-    const { hostControl, hostRelay, client } = await establishRelay(s);
+    const { hostControl, hostRelay, client, linkId } = await establishRelay(s);
 
     client.sendFrame(Buffer.alloc(1500)); // within quota: instant
     assert.equal((await hostRelay.nextFrame()).data.length, 1500);
-    const first = await hostControl.next('usage');
+    const first = usageOf(await hostControl.next('usage'), linkId);
     assert.ok((first.used as number) >= 0.74 && (first.used as number) <= 0.76, `used=${first.used}`);
     assert.equal(first.throttled, false);
 
     await sleep(1100); // clear the per-link usage event rate limit
     client.sendFrame(Buffer.alloc(2048)); // empties the quota; shortfall rides the trickle burst
     assert.equal((await hostRelay.nextFrame()).data.length, 2048);
-    const flip = await hostControl.next('usage');
+    const flip = usageOf(await hostControl.next('usage'), linkId);
     assert.equal(flip.used, 1);
     assert.equal(flip.throttled, true);
 
@@ -411,11 +439,11 @@ test('relay: quota exhaustion drops to the trickle floor — frames keep flowing
 test('usage: fraction tier crossings reach the host control socket; same-tier traffic stays quiet', async () => {
   const s = await start({ relayHourlyBytes: 100_000 });
   try {
-    const { hostControl, hostRelay, client } = await establishRelay(s);
+    const { hostControl, hostRelay, client, linkId } = await establishRelay(s);
     const expectUsage = async (bytes: number, around: number) => {
       client.sendFrame(Buffer.alloc(bytes));
       await hostRelay.nextFrame();
-      const usage = await hostControl.next('usage');
+      const usage = usageOf(await hostControl.next('usage'), linkId);
       assert.ok(Math.abs((usage.used as number) - around) < 0.015,
         `used=${usage.used}, expected ~${around}`);
       assert.equal(usage.throttled, false);
@@ -499,6 +527,131 @@ test('foot-gun guard: Link has no "code" vocabulary — a code-bearing register/
     const res = await s.connect();
     res.send({ type: 'resolve', code: 'ABC123' });
     assert.equal(await res.closed, 4000, 'a code-bearing resolve (no address) is a bad request');
+  } finally {
+    await s.stop();
+  }
+});
+
+test('closed mode: only allowlisted register keys may register; a genuine but unlisted key gets 4010', async () => {
+  const allowed = makeSigner();
+  const unlisted = makeSigner();
+  const s = await start({ allowedRegisterKeys: new Set([allowed.pub]) });
+  try {
+    // An allowlisted host registers normally.
+    const a = await s.connect();
+    a.send({ type: 'register', address: 'addr-allowed', auth: allowed.auth('addr-allowed') });
+    await a.next('registered');
+
+    // A host with a valid signature but an UNLISTED key is refused with 4010
+    // (distinct from 4007: the signature is genuine, the key is just not authorized).
+    const b = await s.connect();
+    b.send({ type: 'register', address: 'addr-unlisted', auth: unlisted.auth('addr-unlisted') });
+    assert.equal(await b.closed, 4010);
+
+    // The allowlisted host is reachable; the unlisted one never registered.
+    const c = await s.connect();
+    c.send({ type: 'resolve', address: 'addr-allowed' });
+    assert.ok((await c.next('found')).linkId);
+    const d = await s.connect();
+    d.send({ type: 'resolve', address: 'addr-unlisted' });
+    assert.equal((await d.next('error')).error, 'unknown_address');
+  } finally {
+    await s.stop();
+  }
+});
+
+test('address-key binding: an arbitrary address is refused; the key-committed address is accepted; a squatter cannot forge it', async () => {
+  const s = await start({ bindAddressToKey: true });
+  try {
+    const host = makeSigner();
+
+    // With binding on, the address MUST equal base64url(sha256(pub)); an arbitrary
+    // address (even validly signed) is refused with 4007.
+    const bad = await s.connect();
+    bad.send({ type: 'register', address: 'arbitrary-addr', auth: host.auth('arbitrary-addr') });
+    assert.equal(await bad.closed, 4007);
+
+    // The committed address is accepted.
+    const good = await s.connect();
+    good.send({ type: 'register', address: host.boundAddress, auth: host.auth(host.boundAddress) });
+    assert.equal((await good.next('registered')).address, host.boundAddress);
+
+    // A squatter cannot present a key whose commitment equals the victim's address,
+    // so signing the victim's address with a DIFFERENT key fails binding (4007). The
+    // squat race is impossible, not merely refused after the fact.
+    const squatter = makeSigner();
+    const sq = await s.connect();
+    sq.send({ type: 'register', address: host.boundAddress, auth: squatter.auth(host.boundAddress) });
+    assert.equal(await sq.closed, 4007);
+
+    // ...and the genuine host is undisturbed.
+    const probe = await s.connect();
+    probe.send({ type: 'resolve', address: host.boundAddress });
+    assert.ok((await probe.next('found')).linkId);
+  } finally {
+    await s.stop();
+  }
+});
+
+test('origin binding: a register signed for a different Link origin is refused (4007)', async () => {
+  // The server expects registers bound to 'other.link'; makeSigner binds TEST_ORIGIN.
+  const s = await start({ origin: 'other.link' });
+  try {
+    const host = makeSigner();
+    const a = await s.connect();
+    a.send({ type: 'register', address: 'addr-origin', auth: host.auth('addr-origin') });
+    assert.equal(await a.closed, 4007);
+  } finally {
+    await s.stop();
+  }
+});
+
+test('usage pull: a host gets fractions for exactly the connections it owns — and only those', async () => {
+  const s = await start({ relayHourlyBytes: 100_000 });
+  try {
+    const h1 = await establishRelay(s, 'addr-A');
+    const h2 = await establishRelay(s, 'addr-B');
+
+    // Move 10% on h1 (below the first push tier, so nothing is pushed) and pull.
+    h1.client.sendFrame(Buffer.alloc(10_000));
+    await h1.hostRelay.nextFrame();
+    h1.hostControl.send({ type: 'getUsage' });
+    const report = await h1.hostControl.next('usage');
+    const conns = report.connections as UsageConn[];
+    assert.equal(conns.length, 1, 'h1 sees only its own single connection, not h2\'s');
+    const e = usageOf(report, h1.linkId);
+    assert.ok((e.used as number) >= 0.09 && (e.used as number) <= 0.11, `used=${e.used}`);
+    assert.equal(e.throttled, false);
+    // h2's link id never appears in h1's report.
+    assert.equal(conns.some((c) => c.linkId === h2.linkId), false);
+  } finally {
+    await s.stop();
+  }
+});
+
+test('usage pull: with no quota configured, connections report unlimited (not a zero fraction)', async () => {
+  const s = await start(); // relayHourlyBytes default 0 → unlimited
+  try {
+    const { hostControl, hostRelay, client, linkId } = await establishRelay(s);
+    client.sendFrame(Buffer.alloc(1000));
+    await hostRelay.nextFrame();
+    hostControl.send({ type: 'getUsage' });
+    const report = await hostControl.next('usage');
+    const e = usageOf(report, linkId);
+    assert.equal(e.unlimited, true, 'no limit ⇒ unlimited, so a byte budget cannot be reverse-engineered');
+    assert.equal(e.used, undefined);
+    assert.equal(e.throttled, undefined);
+  } finally {
+    await s.stop();
+  }
+});
+
+test('usage pull: a socket that is not a registered host is refused (4000)', async () => {
+  const s = await start();
+  try {
+    const probe = await s.connect();
+    probe.send({ type: 'getUsage' });
+    assert.equal(await probe.closed, 4000);
   } finally {
     await s.stop();
   }

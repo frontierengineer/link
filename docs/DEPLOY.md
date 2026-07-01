@@ -164,6 +164,35 @@ that *closes* is a peer that stops draining (below).
 - **`LINK_PORT`** (default `80`; Cloud Run uses `8080`, the value of `$PORT`) — listen
   port.
 
+### Access control (introduction plane)
+
+These gate *who may register* and bind the register signature more tightly. They are
+additive checks on the introduction plane — they never touch the end-to-end crypto,
+and they are pure config (no per-host state, so Link stays stateless and scales the
+same way).
+
+- **`LINK_ALLOWED_REGISTER_KEYS`** (default empty ⇒ **open**) — a comma-separated
+  list of authorized register public keys (base64url). Non-empty ⇒ **closed** mode:
+  only a host whose register key is listed may register; any other *validly signed*
+  register is refused with close `4010`. A host's register key is
+  `registerSignerFromStatic(hostStatic.priv).pub` (the client library exposes it);
+  the address it derives is `base64url(SHA-256(that key))`.
+- **`LINK_ALLOWED_REGISTER_KEYS_FILE`** (default empty) — a file of allowlisted keys
+  (one per line, blank lines and `#` comments ignored), unioned with the inline list.
+  Handy for a longer or externally-managed allowlist. Adding/removing a host is a
+  config change + restart — deliberately simple, with no dynamic pairing state.
+- **`LINK_BIND_ADDRESS_TO_KEY`** (default `1` = on) — require every register's address
+  to be `base64url(SHA-256(register key))`. On ⇒ an address is a commitment to a key
+  nobody else holds, so it cannot be squatted or raced *at all* (a mismatch is refused
+  `4007`). Set `0` for the legacy opaque-address model (any operator-chosen
+  high-entropy handle). Leave it on unless you must interoperate with hosts that mint
+  their own arbitrary addresses.
+- **`LINK_ORIGIN`** (default: derived from each request's `Host` header) — the
+  canonical `host[:port]` clients dial this instance at, folded into register
+  signatures so a captured frame can't be replayed at a *different* Link. The default
+  is correct unless a proxy rewrites `Host`; if it does, set this to the public
+  authority (e.g. `link.example.com`).
+
 Hard limits that are *not* env-tunable (they bound memory/abuse): control frames
 ≤ 4 KiB, relay frames ≤ 16 MiB, ≤ 64 concurrent dial-backs per host per uplink. A
 peer that stops draining past 64 MiB buffered is cut (close `4006`).

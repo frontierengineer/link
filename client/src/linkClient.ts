@@ -13,6 +13,26 @@
 import { WebSocket, type RawData } from 'ws';
 import { type Pipe, type CloseInfo, PipeClosedError, PipeTimeoutError } from './pipe.js';
 import { makeRegisterAuth, type RegisterSigner } from './registerAuth.js';
+import { DeviceRevokedError } from './secureChannel.js';
+
+// One live connection's usage as Link reports it: a 0..1 fraction of the hourly
+// allowance (+ throttle flag) when the operator set a quota, or `unlimited` when
+// they did not. Relative amounts only — Link never puts absolute bytes or its own
+// limit on the wire.
+export type LinkUsage =
+  | { linkId: string; used: number; throttled: boolean }
+  | { linkId: string; unlimited: true };
+
+// The uplink authority (host[:port], lowercased) to bind a register signature to.
+// Best-effort: a URL we cannot parse binds an empty origin, matching a server that
+// derives the same from a missing/oddly-shaped request.
+function originOf(url: string): string {
+  try {
+    return new URL(url).host.toLowerCase();
+  } catch {
+    return '';
+  }
+}
 
 // Match the Link server's hard frame cap (16 MiB). ws defaults to 100 MiB, which
 // would let a peer pin far more memory than the relay ever would; cap every socket
@@ -281,8 +301,12 @@ export async function establish<T>(
       const result = await runHandshake(sock); // sock is now a live Pipe
       return { result, pipe: sock, via: `relay:${url}` };
     } catch (e) {
-      attempts.push({ url, error: `relay: ${errMsg(e)}` });
       sock.close('relay failed');
+      // A revoked device is revoked at every uplink (the host, not the Link, holds
+      // the token store), so there is nothing to fail over TO — surface it at once
+      // instead of grinding through the rest and reporting "all uplinks failed".
+      if (e instanceof DeviceRevokedError) throw e;
+      attempts.push({ url, error: `relay: ${errMsg(e)}` });
       continue;
     }
   }
@@ -318,6 +342,10 @@ export interface HostUplinksOptions {
   // budget, never starve an honest uplink's. Default 64 (far above honest load).
   maxConcurrentDialBacks?: number;
   onLog?: (event: string, detail: Record<string, unknown>) => void;
+  // Relay usage telemetry. Fires with the usage of every connection this host owns
+  // — both when Link PUSHES it (a connection crossed a tier / flipped throttle) and
+  // when it answers a `requestUsage()` PULL, since both carry the same shape.
+  onUsage?: (connections: LinkUsage[]) => void;
 }
 
 // Holds the host's outbound control sockets and keeps them registered. This is
@@ -343,14 +371,15 @@ export class HostUplinks {
     await Promise.all(this.uplinks.map((u) => this.connectAndRegister(u).catch(() => this.scheduleReconnect(u))));
   }
 
-  // Build a signed `register` frame. A fresh signature (new ts + nonce) is minted
-  // per call, so every (re)connect carries a unique, replay-resistant frame the
-  // server can verify against the pinned key.
-  private addressRegister(): ControlMsg {
+  // Build a signed `register` frame for a specific uplink. A fresh signature (new
+  // ts + nonce) is minted per call, so every (re)connect carries a unique, replay-
+  // resistant frame; the uplink's origin is bound in so the frame cannot be
+  // replayed at a different Link.
+  private addressRegister(url: string): ControlMsg {
     return {
       type: 'register',
       address: this.opts.address,
-      auth: makeRegisterAuth(this.opts.registerSigner, this.opts.address),
+      auth: makeRegisterAuth(this.opts.registerSigner, this.opts.address, originOf(url)),
     };
   }
 
@@ -358,7 +387,7 @@ export class HostUplinks {
     if (this.stopped) return;
     const ws = await openWs(url, this.opts.connectTimeoutMs ?? 8_000);
     const sock = new LinkSocket(ws);
-    sock.sendControl(this.addressRegister());
+    sock.sendControl(this.addressRegister(url));
     const ack = await sock.waitControl(this.opts.controlTimeoutMs ?? 8_000);
     if (ack.type !== 'registered') {
       sock.close('register rejected');
@@ -375,9 +404,21 @@ export class HostUplinks {
     });
   }
 
+  // Send a usage PULL on every registered uplink. The host owns independent
+  // connections on each Link it registered with, so it asks each; the answers
+  // arrive on onUsage exactly like an unsolicited push.
+  requestUsage(): void {
+    for (const sock of this.sockets.values()) sock.sendControl({ type: 'getUsage' });
+  }
+
   private onControl(url: string, msg: ControlMsg): void {
-    // The only control message that needs action: the relay dial-back request.
-    // 'arrived' is informational; 'usage' is quota telemetry — both ignored.
+    // 'usage' is relay telemetry (per-connection fractions / unlimited) — hand it to
+    // the app if it asked. 'arrived' is informational and ignored.
+    if (msg.type === 'usage' && Array.isArray(msg.connections)) {
+      this.opts.onUsage?.(msg.connections as LinkUsage[]);
+      return;
+    }
+    // The only control message that needs internal action: the relay dial-back.
     if (msg.type === 'relay' && typeof msg.linkId === 'string') {
       // Bound concurrent dial-backs PER UPLINK: a compromised/malicious Link
       // (UNTRUSTED) could otherwise fire relay control messages faster than they

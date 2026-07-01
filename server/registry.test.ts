@@ -31,6 +31,15 @@ function makeRelayingLink(reg: Registry<Sock>) {
   return reg.acceptRelay(link.id, { name: 'relay' })!;
 }
 
+// Like makeRelayingLink, but keep a handle on the host control socket so the
+// per-host usage aggregate can be queried.
+function makeOwnedRelay(reg: Registry<Sock>, address: string, control: Sock) {
+  reg.registerAddress(control, address, { pub: `pin-${address}`, ts: 1 });
+  const link = reg.lookupAddress({ name: 'client' }, address)!.link;
+  reg.requestRelay(link);
+  return reg.acceptRelay(link.id, { name: 'relay' })!;
+}
+
 test('address: TOFU-pinned, same key renews/replaces, a different key is refused, dropSocket only forgets its own entry', () => {
   const c = clock();
   const reg = makeRegistry(c);
@@ -158,4 +167,31 @@ test('quota: exhaustion degrades to the trickle floor; usage events fire on tier
   const live = (reg.stats() as { liveLinks: { usedFraction: number; throttled: boolean }[] }).liveLinks[0];
   assert.equal(live.usedFraction, 0.01);
   assert.equal(live.throttled, false);
+});
+
+test('usage aggregate: per-host, owner-scoped; unlimited without a quota, a fraction with one', () => {
+  const c = clock();
+  const reg = makeRegistry(c); // no quota configured
+  const h1: Sock = { name: 'control-1' };
+  const h2: Sock = { name: 'control-2' };
+  const l1 = makeOwnedRelay(reg, 'addr-1', h1);
+  const l2 = makeOwnedRelay(reg, 'addr-2', h2);
+
+  // No quota ⇒ each connection is reported UNLIMITED, never used:0 (so a byte
+  // budget can't be inferred), and a host only ever sees its own connection.
+  assert.deepEqual(reg.usageForHost(h1), [{ linkId: l1.id, unlimited: true }]);
+  assert.deepEqual(reg.usageForHost(h2), [{ linkId: l2.id, unlimited: true }]);
+  // A socket owning nothing gets an empty report.
+  assert.deepEqual(reg.usageForHost({ name: 'stranger' }), []);
+});
+
+test('usage aggregate: with a quota, reports the per-connection fraction and throttle flag', () => {
+  const c = clock();
+  const reg = makeRegistry(c, { relayHourlyBytes: 10_000 });
+  const control: Sock = { name: 'control' };
+  const link = makeOwnedRelay(reg, 'addr', control);
+
+  reg.chargeFrame(link, 'client', 2500); // 25% of the hourly allowance
+  assert.deepEqual(reg.usageForHost(control), [{ linkId: link.id, used: 0.25, throttled: false }]);
+  assert.deepEqual(reg.usageSnapshot(link), { linkId: link.id, used: 0.25, throttled: false });
 });

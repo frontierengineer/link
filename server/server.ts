@@ -28,6 +28,9 @@ interface Shaped {
 
 interface Ctx {
   ip: string;
+  // The Link authority this socket dialed (host[:port], lowercased), folded into
+  // register-signature verification so a frame signed for another Link is refused.
+  origin: string;
   role: Role;
   link?: Link<WebSocket>;
   alive: boolean;
@@ -131,9 +134,19 @@ export function createLinkServer(config: Config): LinkServer {
       close(ws, Close.badRequest, 'register: address required');
       return;
     }
-    const verified = verifyRegisterAuth(msg.address, msg.auth, Date.now());
+    const verified = verifyRegisterAuth(msg.address, msg.auth, Date.now(), {
+      origin: ctx.origin,
+      bindAddressToKey: config.bindAddressToKey,
+    });
     if (!verified) {
       close(ws, Close.registerAuth, 'register: a valid signed auth is required');
+      return;
+    }
+    // Closed mode: the signature is genuine, but this instance only registers hosts
+    // whose register key the operator put on the allowlist. Empty allowlist ⇒ open,
+    // and this check never fires.
+    if (config.allowedRegisterKeys.size > 0 && !config.allowedRegisterKeys.has(verified.pub)) {
+      close(ws, Close.registerUnauthorized, 'register: this host is not authorized on this relay');
       return;
     }
     ctx.role = 'control';
@@ -268,7 +281,10 @@ export function createLinkServer(config: Config): LinkServer {
     const link = ctx.link!;
     const from = ctx.role === 'relay' ? 'host' : 'client';
     const { waitMs, usage } = registry.chargeFrame(link, from, data.length);
-    if (usage) sendJson(link.hostControl, { type: 'usage', linkId: link.id, ...usage });
+    // A meaningful change on this link (tier crossing / throttle flip) pushes the
+    // host the up-to-date usage of ALL the connections it owns — the same aggregate
+    // shape a `getUsage` pull returns, so push and pull are interchangeable.
+    if (usage) sendJson(link.hostControl, { type: 'usage', connections: registry.usageForHost(link.hostControl) });
     const q = ctx.shaped ?? (ctx.shaped = { frames: [], dueAt: [] });
     if (waitMs === 0 && q.frames.length === 0) {
       forward(link, from, data, isBinary);
@@ -279,6 +295,17 @@ export function createLinkServer(config: Config): LinkServer {
     q.dueAt.push(Math.max(Date.now() + waitMs, q.dueAt[q.dueAt.length - 1] ?? 0));
     ws.pause();
     if (!q.timer) scheduleDrain(ws, ctx);
+  }
+
+  // Host pull: report the usage of every connection this control socket owns. Only
+  // a registered host (role 'control') may ask, and it always gets exactly its own
+  // connections — there is no link selector to point at someone else's.
+  function handleGetUsage(ws: WebSocket, ctx: Ctx): void {
+    if (ctx.role !== 'control') {
+      close(ws, Close.badRequest, 'getUsage: only a registered host control socket');
+      return;
+    }
+    sendJson(ws, { type: 'usage', connections: registry.usageForHost(ws) });
   }
 
   function handleControlMessage(ws: WebSocket, ctx: Ctx, data: Buffer): void {
@@ -300,6 +327,7 @@ export function createLinkServer(config: Config): LinkServer {
       case 'resolve': handleResolve(ws, ctx, msg); return;
       case 'relay': handleRelay(ws, ctx, msg); return;
       case 'accept': handleAccept(ws, ctx, msg); return;
+      case 'getUsage': handleGetUsage(ws, ctx); return;
       default: close(ws, Close.badRequest, 'unknown message type');
     }
   }
@@ -313,7 +341,10 @@ export function createLinkServer(config: Config): LinkServer {
     const ip = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim()
       || req.socket.remoteAddress
       || 'unknown';
-    const ctx: Ctx = { ip, role: 'new', alive: true };
+    // The authority the client dialed, for register-signature origin binding: the
+    // configured canonical origin if set, else the Host header of this upgrade.
+    const origin = config.origin || (req.headers.host ?? '').trim().toLowerCase();
+    const ctx: Ctx = { ip, origin, role: 'new', alive: true };
     ctxOf.set(ws, ctx);
 
     ws.on('pong', () => { ctx.alive = true; });

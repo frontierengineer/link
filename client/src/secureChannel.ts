@@ -44,6 +44,32 @@ export function encodeHeader(h: Header): Uint8Array {
   return w.finish();
 }
 
+// — reconnect refusal signal —
+//
+// When the host refuses a reconnect (the device was revoked / is unknown), it
+// must tell the CLIENT so, distinguishably from "the relay briefly dropped us".
+// A WebSocket close reason cannot carry that: the relay splices two sockets and
+// rewrites the close code/reason to its own `peer gone` when either end drops. So
+// the signal has to be a DATA frame, which the relay forwards verbatim. This frame
+// is sent where the host's Noise msg2 would go; it is unambiguous because a real
+// msg2 is a >=48-byte Noise message, never a 6-byte `MAGIC ‖ 0x00 ‖ reason`.
+const REFUSE = 0x00; // discriminator after MAGIC (a header uses VERSION=1 here)
+export const RefuseReason = { revoked: 1 } as const;
+
+export function encodeRefusal(reason: number): Uint8Array {
+  return new Writer().bytes(MAGIC).u8(REFUSE).u8(reason).finish();
+}
+
+// Return the refusal reason if `frame` is a refusal control frame, else null (so a
+// genuine Noise msg2 falls through to the handshake). A real handshake message is
+// far larger than this and does not begin with MAGIC+REFUSE.
+export function parseRefusal(frame: Uint8Array): number | null {
+  if (frame.length !== MAGIC.length + 2) return null;
+  if (!equalCt(frame.subarray(0, MAGIC.length), MAGIC)) return null;
+  if (frame[MAGIC.length] !== REFUSE) return null;
+  return frame[MAGIC.length + 1]!;
+}
+
 export function decodeHeader(frame: Uint8Array): Header {
   const r = new Reader(frame);
   const magic = r.bytes(MAGIC.length);
@@ -65,6 +91,19 @@ export class SealedError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'SealedError';
+  }
+}
+
+// The host refused the reconnect because this device's credential is unknown or
+// was REVOKED. Unlike a transient drop, this is terminal: the same credential will
+// be refused at every uplink (revocation lives at the host, not the Link), so the
+// managed connection stops retrying and the app should forget the credential and
+// re-pair. It extends SealedError so any handshake-error catch still treats it as a
+// failed handshake; callers that care distinguish it by type.
+export class DeviceRevokedError extends SealedError {
+  constructor(message = 'reconnect refused: unknown or revoked device') {
+    super(message);
+    this.name = 'DeviceRevokedError';
   }
 }
 
@@ -138,6 +177,9 @@ export async function reconnectInitiator(pipe: Pipe, opts: ReconnectInitiatorOpt
   const { message: msg1 } = hs.writeMessage(EMPTY);
   pipe.send(msg1);
   const msg2 = await pipe.recv(timeout);
+  // Before treating it as Noise msg2: a refusal frame here means the host declined
+  // to authenticate us (revoked / unknown device) — a typed, terminal error.
+  if (parseRefusal(msg2) === RefuseReason.revoked) throw new DeviceRevokedError();
   const { transport } = hs.readMessage(msg2);
   if (!transport) throw new SealedError('reconnect: handshake did not complete');
   return transport;
@@ -162,7 +204,13 @@ export async function reconnectResponder(pipe: Pipe, header: Header, opts: Recon
   const timeout = opts.handshakeTimeoutMs ?? 10_000;
   if (header.mode !== Mode.Reconnect || !header.keyId) throw new Error('reconnectResponder: not a reconnect header');
   const token = opts.resolveToken(header.keyId);
-  if (!token) throw new SealedError('reconnect refused: unknown or revoked device');
+  if (!token) {
+    // Tell the client it was revoked (a data frame the relay forwards verbatim; a
+    // close reason would be rewritten by the relay), then abort. This is the "failed
+    // auth" signal a revoked device needs so it stops retrying and re-pairs.
+    pipe.send(encodeRefusal(RefuseReason.revoked));
+    throw new DeviceRevokedError();
+  }
   const hs = new HandshakeState({
     pattern: PATTERNS.NKpsk0!,
     initiator: false,

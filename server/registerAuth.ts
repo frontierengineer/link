@@ -13,7 +13,7 @@
 // interoperate by construction). The signed bytes are reproduced here EXACTLY as
 // the client builds them in link/client/src/registerAuth.ts — keep in lock-step.
 
-import { createPublicKey, verify, type KeyObject } from 'node:crypto';
+import { createHash, createPublicKey, verify, type KeyObject } from 'node:crypto';
 
 // Must equal the client's REGISTER_DOMAIN, and the length-prefix framing must
 // match the client's bytes.ts Writer.lenStr (u32 big-endian length + UTF-8).
@@ -36,8 +36,21 @@ function lenStr(s: string): Buffer {
   return Buffer.concat([head, body]);
 }
 
-export function registerSigningMessage(address: string, ts: number, nonce: string): Buffer {
-  return Buffer.concat([REGISTER_DOMAIN, lenStr(address), lenStr(String(ts)), lenStr(nonce)]);
+// The canonical bytes a register signs. `origin` is the Link authority the frame
+// is meant for (host[:port]); binding it means a signature captured at one Link no
+// longer verifies at another, so a still-fresh frame cannot be replayed across
+// instances. An empty origin binds nothing (kept for the length-prefix framing).
+// Reproduced byte-for-byte by the client (link/client/src/registerAuth.ts).
+export function registerSigningMessage(address: string, ts: number, nonce: string, origin = ''): Buffer {
+  return Buffer.concat([REGISTER_DOMAIN, lenStr(address), lenStr(String(ts)), lenStr(nonce), lenStr(origin)]);
+}
+
+// The address that a given register public key commits to: base64url(SHA-256(pub)).
+// When address-key binding is enforced, a register's address MUST equal this, so an
+// address is a commitment to a key nobody else holds — squatting becomes impossible
+// rather than merely refused. `pub` is the raw 32-byte Ed25519 key.
+export function addressForRegisterKey(pub: Buffer): string {
+  return createHash('sha256').update(pub).digest('base64url');
 }
 
 // What a verified register yields: the pinned-key identity (pub, base64url) and
@@ -56,10 +69,22 @@ function importEd25519(pub: Buffer): KeyObject | null {
   }
 }
 
+// Options for the introduction-plane checks that ride alongside signature
+// verification. Both are additive gates that never touch the end-to-end crypto.
+export interface RegisterAuthPolicy {
+  // The Link authority the signature must be bound to (host[:port]). The client
+  // folds the uplink it dialed into its signature; verifying against our own
+  // origin rejects a frame signed for a different Link.
+  origin: string;
+  // Require address === base64url(SHA-256(pub)) (see addressForRegisterKey).
+  bindAddressToKey: boolean;
+}
+
 // Verify the auth on a register frame. Returns the pinned-key identity on
-// success, or null if anything is missing, malformed, out of the skew window, or
-// the signature does not check out. A null result means "reject this frame".
-export function verifyRegisterAuth(address: string, auth: unknown, now: number): VerifiedRegister | null {
+// success, or null if anything is missing, malformed, out of the skew window, the
+// signature does not check out, or (when bound) the address is not the commitment
+// to the presenting key. A null result means "reject this frame".
+export function verifyRegisterAuth(address: string, auth: unknown, now: number, policy: RegisterAuthPolicy): VerifiedRegister | null {
   if (!auth || typeof auth !== 'object') return null;
   const a = auth as Record<string, unknown>;
   if (a.alg !== 'ed25519') return null;
@@ -72,9 +97,13 @@ export function verifyRegisterAuth(address: string, auth: unknown, now: number):
   const sig = Buffer.from(a.sig, 'base64url');
   if (pub.length !== ED25519_PUB_LEN || sig.length !== ED25519_SIG_LEN) return null;
 
+  // The address is a commitment to this key: reject before the signature check so a
+  // squatter cannot even present a frame for an address it does not own the key for.
+  if (policy.bindAddressToKey && address !== addressForRegisterKey(pub)) return null;
+
   const key = importEd25519(pub);
   if (!key) return null;
-  const message = registerSigningMessage(address, a.ts, a.nonce);
+  const message = registerSigningMessage(address, a.ts, a.nonce, policy.origin);
   let ok = false;
   try {
     ok = verify(null, message, key, sig);

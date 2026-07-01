@@ -1,0 +1,64 @@
+---
+# OPTIONAL — self-host example only. Link is a single stateless process; you
+# can just as well run the container directly (see README "Self-hosting").
+# Nothing here is required — point your app's relay URL at wherever you put
+# it. There are no volumes on purpose — Link keeps everything in
+# memory, so a restart drops live relays and clients simply re-pair.
+#
+# Build the image with .bin/build.sh and push it to your own registry, then
+# replace the image reference below. TLS terminates at whatever fronts this
+# Service (ingress / CDN) — Link itself speaks plain HTTP/WS.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: link
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: link
+  namespace: link
+spec:
+  ports:
+    - port: 80
+      targetPort: 80
+      protocol: TCP
+      name: http
+  selector:
+    app: link
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: link
+  namespace: link
+  labels:
+    app: link
+spec:
+  replicas: 1
+  revisionHistoryLimit: 0
+  selector:
+    matchLabels:
+      app: link
+  template:
+    metadata:
+      labels:
+        app: link
+    spec:
+      containers:
+        - name: link
+          image: your-registry.example.com/link:latest
+          ports:
+            - containerPort: 80
+          # All knobs are optional; these are the defaults. See README
+          # "Configuration (env)".
+          env:
+            - name: LINK_RELAY_MAX_BPS
+              value: "1048576"
+            - name: LINK_RELAY_HOURLY_BYTES
+              value: "0"
+            - name: LINK_RELAY_TRICKLE_BPS
+              value: "16384"
+            - name: LINK_RELAY_IDLE_SEC
+              value: "300"

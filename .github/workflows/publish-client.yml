@@ -6,9 +6,11 @@ name: Publish @frontierengineer/link-client
 # TRIGGER: push a tag `client-v<version>` that matches client/package.json "version"
 # (e.g. client-v0.2.0), or run this workflow manually.
 #
-# ONE-TIME ARMING: add an npm automation token as the repo secret NPM_TOKEN
-# (npmjs.com -> Access Tokens -> Generate -> Automation). The @frontierengineer scope
-# must exist and the token's account must be able to publish to it.
+# AUTH: OIDC Trusted Publishing — NO token, nothing to rotate. GitHub mints a
+# short-lived credential per run and npm verifies it came from this repo + workflow.
+# ONE-TIME SETUP on npmjs.com: package @frontierengineer/link-client -> Settings ->
+# Trusted Publisher -> GitHub Actions -> repository `frontierengineer/link`,
+# workflow `publish-client.yml`. (No repo secret needed.)
 on:
   push:
     tags: ["client-v*"]
@@ -17,6 +19,9 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC: mint the short-lived npm publish credential (Trusted Publishing)
+      contents: read
     defaults:
       run:
         working-directory: client
@@ -26,9 +31,9 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
+      - run: npm install -g npm@latest # Trusted Publishing needs npm >= 11.5.1
       - run: npm ci
       - run: npm run typecheck
-      # `npm publish` runs the `prepack` script (build + build:cjs) automatically.
+      # `npm publish` runs prepack (build + build:cjs) and authenticates via OIDC —
+      # no NPM_TOKEN. npm also records signed provenance automatically.
       - run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

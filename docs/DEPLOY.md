@@ -181,12 +181,11 @@ same way).
   (one per line, blank lines and `#` comments ignored), unioned with the inline list.
   Handy for a longer or externally-managed allowlist. Adding/removing a host is a
   config change + restart — deliberately simple, with no dynamic pairing state.
-- **`LINK_BIND_ADDRESS_TO_KEY`** (default `1` = on) — require every register's address
-  to be `base64url(SHA-256(register key))`. On ⇒ an address is a commitment to a key
-  nobody else holds, so it cannot be squatted or raced *at all* (a mismatch is refused
-  `4007`). Set `0` for the legacy opaque-address model (any operator-chosen
-  high-entropy handle). Leave it on unless you must interoperate with hosts that mint
-  their own arbitrary addresses.
+- **Address-key binding is always on (no knob).** Every register's address must be
+  `base64url(SHA-256(register key))` — an address is a commitment to a key nobody
+  else holds, so it cannot be squatted or raced *at all* (a mismatch is refused
+  `4007`). There is no opaque-address mode: the routing layer is spoof-*proof* by
+  construction.
 - **`LINK_ORIGIN`** (default: derived from each request's `Host` header) — the
   canonical `host[:port]` clients dial this instance at, folded into register
   signatures so a captured frame can't be replayed at a *different* Link. The default

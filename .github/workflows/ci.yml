@@ -1,0 +1,41 @@
+name: CI
+
+# Run the Link test suites on every pull request and every push to master, so
+# nothing merges unless the wire protocol is still correct AND backward-compatible.
+# server/compat.test.ts is the load-bearing one: it freezes the v1 wire protocol
+# and asserts the current relay still accepts it end to end. Frontier's
+# deploy-link.yml runs the same server suite as a second gate right before a relay
+# deploy, so an incompatible relay can never ship even via a manual deploy.
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  server:
+    name: server tests (incl. backward-compat)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm test
+
+  client:
+    name: client tests (typecheck + unit + e2e self-test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm test

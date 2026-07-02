@@ -38,13 +38,6 @@ export interface Config {
   // it from LINK_ALLOWED_REGISTER_KEYS (comma-separated) and/or a file named by
   // LINK_ALLOWED_REGISTER_KEYS_FILE (one key per line, `#` comments allowed).
   allowedRegisterKeys: Set<string>;
-  // Bind the routing address to the host's register key: require every register's
-  // address to equal base64url(SHA-256(register pub)). On ⇒ an address is a
-  // commitment to a key nobody else holds, so it cannot be squatted or raced at
-  // all (the register-key pin becomes a derivation). Default ON; set
-  // LINK_BIND_ADDRESS_TO_KEY=0 for the legacy opaque-address model where the
-  // address is any operator-chosen high-entropy handle.
-  bindAddressToKey: boolean;
   // The canonical WebSocket authority (host[:port]) clients dial this instance at,
   // e.g. `link.example.com`. Folded into every register signature so a frame signed
   // for one Link cannot be replayed to another. Empty ⇒ derive it per-connection
@@ -64,14 +57,6 @@ function splitList(raw: string): string[] {
     .split(/[\s,]+/)
     .map((s) => s.trim())
     .filter((s) => s.length > 0 && !s.startsWith('#'));
-}
-
-function boolEnv(name: string, fallback: boolean): boolean {
-  const raw = process.env[name];
-  if (raw === undefined || raw === '') return fallback;
-  if (raw === '1' || raw === 'true') return true;
-  if (raw === '0' || raw === 'false') return false;
-  throw new Error(`${name} must be 0/1 (or true/false), got ${JSON.stringify(raw)}`);
 }
 
 // The allowlist of authorized register keys: LINK_ALLOWED_REGISTER_KEYS (inline)
@@ -112,7 +97,6 @@ export function loadConfig(): Config {
     ipRatePerMin: intEnv('LINK_IP_RATE_PER_MIN', 60, 0),
     trustProxy: process.env.LINK_TRUST_PROXY === '1',
     allowedRegisterKeys: loadAllowedRegisterKeys(),
-    bindAddressToKey: boolEnv('LINK_BIND_ADDRESS_TO_KEY', true),
     origin: (process.env.LINK_ORIGIN ?? '').trim().toLowerCase(),
   };
 }

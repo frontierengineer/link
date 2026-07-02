@@ -46,9 +46,10 @@ export function registerSigningMessage(address: string, ts: number, nonce: strin
 }
 
 // The address that a given register public key commits to: base64url(SHA-256(pub)).
-// When address-key binding is enforced, a register's address MUST equal this, so an
-// address is a commitment to a key nobody else holds — squatting becomes impossible
-// rather than merely refused. `pub` is the raw 32-byte Ed25519 key.
+// A register's address MUST equal this: an address is a commitment to a key nobody
+// else holds, so squatting is impossible by construction (not merely refused). This
+// is the ONLY address model — there is no opaque-handle address. `pub` is the raw
+// 32-byte Ed25519 key.
 export function addressForRegisterKey(pub: Buffer): string {
   return createHash('sha256').update(pub).digest('base64url');
 }
@@ -70,20 +71,19 @@ function importEd25519(pub: Buffer): KeyObject | null {
 }
 
 // Options for the introduction-plane checks that ride alongside signature
-// verification. Both are additive gates that never touch the end-to-end crypto.
+// verification. An additive gate that never touches the end-to-end crypto.
 export interface RegisterAuthPolicy {
   // The Link authority the signature must be bound to (host[:port]). The client
   // folds the uplink it dialed into its signature; verifying against our own
   // origin rejects a frame signed for a different Link.
   origin: string;
-  // Require address === base64url(SHA-256(pub)) (see addressForRegisterKey).
-  bindAddressToKey: boolean;
 }
 
 // Verify the auth on a register frame. Returns the pinned-key identity on
 // success, or null if anything is missing, malformed, out of the skew window, the
-// signature does not check out, or (when bound) the address is not the commitment
-// to the presenting key. A null result means "reject this frame".
+// signature does not check out, or the address is not the commitment to the
+// presenting key (address-key binding is always enforced). A null result means
+// "reject this frame".
 export function verifyRegisterAuth(address: string, auth: unknown, now: number, policy: RegisterAuthPolicy): VerifiedRegister | null {
   if (!auth || typeof auth !== 'object') return null;
   const a = auth as Record<string, unknown>;
@@ -99,7 +99,7 @@ export function verifyRegisterAuth(address: string, auth: unknown, now: number, 
 
   // The address is a commitment to this key: reject before the signature check so a
   // squatter cannot even present a frame for an address it does not own the key for.
-  if (policy.bindAddressToKey && address !== addressForRegisterKey(pub)) return null;
+  if (address !== addressForRegisterKey(pub)) return null;
 
   const key = importEd25519(pub);
   if (!key) return null;

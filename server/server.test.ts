@@ -48,9 +48,6 @@ function config(overrides: Partial<Config> = {}): Config {
     ipRatePerMin: 0,
     trustProxy: false,
     allowedRegisterKeys: new Set<string>(),
-    // Default the anti-squat tests to the legacy opaque-address model so they can use
-    // arbitrary addresses; the dedicated binding tests turn this on explicitly.
-    bindAddressToKey: false,
     origin: TEST_ORIGIN,
     ...overrides,
   };
@@ -185,11 +182,14 @@ async function start(overrides: Partial<Config> = {}): Promise<{
 // Establish a relaying link: host registers an address (signed), a client
 // resolves it and asks for a relay, the host dials back the dedicated relay
 // socket.
-async function establishRelay(s: Awaited<ReturnType<typeof start>>, address = 'addr-1'): Promise<{
+async function establishRelay(s: Awaited<ReturnType<typeof start>>): Promise<{
   hostControl: Client; hostRelay: Client; client: Client; linkId: string;
 }> {
   const hostControl = await s.connect();
   const host = makeSigner();
+  // Binding is always on: the address IS the commitment to the host's key. Each
+  // signer has its own key, so separate establishRelay calls get distinct addresses.
+  const address = host.boundAddress;
   hostControl.send({ type: 'register', address, auth: host.auth(address) });
   await hostControl.next('registered');
 
@@ -214,23 +214,24 @@ test('introduction: signed address register, resolve, both sides learn; addresse
   try {
     const host = await s.connect();
     const signer = makeSigner();
-    host.send({ type: 'register', address: 'host-abc', auth: signer.auth('host-abc') });
-    assert.equal((await host.next('registered')).address, 'host-abc');
+    const addr = signer.boundAddress; // the address is the commitment to the key
+    host.send({ type: 'register', address: addr, auth: signer.auth(addr) });
+    assert.equal((await host.next('registered')).address, addr);
 
     const client = await s.connect();
-    client.send({ type: 'resolve', address: 'host-abc' });
+    client.send({ type: 'resolve', address: addr });
     const found = await client.next('found');
     assert.ok(typeof found.linkId === 'string' && (found.linkId as string).length > 0);
     assert.equal(found.candidates, undefined); // candidates are not part of the protocol
 
     const arrived = await host.next('arrived');
     assert.equal(arrived.linkId, found.linkId);
-    assert.equal(arrived.address, 'host-abc');
+    assert.equal(arrived.address, addr);
 
     // An address is a REUSABLE routing handle (not single-use like the old codes):
     // a second client resolves the same address and gets its own distinct link.
     const second = await s.connect();
-    second.send({ type: 'resolve', address: 'host-abc' });
+    second.send({ type: 'resolve', address: addr });
     const found2 = await second.next('found');
     assert.notEqual(found2.linkId, found.linkId);
     await host.next('arrived');
@@ -259,45 +260,49 @@ test('register auth: unsigned refused; TOFU-pinned; squatter refused; same key r
     old.send({ type: 'register', address: 'addr-x' });
     assert.equal(await old.closed, 4007);
 
-    // The first signed register pins the host's key (trust-on-first-use).
+    // The first signed register pins the host's key (trust-on-first-use). The
+    // address IS the commitment to that key (binding is always on).
     const host = makeSigner();
+    const addr = host.boundAddress;
     const a = await s.connect();
-    a.send({ type: 'register', address: 'addr-x', auth: host.auth('addr-x') });
+    a.send({ type: 'register', address: addr, auth: host.auth(addr) });
     await a.next('registered');
 
-    // A SQUATTER that knows the address but signs with a DIFFERENT key is refused,
-    // and the genuine registration still resolves.
+    // A SQUATTER that knows the address but signs with a DIFFERENT key cannot even
+    // form a valid frame for it: binding requires address === commitment(key), so a
+    // squatter's register for the victim's address fails auth (4007). The genuine
+    // registration still resolves.
     const squatter = makeSigner();
     const b = await s.connect();
-    b.send({ type: 'register', address: 'addr-x', auth: squatter.auth('addr-x') });
-    assert.equal((await b.next('error')).error, 'address_pinned');
+    b.send({ type: 'register', address: addr, auth: squatter.auth(addr) });
+    assert.equal(await b.closed, 4007);
     const probe = await s.connect();
-    probe.send({ type: 'resolve', address: 'addr-x' });
+    probe.send({ type: 'resolve', address: addr });
     assert.ok((await probe.next('found')).linkId);
 
     // The genuine host reconnects (SAME key, newer ts, new socket): it replaces the
     // prior socket (closed 4005) and now holds the address.
-    const reconnectAuth = host.auth('addr-x', Date.now() + 1);
+    const reconnectAuth = host.auth(addr, Date.now() + 1);
     const c = await s.connect();
-    c.send({ type: 'register', address: 'addr-x', auth: reconnectAuth });
+    c.send({ type: 'register', address: addr, auth: reconnectAuth });
     await c.next('registered');
     assert.equal(await a.closed, 4005);
 
     // A REPLAY of that very frame on a fresh socket is refused (timestamp not newer).
     const d = await s.connect();
-    d.send({ type: 'register', address: 'addr-x', auth: reconnectAuth });
+    d.send({ type: 'register', address: addr, auth: reconnectAuth });
     assert.equal((await d.next('error')).error, 'register_stale');
 
     // A FORGED signature (valid shape, wrong bytes) is refused with 4007.
     const e = await s.connect();
-    const forged = host.auth('addr-x', Date.now() + 2);
+    const forged = host.auth(addr, Date.now() + 2);
     forged.sig = crypto.randomBytes(64).toString('base64url');
-    e.send({ type: 'register', address: 'addr-x', auth: forged });
+    e.send({ type: 'register', address: addr, auth: forged });
     assert.equal(await e.closed, 4007);
 
     // A stale CLOCK (timestamp outside the skew window) is refused with 4007.
     const f = await s.connect();
-    f.send({ type: 'register', address: 'addr-y', auth: host.auth('addr-y', Date.now() - 30 * 60 * 1000) });
+    f.send({ type: 'register', address: addr, auth: host.auth(addr, Date.now() - 30 * 60 * 1000) });
     assert.equal(await f.closed, 4007);
   } finally {
     await s.stop();
@@ -537,23 +542,25 @@ test('closed mode: only allowlisted register keys may register; a genuine but un
   const unlisted = makeSigner();
   const s = await start({ allowedRegisterKeys: new Set([allowed.pub]) });
   try {
-    // An allowlisted host registers normally.
+    // An allowlisted host registers normally (address = commitment to its key).
+    const allowedAddr = allowed.boundAddress;
+    const unlistedAddr = unlisted.boundAddress;
     const a = await s.connect();
-    a.send({ type: 'register', address: 'addr-allowed', auth: allowed.auth('addr-allowed') });
+    a.send({ type: 'register', address: allowedAddr, auth: allowed.auth(allowedAddr) });
     await a.next('registered');
 
     // A host with a valid signature but an UNLISTED key is refused with 4010
     // (distinct from 4007: the signature is genuine, the key is just not authorized).
     const b = await s.connect();
-    b.send({ type: 'register', address: 'addr-unlisted', auth: unlisted.auth('addr-unlisted') });
+    b.send({ type: 'register', address: unlistedAddr, auth: unlisted.auth(unlistedAddr) });
     assert.equal(await b.closed, 4010);
 
     // The allowlisted host is reachable; the unlisted one never registered.
     const c = await s.connect();
-    c.send({ type: 'resolve', address: 'addr-allowed' });
+    c.send({ type: 'resolve', address: allowedAddr });
     assert.ok((await c.next('found')).linkId);
     const d = await s.connect();
-    d.send({ type: 'resolve', address: 'addr-unlisted' });
+    d.send({ type: 'resolve', address: unlistedAddr });
     assert.equal((await d.next('error')).error, 'unknown_address');
   } finally {
     await s.stop();
@@ -561,12 +568,12 @@ test('closed mode: only allowlisted register keys may register; a genuine but un
 });
 
 test('address-key binding: an arbitrary address is refused; the key-committed address is accepted; a squatter cannot forge it', async () => {
-  const s = await start({ bindAddressToKey: true });
+  const s = await start();
   try {
     const host = makeSigner();
 
-    // With binding on, the address MUST equal base64url(sha256(pub)); an arbitrary
-    // address (even validly signed) is refused with 4007.
+    // Binding is always enforced: the address MUST equal base64url(sha256(pub)); an
+    // arbitrary address (even validly signed) is refused with 4007.
     const bad = await s.connect();
     bad.send({ type: 'register', address: 'arbitrary-addr', auth: host.auth('arbitrary-addr') });
     assert.equal(await bad.closed, 4007);
@@ -598,8 +605,10 @@ test('origin binding: a register signed for a different Link origin is refused (
   const s = await start({ origin: 'other.link' });
   try {
     const host = makeSigner();
+    // Use the key-committed address so binding passes and the failure is the ORIGIN
+    // mismatch in the signature (not the address binding).
     const a = await s.connect();
-    a.send({ type: 'register', address: 'addr-origin', auth: host.auth('addr-origin') });
+    a.send({ type: 'register', address: host.boundAddress, auth: host.auth(host.boundAddress) });
     assert.equal(await a.closed, 4007);
   } finally {
     await s.stop();
@@ -609,8 +618,8 @@ test('origin binding: a register signed for a different Link origin is refused (
 test('usage pull: a host gets fractions for exactly the connections it owns — and only those', async () => {
   const s = await start({ relayHourlyBytes: 100_000 });
   try {
-    const h1 = await establishRelay(s, 'addr-A');
-    const h2 = await establishRelay(s, 'addr-B');
+    const h1 = await establishRelay(s);
+    const h2 = await establishRelay(s);
 
     // Move 10% on h1 (below the first push tier, so nothing is pushed) and pull.
     h1.client.sendFrame(Buffer.alloc(10_000));

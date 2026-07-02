@@ -1,17 +1,18 @@
 name: CI
 
-# Run the Link SERVER test suite on every pull request and every push to master.
-# This is the backward-compatibility gate: server/compat.test.ts freezes the v1
-# wire protocol and asserts the current relay still accepts it end to end, so the
-# relay can never drift incompatible. Frontier's deploy-link.yml runs this SAME
+# Run the Link SERVER and CLIENT suites on every pull request and every push to master.
+#
+# The SERVER suite is the backward-compatibility gate: server/compat.test.ts freezes
+# the v1 wire protocol and asserts the current relay still accepts it end to end, so
+# the relay can never drift incompatible. Frontier's deploy-link.yml runs this SAME
 # suite right before a relay deploy, so an incompatible relay can't ship even via a
 # manual deploy.
 #
-# NOTE: the client/ suite is intentionally NOT wired here yet. In a clean CI install
-# it needs `ws` as a client devDependency (some tests spin up a real relay over raw
-# ws frames), and a few idle-reaper unit tests are timing-flaky under load. Wiring
-# it green is a follow-up; the backward-compat guarantee that gates deploys lives in
-# the server suite here.
+# The CLIENT suite covers the sealed secure channel, SPAKE2 pairing, hardening (incl.
+# the idle reaper), and a full e2e that spawns real relays and fails a client over
+# between uplinks. The e2e (test/e2e.selftest.ts) spawns the SERVER
+# (../../server/index.ts via the client's tsx), so the client job installs the
+# server's deps too.
 on:
   pull_request:
   push:
@@ -31,3 +32,23 @@ jobs:
           node-version: "22"
       - run: npm ci
       - run: npm test
+
+  client:
+    name: client tests (unit + e2e)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: install client deps
+        run: npm ci
+        working-directory: client
+      # The e2e spawns ../../server/index.ts (via the client's tsx); that server
+      # process resolves its own imports (ws) from server/node_modules, so install them.
+      - name: install server deps (the e2e spawns the server)
+        run: npm ci
+        working-directory: server
+      - name: test (typecheck + unit + e2e)
+        run: npm test
+        working-directory: client

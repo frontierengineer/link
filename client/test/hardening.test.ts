@@ -224,13 +224,24 @@ test('idle reaper: a silent session is torn down after idleTimeoutMs', async () 
   const IDLE = 200;
   const { client, host } = matchedSessions(IDLE);
   const t0 = Date.now();
-  const { reason } = await client.done; // resolves when the idle reaper fires
-  const elapsed = Date.now() - t0;
-  assert.ok(elapsed >= IDLE - 50, `did not close before the idle window (closed at ${elapsed}ms, window ${IDLE}ms)`);
-  assert.ok(elapsed < 5000, `closed promptly once idle (closed at ${elapsed}ms)`);
-  assert.equal(client.isOpen, false, 'the idle session is closed');
-  assert.ok(typeof reason === 'string' && reason.length > 0, 'a close reason was recorded');
-  host.close('cleanup');
+  // The reaper's timer is unref'd (reaping an idle session must never, on its own,
+  // keep a host process alive). In this isolated test nothing else holds the event
+  // loop open, so a clean runner can drain before the reaper fires and `client.done`
+  // would never settle ("Promise resolution is still pending but the event loop has
+  // already resolved"). A ref'd keepalive holds the loop open until the reaper
+  // resolves `done` — it does NOT change WHEN the reaper fires.
+  const keepalive = setInterval(() => {}, 50);
+  try {
+    const { reason } = await client.done; // resolves when the idle reaper fires
+    const elapsed = Date.now() - t0;
+    assert.ok(elapsed >= IDLE - 50, `did not close before the idle window (closed at ${elapsed}ms, window ${IDLE}ms)`);
+    assert.ok(elapsed < 5000, `closed promptly once idle (closed at ${elapsed}ms)`);
+    assert.equal(client.isOpen, false, 'the idle session is closed');
+    assert.ok(typeof reason === 'string' && reason.length > 0, 'a close reason was recorded');
+  } finally {
+    clearInterval(keepalive);
+    host.close('cleanup');
+  }
 });
 
 test('idle reaper: periodic inbound frames keep a session alive past idleTimeoutMs', async () => {

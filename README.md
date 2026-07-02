@@ -100,7 +100,7 @@ API: **[client/README.md](client/README.md)**.
 ## Layout
 
 ```
-server/          the relay (TypeScript; one runtime dependency: ws)
+server/          @frontierengineer/link-server — the relay, embeddable (dep: ws)
 client/          @frontierengineer/link-client — the host + client library
 docs/PROTOCOL.md the wire protocol (messages, swim-lanes, close codes)
 docs/SECURITY.md threat model + how SPAKE2 and Noise make the relay harmless
@@ -134,6 +134,30 @@ cd server && npm install && npm test && npm start    # boots on :80
 # client library
 cd client && npm install && npm test                 # unit + e2e (spawns real relays)
 ```
+
+## Releasing (npm)
+
+Both libraries publish from this repo via **OIDC Trusted Publishing** — no token, no
+secret, nothing to rotate. To cut a release:
+
+1. Bump `"version"` in the package's `package.json` (`client/` or `server/`).
+2. Commit, then push a matching tag:
+
+   ```bash
+   git tag client-v0.2.1 && git push origin client-v0.2.1   # @frontierengineer/link-client
+   git tag server-v0.1.0 && git push origin server-v0.1.0   # @frontierengineer/link-server
+   ```
+
+The tag triggers `.github/workflows/publish-{client,server}.yml`, which builds and
+publishes with a short-lived credential GitHub mints for that run. **One-time setup:**
+on npmjs.com, each package → *Settings → Trusted Publisher → GitHub Actions* →
+repository `frontierengineer/link` + the workflow filename (`publish-client.yml` /
+`publish-server.yml`).
+
+The **relays** deploy independently (Docker / Cloud Run) — see
+[docs/DEPLOY.md](docs/DEPLOY.md). A released client keeps working against a newer relay
+by contract: `server/compat.test.ts` freezes the v1 wire protocol and CI won't let an
+incompatible relay merge.
 
 ## License
 

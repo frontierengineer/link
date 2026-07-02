@@ -1,0 +1,34 @@
+name: Publish @frontierengineer/link-client
+
+# Publish the link client to npm as a dual ESM+CJS package (prepack runs tsc for the
+# ESM build + esbuild for the CJS bundle with @noble inlined / ws external).
+#
+# TRIGGER: push a tag `client-v<version>` that matches client/package.json "version"
+# (e.g. client-v0.2.0), or run this workflow manually.
+#
+# ONE-TIME ARMING: add an npm automation token as the repo secret NPM_TOKEN
+# (npmjs.com -> Access Tokens -> Generate -> Automation). The @frontierengineer scope
+# must exist and the token's account must be able to publish to it.
+on:
+  push:
+    tags: ["client-v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm ci
+      - run: npm run typecheck
+      # `npm publish` runs the `prepack` script (build + build:cjs) automatically.
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

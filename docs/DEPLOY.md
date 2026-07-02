@@ -26,7 +26,7 @@ over the platform's edge — with deliberately **no CDN/reverse-proxy** in front
 | TLS | terminated by the platform with a managed cert (the domain mapping provisions it). The raw `…-uc.a.run.app` URL also answers. |
 | DNS | point a DNS record (e.g. a `CNAME`) at your relay's public address, and keep any DNS provider *out* of the request path (DNS-only, no proxy) — see §3. |
 | Ingress | `all`, public (`allUsers` → `run.invoker`) |
-| Scaling | single instance (`maxScale = 1`), session affinity on, `containerConcurrency = 1000`, startup-CPU-boost; request timeout `3600s` |
+| Scaling | scale-to-zero (`minScale = 0`) up to a single instance (`maxScale = 1`), session affinity on, `containerConcurrency = 1000`, startup-CPU-boost, request-based billing (CPU throttling **on** — *not* always-allocated); request timeout `3600s` |
 | Resources | 1 vCPU / 512 MiB |
 | Env (example) | `LINK_PORT=8080`, `LINK_TRUST_PROXY=1`, `LINK_RELAY_HOURLY_BYTES=2147483648` (2 GiB/hr/link); everything else = code defaults |
 
@@ -42,6 +42,14 @@ Two Cloud Run specifics matter for a WebSocket relay:
   3600`). A long-lived relay is dropped at that ceiling; the client library
   auto-reconnects, so it's transparent — but it's why the idle reaper and reconnect
   logic exist.
+- **Cost: keep `minScale = 0` and CPU throttling on.** With request-based billing you
+  pay only while a socket is open, so a relay with nobody connected costs ~nothing.
+  But a WebSocket is a *held request*: even one host that parks its control socket
+  (registered and idle, moving no bytes) keeps a request in flight, so Cloud Run
+  never scales that instance to zero and bills a full 1 vCPU + 512 MiB around the
+  clock (~$60/mo here). That is expected while a host is connected — just don't make
+  it worse with `minScale >= 1` or `--no-cpu-throttling` (always-allocated CPU), and
+  don't leave a host pointed here if you've cut over to another relay.
 
 ## 2. Ship an update
 

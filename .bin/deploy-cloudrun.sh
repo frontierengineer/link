@@ -33,7 +33,28 @@ echo "→ push ${IMG}"
 docker push "${IMG}"
 
 echo "→ deploy ${SERVICE} (${REGION})"
+# The serving shape is pinned here rather than left to persist implicitly, so a
+# fresh service — or a careless redeploy — can't drift into an expensive or a
+# broken shape. Two independent reasons it must look exactly like this:
+#   COST    : --min-instances=0 scales the relay to zero when no socket is open,
+#             and --cpu-throttling bills CPU only while a request/WebSocket is in
+#             flight (request-based, NOT always-allocated). A single parked host
+#             control socket already pins one instance 24/7 (~$60/mo at 1 vCPU);
+#             minScale>=1 or --no-cpu-throttling would bill a full instance around
+#             the clock even with nobody connected — don't set them.
+#   CORRECT : --max-instances=1 and --session-affinity are load-bearing, not tuning.
+#             Link's registry is in-memory and per-instance, so a host and the
+#             clients resolving it MUST land on the same replica (docs/DEPLOY.md §5).
+#             --concurrency=1000 lets that one instance hold many WebSockets — it is
+#             also why CPU can't go below 1 (Cloud Run forbids <1 vCPU when
+#             concurrency>1). --timeout=3600 is Cloud Run's 60-min WebSocket ceiling.
+# Ingress and the public allUsers invoker policy need extra IAM, so they are set
+# once out-of-band and persist across image-only redeploys — see docs/DEPLOY.md §2.
 gcloud run deploy "${SERVICE}" \
-  --project "${PROJECT}" --region "${REGION}" --image "${IMG}"
+  --project "${PROJECT}" --region "${REGION}" --image "${IMG}" \
+  --cpu=1 --memory=512Mi \
+  --min-instances=0 --max-instances=1 \
+  --concurrency=1000 --timeout=3600 \
+  --cpu-throttling --session-affinity --cpu-boost
 
 echo "✓ deployed ${SERVICE} ← ${IMG}"

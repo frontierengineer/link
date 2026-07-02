@@ -3,6 +3,11 @@
   "version": "0.2.1",
   "description": "Embeddable, content-blind rendezvous/relay for the Link connection model: signed-address registration (ed25519), resolve/introduce, and a sealed byte-splice the relay never reads. Only runtime dependency is ws.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frontierengineer/link.git",
+    "directory": "server"
+  },
   "main": "./dist/lib.js",
   "types": "./dist/lib.d.ts",
   "exports": {

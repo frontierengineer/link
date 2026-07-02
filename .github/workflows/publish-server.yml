@@ -1,0 +1,29 @@
+name: Publish @frontierengineer/link-server
+
+# Publish the embeddable Link relay to npm. It is pure TypeScript (only ws + Node
+# built-ins), so this is a plain tsc CJS build — no bundling.
+#
+# TRIGGER: push a tag `server-v<version>` matching server/package.json "version"
+# (e.g. server-v0.1.0), or run manually. Needs the NPM_TOKEN repo secret.
+on:
+  push:
+    tags: ["server-v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install
+      # `npm publish` runs the `prepack` script (tsc build) automatically.
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

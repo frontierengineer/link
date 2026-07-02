@@ -1,20 +1,35 @@
 {
-  "name": "link-server",
-  "private": true,
+  "name": "@frontierengineer/link-server",
+  "version": "0.1.0",
+  "description": "Embeddable, content-blind rendezvous/relay for the Link connection model: signed-address registration (ed25519), resolve/introduce, and a sealed byte-splice the relay never reads. Only runtime dependency is ws.",
+  "license": "MIT",
+  "main": "./dist/lib.js",
+  "types": "./dist/lib.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/lib.d.ts",
+      "default": "./dist/lib.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "engines": { "node": ">=20" },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "start": "ts-node index.ts",
     "test": "TS_NODE_TRANSPILE_ONLY=1 node --require ts-node/register --test \"*.test.ts\""
   },
-  "dependencies": {
-    "ts-node": "^10.9.2",
-    "typescript": "^5.5.0",
+  "peerDependencies": {
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/ws": "^8.5.0"
+    "@types/ws": "^8.5.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.0",
+    "ws": "^8.18.0"
   },
-  "engines": {
-    "node": ">=22"
+  "publishConfig": {
+    "access": "public"
   }
 }

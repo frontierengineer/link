@@ -1,21 +1,25 @@
 {
   "name": "@frontierengineer/link-client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Auditable, multi-uplink secure-connection client for the Link relay model: Noise (NKpsk0) sealed channel + SPAKE2 (RFC 9382) short-code pairing, end-to-end encrypted over content-blind relays.",
   "license": "MIT",
   "type": "module",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
     }
   },
-  "main": "./dist/index.js",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "src", "README.md"],
+  "files": ["dist", "README.md"],
   "engines": { "node": ">=20" },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "build:cjs": "node scripts/build-cjs.mjs",
+    "prepack": "npm run build && npm run build:cjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:unit": "node --import tsx --test test/secureChannel.test.ts test/pairing.test.ts test/hardening.test.ts test/registerAuth.test.ts",
     "test:e2e": "tsx test/e2e.selftest.ts",
@@ -24,13 +28,20 @@
   "dependencies": {
     "@noble/ciphers": "^2.2.0",
     "@noble/curves": "^2.2.0",
-    "@noble/hashes": "^2.2.0",
+    "@noble/hashes": "^2.2.0"
+  },
+  "peerDependencies": {
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
+    "esbuild": "^0.24.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "ws": "^8.18.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

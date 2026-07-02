@@ -121,7 +121,6 @@ Dockerfile       builds the relay image
 | `LINK_TRUST_PROXY` | `0` | `1` = read the client IP from the first `X-Forwarded-For` hop (set this behind a proxy — see DEPLOY). |
 | `LINK_ALLOWED_REGISTER_KEYS` | *(empty)* | Comma-separated register public keys (base64url). Empty = **open** (any signed host). Non-empty = **closed**: only these keys may register (others get close `4010`). |
 | `LINK_ALLOWED_REGISTER_KEYS_FILE` | *(empty)* | Path to a file of allowlisted register keys (one per line, `#` comments), unioned with the inline list above. |
-| `LINK_BIND_ADDRESS_TO_KEY` | `1` | Require `address == base64url(SHA-256(register key))` (spoof-proof addresses). `0` = legacy opaque-address model. |
 | `LINK_ORIGIN` | *(from `Host`)* | Canonical `host[:port]` clients dial, bound into register signatures (replay protection). Set only if a proxy rewrites `Host`. |
 
 What each knob does, in engineer terms, is in [docs/DEPLOY.md](docs/DEPLOY.md).

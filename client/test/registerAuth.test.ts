@@ -107,14 +107,14 @@ class Raw {
 }
 
 test('anti-squat (raw frames): unsigned refused, TOFU-pinned, wrong key refused, same key replaces, replay refused', async () => {
-  // Opaque-address mode: this test uses an arbitrary address to exercise the TOFU
-  // pin / same-key / replay rules directly. (The key-committed address model is
-  // exercised by the dedicated binding test below.)
-  const link = await spawnLink({ LINK_BIND_ADDRESS_TO_KEY: '0' });
+  // Binding is always on: the address IS the commitment to the genuine host's key
+  // (base64url(sha256(pub))), so the genuine signer's own committed address is the
+  // only address any of these frames can legally carry.
+  const link = await spawnLink();
   const o = link.origin;
-  const address = 'addr-squat-test';
   const genuine = registerSignerFromStatic(randomBytes(32));
   const squatter = registerSignerFromStatic(randomBytes(32)); // a DIFFERENT key
+  const address = addressForRegisterKey(genuine.pub);
 
   try {
     // 1) Unsigned register is refused outright (4007).
@@ -127,11 +127,13 @@ test('anti-squat (raw frames): unsigned refused, TOFU-pinned, wrong key refused,
     a.send({ type: 'register', address, auth: makeRegisterAuth(genuine, address, o) });
     await a.next('registered');
 
-    // 3) A squatter that KNOWS the address but signs with a different key is
-    //    refused, and the genuine registration is untouched (still resolves to it).
+    // 3) A squatter that KNOWS the address but signs with a different key cannot even
+    //    form a valid frame for it: binding requires address === commitment(key), so
+    //    its register for the victim's address fails auth (4007). The genuine
+    //    registration is untouched (still resolves to it).
     const b = await Raw.connect(link.url);
     b.send({ type: 'register', address, auth: makeRegisterAuth(squatter, address, o) });
-    assert.equal((await b.next('error')).error, 'address_pinned', 'a wrong-key re-register is rejected');
+    assert.equal(await b.closed, CLOSE_REGISTER_AUTH, 'a wrong-key register is refused at the binding check (4007)');
     const probe = await Raw.connect(link.url);
     probe.send({ type: 'resolve', address });
     assert.ok((await probe.next('found')).linkId, 'the genuine host still holds the address');

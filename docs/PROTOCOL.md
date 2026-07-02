@@ -40,7 +40,7 @@ the protocol, so a host never exposes an inbound port.
 
 | Noun | What it is | Entropy | Who sees it | Secret? |
 |---|---|---|---|---|
-| **address** | The host's routing handle — its "phone number". A client resolves it to be introduced. Stable; reused across reconnections. | High — `base64url(SHA-256(register key))` by default (a commitment to a key nobody else holds), or any ≥128-bit random handle in legacy opaque mode | Link + anyone the host hands it to | **No.** Knowing it lets you *ask* to connect; entry is gated by the handshake. |
+| **address** | The host's routing handle — its "phone number". A client resolves it to be introduced. Stable; reused across reconnections. | High — always `base64url(SHA-256(register key))` (a commitment to a key nobody else holds) | Link + anyone the host hands it to | **No.** Knowing it lets you *ask* to connect; entry is gated by the handshake. |
 | **pairing code** | A short, single-use secret shown when a host opens pairing (a QR, or typed). Proves, this one time, that the client is the intended one. | Low (e.g. 6 chars) | **Only the two endpoints** | **Yes** — and it is **never sent to Link in any form, raw or hashed.** It is only ever a SPAKE2 input. |
 | **credential** | What a client persists after first pairing: a 256-bit `token`, the host's pinned static public key, and the address. Used for all later reconnections — no code ever again. | High | **Only the client** (it is a secret at rest) | **Yes** |
 
@@ -194,14 +194,12 @@ So learning an address is not enough to steal it — you must hold its key. The 
 is memory-only and lasts exactly as long as the registration (a host holds its
 socket and re-registers with the same key on reconnect).
 
-**Address-key binding (default on).** By default Link additionally requires the
-`address` to be the **commitment** to the register key:
-`address == base64url(SHA-256(pub))`. A register whose address is not that is
-refused (`4007`). This makes the routing layer spoof-*proof*, not merely
-spoof-survivable: a squatter cannot even present a frame for your address, because
-no key it holds hashes to it — the race in step 3 disappears. Operators who want the
-legacy opaque-address model (any high-entropy operator-chosen handle) disable it
-(`LINK_BIND_ADDRESS_TO_KEY=0`).
+**Address-key binding (always on).** Link additionally requires the `address` to be
+the **commitment** to the register key: `address == base64url(SHA-256(pub))`. A
+register whose address is not that is refused (`4007`). This makes the routing layer
+spoof-*proof*, not merely spoof-survivable: a squatter cannot even present a frame for
+your address, because no key it holds hashes to it — the race in step 3 disappears.
+This is unconditional; there is no opaque-address mode and no config knob.
 
 **Open vs closed (default open).** In **open** mode any host with a valid signature
 may register (today's behaviour). In **closed** mode the operator supplies an

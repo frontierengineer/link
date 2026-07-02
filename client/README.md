@@ -99,8 +99,7 @@ host handshake, and issues/verifies credentials.
 | option | meaning |
 |---|---|
 | `uplinks: string[]` | relay URLs to register with |
-| `address?: string` | the routing address (defaults to the **commitment to the register key**, `base64url(SHA-256(key))`, so it's spoof-proof; override for the legacy opaque model) |
-| `hostStatic?: KeyPair` | the host's static identity (defaults fresh — persist `.priv`) |
+| `hostStatic?: KeyPair` | the host's static identity (defaults fresh — persist `.priv`). The routing address is always the **commitment to the register key** derived from this identity, `base64url(SHA-256(key))`, so it's spoof-proof and not configurable |
 | `pairingCode?: string` | open pairing immediately (else call `setPairingCode`) |
 | `recoveryKey?: string` | enable cold-start recovery with this high-entropy secret |
 | `tokens?: TokenStore` | a persisted device store (defaults empty) |

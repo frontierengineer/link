@@ -400,8 +400,6 @@ class ManagedConnection implements Connection {
 
 export interface ServeHostOptions {
   uplinks: string[];
-  // Steady-state routing address. Defaults to a fresh random id (persist it).
-  address?: string;
   // The host's static identity (x25519). Defaults to a fresh keypair — persist
   // the private key; clients pin the public key on first pair.
   hostStatic?: KeyPair;
@@ -462,11 +460,10 @@ export async function serveHost(opts: ServeHostOptions): Promise<Host> {
   // Sign every registration with a key derived from the host static identity, so the
   // Link pins it (TOFU) and refuses any squatter that does not hold the same key.
   const registerSigner = registerSignerFromStatic(hostStatic.priv);
-  // Default the address to the COMMITMENT to that register key. A Link that enforces
-  // address-key binding then rejects any register whose address is not this, so the
-  // address cannot be squatted or raced at all. An explicit opts.address overrides
-  // (for the legacy opaque-address model, or a Link with binding disabled).
-  const address = opts.address ?? addressForRegisterKey(registerSigner.pub);
+  // The address IS the commitment to that register key (base64url(sha256(pub))).
+  // Link enforces address-key binding always, so this is the only address a host can
+  // register — it cannot be squatted or raced at all. There is no opaque-address model.
+  const address = addressForRegisterKey(registerSigner.pub);
   const tokens = opts.tokens ?? new TokenStore();
   const lockout = new CodeLockout(opts.maxPairAttempts ?? 5);
   const sessions = new Set<SecureSession>();

@@ -136,7 +136,6 @@ export function createLinkServer(config: Config): LinkServer {
     }
     const verified = verifyRegisterAuth(msg.address, msg.auth, Date.now(), {
       origin: ctx.origin,
-      bindAddressToKey: config.bindAddressToKey,
     });
     if (!verified) {
       close(ws, Close.registerAuth, 'register: a valid signed auth is required');

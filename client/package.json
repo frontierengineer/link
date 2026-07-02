@@ -3,6 +3,11 @@
   "version": "0.2.0",
   "description": "Auditable, multi-uplink secure-connection client for the Link relay model: Noise (NKpsk0) sealed channel + SPAKE2 (RFC 9382) short-code pairing, end-to-end encrypted over content-blind relays.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frontierengineer/link.git",
+    "directory": "client"
+  },
   "type": "module",
   "exports": {
     ".": {

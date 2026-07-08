@@ -1,6 +1,6 @@
 # @frontierengineer/link-client
 
-An auditable **secure-connection library** for the [Link](../README.md) relay
+An auditable **secure-connection library** for the [Link](https://github.com/frontierengineer/link) relay
 model: reach a NAT'd host from anywhere, through relays you don't have to trust,
 with no accounts — end-to-end encrypted, authenticated by a per-host credential.
 
@@ -139,7 +139,7 @@ shape as an unprompted push).
 - **Rendezvous is address-only.** The relay introduces by the high-entropy,
   signed `address`. The short code is *never* a relay lookup key (it would be
   brute-forceable) — only a SPAKE2 secret. So a malicious relay has nothing
-  code-derived to attack. See [../docs/SECURITY.md](../docs/SECURITY.md).
+  code-derived to attack. See [docs/SECURITY.md](https://github.com/frontierengineer/link/blob/master/docs/SECURITY.md).
 - **Recovery.** A high-entropy host secret lets a brand-new device enroll from
   nothing — the same flow as pairing, with the recovery key as the authenticator
   (concurrency-capped but intentionally not permanently locked out, so it can't be
@@ -211,4 +211,4 @@ npm test          # typecheck + unit (KAT) + the end-to-end self-test
 
 ## License
 
-MIT — see [../LICENSE](../LICENSE).
+MIT — see [LICENSE](https://github.com/frontierengineer/link/blob/master/LICENSE).

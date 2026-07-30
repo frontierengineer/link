@@ -139,7 +139,7 @@ out from under the genuine host (a denial of rendezvous)? Every `register` is
 thereafter only the holder of that key can register the address, and only with a
 strictly newer timestamp (so a captured frame can't be replayed). A party that
 knows the address but not the key is refused — and, if the genuine host registered
-first, without disturbing it. See [PROTOCOL.md §6](./PROTOCOL.md).
+first, without disturbing it. See [PROTOCOL.md §7](./PROTOCOL.md).
 
 Three additive gates harden the **introduction plane** further. None touches the
 end-to-end crypto — a hostile Link is exactly as harmless with them as without — and

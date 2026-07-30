@@ -78,7 +78,7 @@ frame travels.
 
 | Message | Direction | Fields | Meaning |
 |---|---|---|---|
-| `register` | H→L | `address`, `auth` | "I am the host at `address`; here is my signature." `auth` is **required** (see §6). |
+| `register` | H→L | `address`, `auth` | "I am the host at `address`; here is my signature." `auth` is **required** (see §7). |
 | `registered` | L→H | `address` | "Verified and pinned. You are reachable." |
 | `resolve` | C→L | `address` | "Introduce me to the host at `address`." |
 | `found` | L→C | `linkId` | "There is a host there; this introduction is `linkId`." |
@@ -96,7 +96,7 @@ Each entry in a `usage` message's `connections` array is
 quota, or `{ "linkId": …, "unlimited": true }` when they did not — so "no limit" is
 explicit and a byte budget can never be inferred from the wire.
 
-Fatal problems are signalled by a WebSocket **close code** instead (see §7).
+Fatal problems are signalled by a WebSocket **close code** instead (see §8).
 
 ## 5. The three flows (swim-lanes with real frames)
 
@@ -161,7 +161,74 @@ A substituted host key fails the handshake; a client without the token fails it.
 malicious Link can drop the connection (denial of service) but cannot read it,
 forge it, or join it.
 
-## 6. Registration is always signed (anti-squat)
+## 6. Inside the sealed stream: the application envelope
+
+Everything above gets two parties spliced and sealed. What rides *inside* that
+sealed stream is one envelope per frame, and a native shell hand-porting this
+client needs it byte for byte, so it is normative here rather than left to the
+reference implementation.
+
+Each sealed plaintext is **one** of two forms. A reader accepts both and tells
+them apart from the **first byte**:
+
+**Framed** (first byte `0x01`):
+
+```
+offset 0        1 byte    envelope version, currently 0x01
+offset 1        4 bytes   metaLen, unsigned big-endian
+offset 5        metaLen   the meta: one JSON object, UTF-8
+offset 5+metaLen …        the payload: raw bytes, to the END of the plaintext
+```
+
+The payload's length is **implicit** — `plaintext.length − 5 − metaLen`. There is
+deliberately no second length field: one length cannot disagree with itself. A
+plaintext with nothing after the meta has no payload, which is the ordinary case.
+
+**Legacy** (first byte `0x7B`, i.e. `{`): the plaintext is exactly the meta's JSON
+and there is no payload. This form is being retired; a peer must still *read* it.
+
+The meta is the same object in both forms:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `t` | `"req"` \| `"res"` \| `"evt"` \| `"cap"` | Frame kind. |
+| `id` | number | `req`/`res` correlation. |
+| `cmd` | any | The request, on `req`. |
+| `ok` | bool | Success, on `res`. |
+| `data` | any | The result on `res`, the event body on `evt`. |
+| `error` | string | The failure reason, on `res` with `ok:false`. |
+| `env` | number[] | On `cap` only: the envelope versions this peer can READ. |
+
+An **unknown `t` is ignored**, which is what lets new frame kinds (like `cap`) be
+introduced without breaking a peer that predates them.
+
+### Negotiating the framed form
+
+Reading both forms is unconditional. **Sending** the framed form is not: a peer
+that predates this envelope parses the whole plaintext as JSON, so `0x01` would
+fail its parse — fatally, since an unparseable plaintext ends a sealed session.
+
+So the rule is one-directional and simple:
+
+1. Immediately after the handshake, each side sends **one `cap` frame, always in
+   the legacy form**, announcing the versions it can read:
+   `{"t":"cap","env":[1]}`. It is legacy-framed by construction — at that moment
+   you know nothing about the peer, and this frame is what teaches it.
+2. A peer sends framed plaintexts **only after** it has received a `cap` naming a
+   version it emits. A peer that never sends one is legacy: keep sending it the
+   legacy form indefinitely.
+3. `cap` is consumed by the session and never surfaced to the application.
+
+A payload therefore cannot be sent to a peer that has not announced support. The
+reference client exposes that state as `Connection.supportsPayload` and refuses
+`sendWithPayload` when it is false, rather than silently base64-ing the bytes
+into `data` — a caller reaching for a payload has bulk worth not encoding, and
+quietly encoding it at exactly the size where it costs most is the wrong answer.
+
+The legacy read path is removed one release after the release that introduced
+this reaches stable; until then both forms are live everywhere.
+
+## 7. Registration is always signed (anti-squat)
 
 `register` **must** carry an `auth` object or it is refused (close `4007`):
 
@@ -207,7 +274,7 @@ may register (today's behaviour). In **closed** mode the operator supplies an
 a genuine signature whose `pub` is not on the list is refused with `4010`. See
 [DEPLOY.md](./DEPLOY.md).
 
-## 7. Relay lifecycle & close codes
+## 8. Relay lifecycle & close codes
 
 A link (one introduction) moves through: `introduced` → `pending` (relay
 requested) → `relaying` (spliced) → `closed`. A relaying link dies only with its
@@ -230,7 +297,7 @@ Fatal conditions close the WebSocket with an application code (4000–4999):
 nothing), `unknown_link` (accept named no pending link), `address_pinned`,
 `register_stale`.
 
-## 8. What Link stores
+## 9. What Link stores
 
 In memory only, never on disk, no accounts:
 
@@ -245,7 +312,7 @@ re-register and clients reconnect. The entire
 service is one small stateless relay — which is what makes "run your own, and the
 'it can't read anything' claim is checkable" true.
 
-## 9. Health & stats (HTTP)
+## 10. Health & stats (HTTP)
 
 Plain HTTP `GET` on the same port:
 

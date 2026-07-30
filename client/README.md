@@ -87,8 +87,22 @@ retrying instead of spinning forever, so the app can forget the credential and
 re-pair.
 
 Exactly one of `code` / `credential` / `recoveryKey` selects the mode.
-`Connection`: `request(cmd)`, `send(evt)`, `onMessage(fn)`, `credential`,
-`address`, `state`, `via`, `close()`.
+`Connection`: `request(cmd)`, `send(evt)`, `sendWithPayload(evt, bytes)`,
+`supportsPayload`, `onMessage(fn)`, `credential`, `address`, `state`, `via`,
+`close()`.
+
+**Bulk rides as bytes, not base64.** `send(evt)` puts one JSON object on the
+sealed stream. `sendWithPayload(evt, bytes)` puts the same JSON beside a RAW
+byte payload — audio, terminal output, a forwarded port, a file — so bulk is
+not inflated 33% to survive a JSON field. `onMessage(fn)` receives it as the
+handler's second argument, `undefined` for an ordinary frame.
+
+The far end must be new enough to read it, so peers announce that once at
+session start and `supportsPayload` reports the answer. Read it per STREAM
+(a reconnect re-negotiates) and take the other path when it is false;
+`sendWithPayload` throws rather than silently base64-ing bytes you asked it not
+to. The wire, and why the negotiation only runs one way, is normative in
+[docs/PROTOCOL.md §6](https://github.com/frontierengineer/link/blob/master/docs/PROTOCOL.md).
 
 ### `serveHost(options) → Promise<Host>`
 

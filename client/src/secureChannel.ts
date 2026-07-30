@@ -231,12 +231,91 @@ export async function reconnectResponder(pipe: Pipe, header: Header, opts: Recon
 export type RequestHandler = (cmd: unknown) => unknown | Promise<unknown>;
 
 interface Envelope {
-  t: 'req' | 'res' | 'evt';
+  // 'cap' is the capability hello, consumed by the session itself and never
+  // surfaced to the application (see PAYLOAD FRAMING below).
+  t: 'req' | 'res' | 'evt' | 'cap';
   id?: number;
   cmd?: unknown;
   ok?: boolean;
   data?: unknown;
   error?: string;
+  // 'cap' only: the envelope versions this peer can READ.
+  env?: number[];
+}
+
+// — PAYLOAD FRAMING: how bulk rides without base64 —
+//
+// The sealed plaintext used to be exactly `JSON.stringify(envelope)`. That makes
+// every byte of application data JSON, so anything binary — audio, a terminal's
+// output, a forwarded port's traffic, a file — has to be base64'd by the caller:
+// 33% more bytes through the AEAD, the relay, and both ends' JSON parsers, to
+// carry bytes that were already bytes.
+//
+// So a plaintext may now instead be:
+//
+//   offset 0        1 byte    ENVELOPE_VERSION (0x01)
+//   offset 1        4 bytes   metaLen, unsigned big-endian
+//   offset 5        metaLen   the JSON envelope, UTF-8 — unchanged in shape
+//   offset 5+metaLen …        the payload: raw bytes, to the END of the plaintext
+//
+// The payload's length is IMPLICIT (plaintext length − 5 − metaLen), so there is
+// exactly one length on the wire and no second one that can disagree with it.
+// Zero remaining bytes means no payload, which is what every ordinary frame
+// sends and is byte-for-byte the case a legacy frame already covered.
+//
+// A reader tells the two apart from the FIRST BYTE: 0x01 is a framed plaintext,
+// and '{' (0x7B) is a legacy JSON one. Unambiguous, one comparison, no state.
+//
+// NEGOTIATION, and why it is one-directional. Reading both forms is safe and
+// unconditional. SENDING the framed form is not: a peer that predates this
+// cannot parse it and would fail its JSON.parse — fatally, since an
+// unparseable plaintext ends the session. So each end announces what it can
+// READ, once, as a legacy-JSON 'cap' frame at session start, and only sends
+// framed AFTER it has seen the peer's announcement. A peer that never sends one
+// is legacy and simply keeps receiving legacy frames forever. An unknown
+// envelope type has always been ignored by dispatch(), so a legacy peer
+// discards our hello rather than choking on it.
+//
+// The legacy READ path is removed one release after this ships stable; the
+// removal note lives at the read site in readLoop().
+
+/** The version byte every framed plaintext starts with. */
+export const ENVELOPE_VERSION = 0x01;
+
+/** The first byte of a legacy plaintext: '{', the start of its JSON. */
+const LEGACY_FIRST_BYTE = 0x7b;
+
+/** The envelope versions this build can READ, announced in the 'cap' hello. */
+const READABLE_ENVELOPES = [ENVELOPE_VERSION];
+
+/**
+ * Frame one plaintext: version, meta length, meta, payload. Exported because it
+ * is the definition of the wire — the tests assert against it, and the native
+ * shells port it byte for byte.
+ */
+export function frameSealedPlaintext(metaJson: string, payload: Uint8Array): Uint8Array {
+  const meta = utf8(metaJson);
+  return new Writer().u8(ENVELOPE_VERSION).u32(meta.length).bytes(meta).bytes(payload).finish();
+}
+
+/**
+ * The inverse. Returns the JSON meta and the payload (a view's copy, so the
+ * caller owns it), or null when this plaintext is not framed — which is how a
+ * legacy frame is recognised rather than guessed at.
+ */
+export function parseSealedPlaintext(plain: Uint8Array): { meta: string; payload: Uint8Array } | null {
+  if (plain.length < 1 || plain[0] !== ENVELOPE_VERSION) return null;
+  if (plain.length < 5) throw new SealedError('framed plaintext is too short for its length prefix');
+  const r = new Reader(plain);
+  r.u8();
+  const metaLen = r.u32();
+  // A length that runs past the plaintext is a corrupt or hostile frame. It
+  // cannot be tolerated quietly: the AEAD already proved the bytes are authentic,
+  // so a bad length here means the PEER built a bad frame, which is a bug worth
+  // failing loudly rather than reading a truncated envelope.
+  if (5 + metaLen > plain.length) throw new SealedError('framed plaintext meta length runs past the frame');
+  const meta = fromUtf8(r.bytes(metaLen));
+  return { meta, payload: plain.slice(5 + metaLen) };
 }
 
 export interface SessionOptions {
@@ -266,12 +345,16 @@ const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60_000;
 export class SecureSession {
   private nextId = 1;
   private readonly pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
-  private readonly listeners = new Set<(data: unknown) => void>();
+  private readonly listeners = new Set<(data: unknown, payload?: Uint8Array) => void>();
   private readonly onRequest: RequestHandler | undefined;
   private readonly requestTimeoutMs: number;
   private readonly idleTimeoutMs: number;
   private idleTimer: NodeJS.Timeout | undefined;
   private alive = true;
+  // Set when the peer has announced it can READ framed plaintexts. Until then
+  // every frame we send is legacy JSON, because a peer that predates the
+  // envelope dies on one it cannot parse.
+  private peerReadsFramed = false;
   private resolveDone!: (info: { reason?: string }) => void;
   readonly done: Promise<{ reason?: string }> = new Promise((r) => (this.resolveDone = r));
 
@@ -281,6 +364,10 @@ export class SecureSession {
     this.idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
     this.bumpIdle(); // arm the idle window; it resets on every frame either direction
     void this.readLoop();
+    // Announce what we can read, before anything else goes out. Always as legacy
+    // JSON: at this instant we know nothing about the peer, and this frame is
+    // precisely what teaches it. A legacy peer ignores an unknown envelope type.
+    this.safeSend(this.encodeLegacy({ t: 'cap', env: READABLE_ENVELOPES }));
     void this.pipe.closed.then((info) => this.shutdown(info.reason ?? 'pipe closed'));
   }
 
@@ -310,8 +397,41 @@ export class SecureSession {
     this.safeSend(this.encode({ t: 'evt', data }));
   }
 
-  // Subscribe to peer events; returns an unsubscribe function.
-  onMessage(fn: (data: unknown) => void): () => void {
+  /**
+   * True once the peer has announced it can read framed plaintexts, i.e. once
+   * sendWithPayload will work. Callers that have a fallback (send the bulk some
+   * slower way) read this and choose; callers that do not can let
+   * sendWithPayload throw.
+   *
+   * It is false at session start and flips once, early — the peer's hello is the
+   * first thing it sends. A caller deciding per stream rather than per frame
+   * should read it when the stream STARTS.
+   */
+  get supportsPayload(): boolean {
+    return this.peerReadsFramed;
+  }
+
+  /**
+   * Fire-and-forget event whose bulk rides as RAW BYTES beside the JSON, instead
+   * of base64 inside it.
+   *
+   * Throws when the peer has not announced support, rather than silently
+   * base64-ing into `data`: a caller reaching for this has bytes worth not
+   * encoding, and quietly doing the thing it asked to avoid — at a size where it
+   * costs most — is the wrong answer. Check supportsPayload first.
+   */
+  sendWithPayload(data: unknown, payload: Uint8Array): void {
+    if (!this.alive) return;
+    if (!this.peerReadsFramed) {
+      throw new SealedError('the peer has not announced the binary envelope; check supportsPayload first');
+    }
+    this.safeSend(this.encode({ t: 'evt', data }, payload));
+  }
+
+  // Subscribe to peer events; returns an unsubscribe function. `payload` is
+  // present only for a peer that sent one, and is undefined for every ordinary
+  // frame — so an existing one-argument listener is unaffected.
+  onMessage(fn: (data: unknown, payload?: Uint8Array) => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }
@@ -320,7 +440,22 @@ export class SecureSession {
     this.shutdown(reason);
   }
 
-  private encode(env: Envelope): Uint8Array {
+  /**
+   * Encode one envelope for the wire: framed once the peer has announced it can
+   * read that, legacy JSON until then. A payload is only ever possible on the
+   * framed path, which is why sendWithPayload gates on the same flag.
+   */
+  private encode(env: Envelope, payload: Uint8Array = EMPTY): Uint8Array {
+    if (!this.peerReadsFramed) {
+      if (payload.length) throw new SealedError('cannot send a payload to a peer that has not announced the binary envelope');
+      return this.encodeLegacy(env);
+    }
+    return seal(this.transport.send, frameSealedPlaintext(JSON.stringify(env), payload));
+  }
+
+  /** The pre-envelope encoding: the bare JSON, sealed. Also what the capability
+   *  hello itself always uses, since it is what teaches the peer the other form. */
+  private encodeLegacy(env: Envelope): Uint8Array {
     return seal(this.transport.send, utf8(JSON.stringify(env)));
   }
 
@@ -357,20 +492,45 @@ export class SecureSession {
       }
       this.bumpIdle(); // inbound traffic keeps the session alive
       let env: Envelope;
+      let payload: Uint8Array | undefined;
       try {
         const plain = open(this.transport.recv, frame);
-        env = JSON.parse(fromUtf8(plain)) as Envelope;
+        // Both forms are read, always: the first byte says which (0x01 framed,
+        // '{' legacy) and there is no state to get wrong.
+        //
+        // REMOVAL TRIGGER: the legacy branch goes one release after the release
+        // that first carried this reaches stable — by then no peer in the window
+        // can still be sending it. Deleting it means dropping the else-branch
+        // below and making a non-0x01 first byte a hard error.
+        const framed = parseSealedPlaintext(plain);
+        if (framed) {
+          env = JSON.parse(framed.meta) as Envelope;
+          if (framed.payload.length) payload = framed.payload;
+        } else {
+          if (plain.length && plain[0] !== LEGACY_FIRST_BYTE) {
+            throw new SealedError('plaintext is neither a framed envelope nor JSON');
+          }
+          env = JSON.parse(fromUtf8(plain)) as Envelope;
+        }
       } catch (e) {
         // An authentication failure is fatal and security-relevant: stop.
         this.shutdown(e instanceof Error ? e.message : 'bad frame');
         return;
       }
-      await this.dispatch(env);
+      await this.dispatch(env, payload);
     }
   }
 
-  private async dispatch(env: Envelope): Promise<void> {
+  private async dispatch(env: Envelope, payload?: Uint8Array): Promise<void> {
     switch (env.t) {
+      case 'cap': {
+        // The peer announced what it can read. Upgrade only on a version we
+        // actually emit; anything else leaves us on the legacy path, which is
+        // always readable. Never surfaced to the application.
+        const versions = Array.isArray(env.env) ? env.env : [];
+        if (versions.includes(ENVELOPE_VERSION)) this.peerReadsFramed = true;
+        return;
+      }
       case 'res': {
         if (env.id === undefined) return;
         const waiter = this.pending.get(env.id);
@@ -398,7 +558,7 @@ export class SecureSession {
       case 'evt': {
         for (const fn of this.listeners) {
           try {
-            fn(env.data);
+            fn(env.data, payload);
           } catch {
             /* a listener throwing must not kill the session */
           }

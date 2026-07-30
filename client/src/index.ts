@@ -112,7 +112,20 @@ export interface ConnectOptions {
 export interface Connection {
   request(cmd: unknown, timeoutMs?: number): Promise<unknown>;
   send(evt: unknown): void;
-  onMessage(fn: (data: unknown) => void): () => void;
+  /**
+   * True when the far end has announced it can read the binary envelope, so
+   * sendWithPayload will work. Read it per STREAM rather than caching it: a
+   * reconnect builds a fresh session, which re-negotiates, and a peer that was
+   * upgraded between two connections changes the answer.
+   */
+  readonly supportsPayload: boolean;
+  /**
+   * Fire-and-forget event whose bulk rides as raw bytes beside the JSON rather
+   * than base64 inside it. Throws when the far end has not announced support
+   * (check supportsPayload) or when the connection has no live session.
+   */
+  sendWithPayload(evt: unknown, payload: Uint8Array): void;
+  onMessage(fn: (data: unknown, payload?: Uint8Array) => void): () => void;
   // The credential to persist. Defined after a successful pair/recovery (or if
   // one was supplied). Pin this and reuse it as `credential` next time.
   readonly credential: DeviceCredential | undefined;
@@ -140,7 +153,7 @@ class ManagedConnection implements Connection {
   private _via = '';
   private session: SecureSession | undefined;
   private epoch = 0; // bumps on every successful (re)connection
-  private readonly listeners = new Set<(data: unknown) => void>();
+  private readonly listeners = new Set<(data: unknown, payload?: Uint8Array) => void>();
   private readonly connectedWaiters: { resolve: () => void; reject: (e: Error) => void; timer: NodeJS.Timeout }[] = [];
   private readonly epochWaiters: { minEpoch: number; resolve: () => void; reject: (e: Error) => void; timer: NodeJS.Timeout }[] = [];
   private userClosed = false;
@@ -362,7 +375,21 @@ class ManagedConnection implements Connection {
     this.session?.send(evt);
   }
 
-  onMessage(fn: (data: unknown) => void): () => void {
+  get supportsPayload(): boolean {
+    return this.session?.supportsPayload ?? false;
+  }
+
+  sendWithPayload(evt: unknown, payload: Uint8Array): void {
+    const session = this.session;
+    // A dropped session is the ordinary case here, not an error: the managed
+    // connection reconnects and the caller's next frame rides the new one. But a
+    // payload send has no queue behind it, so say so rather than discard bytes
+    // the caller believes were sent.
+    if (!session) throw new Error('no live session; the connection is reconnecting');
+    session.sendWithPayload(evt, payload);
+  }
+
+  onMessage(fn: (data: unknown, payload?: Uint8Array) => void): () => void {
     this.listeners.add(fn);
     const off = this.session?.onMessage(fn);
     return () => {

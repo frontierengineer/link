@@ -36,6 +36,14 @@ import type { Pipe } from './pipe.js';
 import { utf8, toB64url, fromB64url } from './bytes.js';
 
 export { Mode, SecureSession } from './secureChannel.js';
+// The envelope's framing, exported because a peer that FORWARDS these frames
+// needs the same definition of them the sealed channel uses. The desktop edge is
+// exactly that peer: it receives a meta+payload frame over the sealed channel and
+// re-emits it to a browser on its own socket, and a second, hand-written copy of
+// the wire in the component whose whole job is passing the bytes through
+// unchanged is the copy most likely to drift and the hardest place to notice it.
+// docs/PROTOCOL.md §6 is the normative description; these are its implementation.
+export { ENVELOPE_VERSION, frameSealedPlaintext, parseSealedPlaintext } from './secureChannel.js';
 export {
   TokenStore,
   CodeLockout,

@@ -119,6 +119,7 @@ async function main(): Promise<void> {
   let conn: Connection | undefined;
   const states: ConnState[] = [];
   const usageReports: LinkUsage[][] = [];
+  const admissions: { keyId: string; codeId: string | undefined }[] = [];
 
   await stage('1. spawn two Link server instances (A, B)', async () => {
     [linkA, linkB] = await Promise.all([spawnLink('A'), spawnLink('B')]);
@@ -134,6 +135,7 @@ async function main(): Promise<void> {
       maxPairAttempts: 5,
       onRequest: (cmd) => cmd, // echo
       onUsage: (conns) => usageReports.push(conns),
+      onConnect: (_s, info) => { if (info.keyId) admissions.push({ keyId: info.keyId, codeId: info.codeId }); },
     });
     assert.equal(host.registeredCount, 2, 'registered to both uplinks');
   });
@@ -175,6 +177,12 @@ async function main(): Promise<void> {
     assert.equal(ca.state, 'connected', 'the first code paired');
     assert.equal(cb.state, 'connected', 'the second code paired, and did not kill the first');
     assert.notEqual(ca.credential!.keyId, cb.credential!.keyId, 'two distinct devices were enrolled');
+    // The host must be able to say WHICH code admitted each device: anything
+    // parked on a code (a name to christen the worker, the machine it was
+    // provisioned for) reaches the wrong worker otherwise.
+    const byKey = new Map(admissions.map((x) => [x.keyId, x.codeId]));
+    assert.equal(byKey.get(ca.credential!.keyId), a.codeId, 'the first device is attributed to its own code');
+    assert.equal(byKey.get(cb.credential!.keyId), b.codeId, 'and the second to its own, never swapped');
     assert.equal(host!.livePairingCodes().length, 0, 'each code is single-use and burned on its own success');
 
     // A third client presenting a burned id is refused rather than served some

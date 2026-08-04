@@ -155,6 +155,39 @@ async function main(): Promise<void> {
     assert.equal(host!.sessions.size, 1, 'host sees one live session');
   });
 
+  await stage('3b. TWO live pairing codes admit two clients concurrently, each burning only its own', async () => {
+    // The capability one-code-at-a-time could not offer. Two workers are set up
+    // at the same moment — the common real case is the host's own colocated
+    // worker enrolling at boot while an operator mints their first code — and
+    // neither may displace or invalidate the other.
+    const a = host!.openPairingCode('AAA111');
+    const b = host!.openPairingCode('BBB222');
+    assert.notEqual(a.codeId, b.codeId, 'each open gets its own id');
+    assert.equal(host!.livePairingCodes().length, 2, 'both are live at once');
+
+    const dial = { connectTimeoutMs: 4000, controlTimeoutMs: 4000 };
+    // Concurrently, deliberately: serialising them would hide exactly the race
+    // that made this necessary.
+    const [ca, cb] = await Promise.all([
+      connect({ uplinks: [linkA!.url], address: host!.address, code: 'AAA111', codeId: a.codeId, dial }),
+      connect({ uplinks: [linkA!.url], address: host!.address, code: 'BBB222', codeId: b.codeId, dial }),
+    ]);
+    assert.equal(ca.state, 'connected', 'the first code paired');
+    assert.equal(cb.state, 'connected', 'the second code paired, and did not kill the first');
+    assert.notEqual(ca.credential!.keyId, cb.credential!.keyId, 'two distinct devices were enrolled');
+    assert.equal(host!.livePairingCodes().length, 0, 'each code is single-use and burned on its own success');
+
+    // A third client presenting a burned id is refused rather than served some
+    // other live code.
+    let refused = false;
+    await connect({ uplinks: [linkA!.url], address: host!.address, code: 'AAA111', codeId: a.codeId, dial, autoReconnect: false })
+      .catch(() => { refused = true; });
+    assert.ok(refused, 'a spent code id pairs nothing');
+
+    await ca.close();
+    await cb.close();
+  });
+
   await stage('4. sealed request round-trips', async () => {
     const reply = await conn!.request({ echo: 'hello-1', n: 7 });
     assert.deepEqual(reply, { echo: 'hello-1', n: 7 }, 'host echoed the sealed request');

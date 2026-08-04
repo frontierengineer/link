@@ -17,10 +17,10 @@ import {
   credentialToString,
   credentialFromString,
 } from '../src/pairing.js';
-import { decodeHeader, Mode, seal, open } from '../src/secureChannel.js';
+import { decodeHeader, encodeHeader, CODE_ID_LEN, Mode, seal, open } from '../src/secureChannel.js';
 import { x25519Keygen } from '../src/crypto.js';
 import { memoryPipePair } from '../src/pipe.js';
-import { bytesToHex, hexToBytes, utf8, fromB64url, toB64url } from '../src/bytes.js';
+import { bytesToHex, hexToBytes, utf8, fromB64url, toB64url, randomBytes } from '../src/bytes.js';
 
 interface SpakeVector {
   A: string;
@@ -164,4 +164,67 @@ test('deriveW: refuses to produce a usable scalar from nothing surprising', () =
   const w2 = deriveW(utf8('ABC124'));
   assert.notEqual(w1, w2);
   assert.equal(deriveW(utf8('ABC123')), w1, 'deterministic');
+});
+
+// ── many live codes, told apart by a public id ──────────────────────────────
+//
+// A host can only run SPAKE2 with ONE password per handshake — it commits to `w`
+// before it sends its share — so it cannot try a set of codes against a single
+// attempt. Holding several therefore requires the CLIENT to say which one it
+// has, which is what the header's code id is for.
+//
+// These pin the three properties that make that safe and useful: the id is
+// bound into the SPAKE2 transcript (so a relay cannot steer a client onto a
+// different code), each code burns alone, and a client that names nothing still
+// pairs against the legacy single slot.
+
+test('a pair header round-trips its code id, and binds it into the transcript', () => {
+  const codeId = randomBytes(CODE_ID_LEN);
+  const encoded = encodeHeader({ mode: Mode.Pair, codeId });
+  const decoded = decodeHeader(encoded);
+  assert.deepEqual(decoded.codeId, codeId, 'the host reads back exactly what the client sent');
+  // The AAD is rebuilt independently on each side from its own decoded header,
+  // so encode(decode(x)) must be x byte for byte or the handshake fails with no
+  // usable diagnostic. This is that identity.
+  assert.deepEqual(encodeHeader(decoded), encoded);
+  // And a header with no id is still the v1 encoding, which is what keeps every
+  // client already in the field pairing.
+  const legacy = encodeHeader({ mode: Mode.Pair });
+  assert.equal(legacy.length, encoded.length - CODE_ID_LEN);
+  assert.deepEqual(decodeHeader(legacy).codeId, undefined);
+});
+
+test('a code id is public, and carries nothing derived from the code', () => {
+  // Two ids minted for the SAME code must be unrelated: an id that were a
+  // function of the code would hand a watching relay an offline oracle for the
+  // very secret SPAKE2 exists to protect.
+  const seen = new Set<string>();
+  for (let i = 0; i < 64; i++) seen.add(toB64url(randomBytes(CODE_ID_LEN)));
+  assert.equal(seen.size, 64, 'ids are fresh randomness, not a hash of anything');
+});
+
+test('a client that names a code the host does not hold is refused, not run against another', async () => {
+  // The dangerous alternative is falling back to some other live code: SPAKE2
+  // would then run with a password the client never had, and the failure would
+  // be reported as a wrong code — a lie about which end is broken.
+  const [c, h] = memoryPipePair();
+  const tokens = new TokenStore();
+  const header = { mode: Mode.Pair as const, codeId: randomBytes(CODE_ID_LEN) };
+  const clientSide = spakeClient(c, utf8('K7P2QX'), Mode.Pair, 1000, header.codeId).catch((e) => e);
+  const decoded = decodeHeader(await h.recv(1000));
+  assert.deepEqual(decoded.codeId, header.codeId);
+  // The host resolves that id to nothing and closes rather than handshaking.
+  h.close('pairing not open');
+  const outcome = await clientSide;
+  assert.ok(outcome instanceof Error, 'the client fails rather than pairing on someone else’s code');
+  void tokens;
+});
+
+test('a recover header may not carry a code id', () => {
+  // Recovery has one high-entropy key, never a set, so an id there is
+  // meaningless — and silently ignoring it would let a caller believe recovery
+  // was scoped when it was not.
+  const forged = new Uint8Array([...encodeHeader({ mode: Mode.Pair, codeId: randomBytes(CODE_ID_LEN) })]);
+  forged[5] = Mode.Recover; // MAGIC(4) VERSION(1) MODE(1)
+  assert.throws(() => decodeHeader(forged), /cannot carry a code id/);
 });

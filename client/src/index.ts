@@ -16,6 +16,8 @@ import {
   SessionClosedError,
   DeviceRevokedError,
   decodeHeader,
+  CODE_ID_LEN,
+  type Header,
   type RequestHandler,
   type SessionOptions,
 } from './secureChannel.js';
@@ -33,7 +35,7 @@ import {
 import { x25519Keygen, type KeyPair } from './crypto.js';
 import { registerSignerFromStatic, addressForRegisterKey } from './registerAuth.js';
 import type { Pipe } from './pipe.js';
-import { utf8, toB64url, fromB64url } from './bytes.js';
+import { utf8, toB64url, fromB64url, randomBytes } from './bytes.js';
 
 export { Mode, SecureSession } from './secureChannel.js';
 // The envelope's framing, exported because a peer that FORWARDS these frames
@@ -95,6 +97,13 @@ export interface ConnectOptions {
   // address (a QR/deep-link payload carries the address; the code is scanned/typed
   // with it). Omit on reconnect/recover.
   code?: string;
+  // FIRST PAIR, optional: which of the host's live pairing codes `code` is. The
+  // host issues it beside the code and it travels with it (the pairing URL, the
+  // installer one-liner). It is public and unrelated to the code — see CODE_ID_LEN
+  // in secureChannel.ts — so it can be sent in the clear without weakening SPAKE2.
+  // Omit it and the host serves this pair from its single legacy slot, which is
+  // what every client built before this does.
+  codeId?: string;
   // RECONNECT: a stored credential (token + pinned host static key + address).
   // Omit on first pair; the returned connection carries the new credential to
   // persist.
@@ -210,7 +219,8 @@ class ManagedConnection implements Connection {
       // First-pair: rendezvous on the address; the code only keys SPAKE2 (deriveW)
       // end-to-end and is NEVER handed to the Link in any form — raw or hashed.
       const code = this.opts.code;
-      return { reach: { address }, runHandshake: (p) => this.runSpake(p, code, Mode.Pair) };
+      const codeId = this.opts.codeId;
+      return { reach: { address }, runHandshake: (p) => this.runSpake(p, code, Mode.Pair, codeId) };
     }
     if (this._credential) {
       return { reach: { address }, runHandshake: (p) => this.runReconnect(p, this._credential!) };
@@ -231,8 +241,10 @@ class ManagedConnection implements Connection {
     };
   }
 
-  private async runSpake(pipe: Pipe, password: string, mode: Mode.Pair | Mode.Recover): Promise<HandshakeOutcome> {
-    const { transport, credential } = await spakeClient(pipe, utf8(password), mode, this.opts.handshakeTimeoutMs);
+  private async runSpake(pipe: Pipe, password: string, mode: Mode.Pair | Mode.Recover, codeId?: string): Promise<HandshakeOutcome> {
+    const { transport, credential } = await spakeClient(
+      pipe, utf8(password), mode, this.opts.handshakeTimeoutMs, codeId ? fromB64url(codeId) : undefined,
+    );
     const session = new SecureSession(pipe, transport, this.sessionOpts());
     return { session, credential };
   }
@@ -475,9 +487,24 @@ export interface Host {
   readonly tokens: TokenStore;
   readonly sessions: ReadonlySet<SecureSession>;
   readonly registeredCount: number;
-  // Open / close / rotate the active pairing code (single-use; cleared on a
-  // successful pair or after too many wrong guesses).
+  // Open / close / rotate the LEGACY single pairing code (single-use; cleared on
+  // a successful pair or after too many wrong guesses). It serves clients that
+  // send no code id, which is every client built before code ids existed.
   setPairingCode(code: string | null): void;
+  // Open one of MANY live pairing codes, and get back the public id that tells
+  // this one apart. Hand the id to whoever gets the code — it travels with the
+  // code, is not derived from it, and is safe in the clear.
+  //
+  // Several may be open at once, each single-use and each burned independently:
+  // that is the whole point. A host holding one code could not admit two workers
+  // being set up at the same time, and opening a second used to silently kill the
+  // first, stranding whoever held it.
+  openPairingCode(code: string, opts?: { ttlMs?: number }): { codeId: string };
+  // Close one by its id (it is already gone after a successful pair). Returns
+  // whether it was still open.
+  closePairingCode(codeId: string): boolean;
+  // The ids of every code open right now, so a caller can report or expire them.
+  livePairingCodes(): { codeId: string; expiresInMs: number | null }[];
   // Cut a device off: drop its token so its next reconnect fails auth and is
   // refused with a typed DeviceRevokedError (and any live session it holds ends when
   // its pipe next turns over). Returns whether the device existed. This is the
@@ -503,6 +530,21 @@ export async function serveHost(opts: ServeHostOptions): Promise<Host> {
   const lockout = new CodeLockout(opts.maxPairAttempts ?? 5);
   const sessions = new Set<SecureSession>();
   let pairingCode: string | null = opts.pairingCode ?? null;
+  // The codes opened by id, alongside the legacy single slot above. A host can
+  // hold as many as it likes; each is single-use and burns on its own success or
+  // its own K wrong guesses, so one worker's fumbled setup never costs another
+  // its code. Keyed by the base64url id the client echoes back in its header.
+  const codesById = new Map<string, { code: string; expiresAt: number | null }>();
+  const codeExpired = (e: { expiresAt: number | null }) => e.expiresAt !== null && e.expiresAt <= Date.now();
+  // Sweep on touch rather than on a timer: a host with no pairing traffic should
+  // hold no timers, and an expired code must never authenticate even if a sweep
+  // has not run.
+  function liveCode(codeId: string): string | null {
+    const entry = codesById.get(codeId);
+    if (!entry) return null;
+    if (codeExpired(entry)) { codesById.delete(codeId); return null; }
+    return entry.code;
+  }
   const handshakeTimeout = opts.handshakeTimeoutMs ?? 15_000;
   // Lockout key for the recovery path. Recovery is gated by `reserve()` purely
   // for concurrency / CPU-DoS bounding; a wrong recovery guess is refunded
@@ -533,11 +575,16 @@ export async function serveHost(opts: ServeHostOptions): Promise<Host> {
     }
   }
 
-  async function handleSpake(pipe: Pipe, header: { mode: Mode }, via: string): Promise<void> {
+  async function handleSpake(pipe: Pipe, header: Header, via: string): Promise<void> {
     const isPair = header.mode === Mode.Pair;
-    const secret = isPair ? pairingCode : opts.recoveryKey ?? null;
+    // A client that named a code gets THAT code and no other. Falling back to
+    // some other live code would be worse than refusing: it would run SPAKE2
+    // with a password the client never had, and report the resulting failure as
+    // a wrong code — a lie about which of the two ends is broken.
+    const namedId = isPair && header.codeId ? toB64url(header.codeId) : null;
+    const secret = isPair ? (namedId !== null ? liveCode(namedId) : pairingCode) : opts.recoveryKey ?? null;
     if (secret === null) {
-      opts.onLog?.('pairing-closed', { mode: header.mode });
+      opts.onLog?.('pairing-closed', { mode: header.mode, ...(namedId !== null ? { codeId: namedId } : {}) });
       pipe.close(isPair ? 'pairing not open' : 'recovery not enabled');
       return;
     }
@@ -564,7 +611,10 @@ export async function serveHost(opts: ServeHostOptions): Promise<Host> {
       // Success.
       if (isPair) {
         lockout.clear(lockKey);
-        pairingCode = null; // single-use: burn the code on success
+        // Single-use: burn THIS code, and only this one. Every other live code
+        // belongs to a different worker's setup and is untouched.
+        if (namedId !== null) codesById.delete(namedId);
+        else pairingCode = null;
       } else {
         lockout.refund(lockKey); // recovery success: release the slot (not single-use)
       }
@@ -579,8 +629,11 @@ export async function serveHost(opts: ServeHostOptions): Promise<Host> {
         if (isPair) {
           const { lockedOut } = lockout.recordFailure(lockKey);
           if (lockedOut) {
-            pairingCode = null; // burn the code after K wrong guesses
-            opts.onLog?.('pairing-burned', {});
+            // Burn after K wrong guesses — again only the one that was guessed
+            // at, so an attacker cannot lock every code out by attacking one.
+            if (namedId !== null) codesById.delete(namedId);
+            else pairingCode = null;
+            opts.onLog?.('pairing-burned', { ...(namedId !== null ? { codeId: namedId } : {}) });
           }
         } else {
           lockout.refund(lockKey);
@@ -630,6 +683,27 @@ export async function serveHost(opts: ServeHostOptions): Promise<Host> {
     sessions,
     get registeredCount() {
       return uplinkMgr.registeredCount;
+    },
+    openPairingCode(code: string, o?: { ttlMs?: number }): { codeId: string } {
+      // The id is fresh randomness, never a function of the code: derive it from
+      // the code and a relay watching the wire would get a free oracle for
+      // guessing it offline, which is exactly what SPAKE2 exists to deny.
+      const codeId = toB64url(randomBytes(CODE_ID_LEN));
+      const ttl = o?.ttlMs;
+      codesById.set(codeId, { code, expiresAt: ttl !== undefined ? Date.now() + ttl : null });
+      lockout.clear(`pair:${code}`);
+      return { codeId };
+    },
+    closePairingCode(codeId: string): boolean {
+      return codesById.delete(codeId);
+    },
+    livePairingCodes(): { codeId: string; expiresInMs: number | null }[] {
+      const out: { codeId: string; expiresInMs: number | null }[] = [];
+      for (const [codeId, entry] of codesById) {
+        if (codeExpired(entry)) { codesById.delete(codeId); continue; }
+        out.push({ codeId, expiresInMs: entry.expiresAt === null ? null : entry.expiresAt - Date.now() });
+      }
+      return out;
     },
     setPairingCode(code: string | null): void {
       // Set (or clear) the SPAKE2 secret the host handshake uses. The code is NEVER

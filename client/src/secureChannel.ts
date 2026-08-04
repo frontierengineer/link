@@ -18,7 +18,31 @@ const EMPTY = new Uint8Array(0);
 // — wire framing for the handshake header (the first frame, client→host) —
 
 export const MAGIC = Uint8Array.of(0x46, 0x4c, 0x6b, 0x31); // "FLk1"
+// Version 1 is the original header. Version 2 differs in ONE way: a Pair header
+// carries an 8-byte code id (below). A host accepts both, so a v1 client keeps
+// pairing against a v2 host forever; a client only sends v2 when it was actually
+// given a code id to send.
 export const VERSION = 1;
+export const VERSION_CODE_ID = 2;
+
+// — why a pairing code needs a public id —
+//
+// A host can only run SPAKE2 with ONE password per handshake: it must commit to
+// `w` before it sends its share, so it cannot try several codes against one
+// attempt. That is why a host used to hold exactly one live pairing code, and
+// why opening a second silently killed the first.
+//
+// The fix is for the CLIENT to say which code it holds. The id is public,
+// random, and — critically — has NOTHING to do with the code: it is not derived
+// from it, so it leaks no guessing advantage to a relay that watches every byte
+// of it. SPAKE2's online-guessing bound is untouched. The id travels with the
+// code wherever the code already travels (the pairing URL, the installer
+// one-liner), because it is not a second secret to keep.
+//
+// It rides in the header, which is the SPAKE2 AAD, so it is bound into the
+// transcript: a relay that swapped the id would break the handshake rather than
+// silently steer the client onto a different code.
+export const CODE_ID_LEN = 8;
 
 export enum Mode {
   Pair = 1, // SPAKE2 with a short code
@@ -33,13 +57,23 @@ export const STATIC_PUB_LEN = 32;
 export interface Header {
   mode: Mode;
   keyId?: Uint8Array; // present iff mode === Reconnect
+  codeId?: Uint8Array; // present iff mode === Pair AND the client was given one
 }
 
 export function encodeHeader(h: Header): Uint8Array {
-  const w = new Writer().bytes(MAGIC).u8(VERSION).u8(h.mode);
+  // The version is a FUNCTION of the content, so encode(decode(x)) === x for
+  // every header on the wire. That identity is load-bearing: this output is the
+  // SPAKE2 AAD, rebuilt independently on both sides from their own decoded
+  // header, and a byte of disagreement fails the handshake with no clue why.
+  const carriesCodeId = h.mode === Mode.Pair && !!h.codeId;
+  const w = new Writer().bytes(MAGIC).u8(carriesCodeId ? VERSION_CODE_ID : VERSION).u8(h.mode);
   if (h.mode === Mode.Reconnect) {
     if (!h.keyId || h.keyId.length !== KEY_ID_LEN) throw new Error('reconnect header needs a 16-byte keyId');
     w.bytes(h.keyId);
+  }
+  if (carriesCodeId) {
+    if (h.codeId!.length !== CODE_ID_LEN) throw new Error(`a pair header's code id must be ${CODE_ID_LEN} bytes`);
+    w.bytes(h.codeId!);
   }
   return w.finish();
 }
@@ -75,13 +109,25 @@ export function decodeHeader(frame: Uint8Array): Header {
   const magic = r.bytes(MAGIC.length);
   if (!equalCt(magic, MAGIC)) throw new Error('bad protocol magic');
   const version = r.u8();
-  if (version !== VERSION) throw new Error(`unsupported protocol version ${version}`);
+  if (version !== VERSION && version !== VERSION_CODE_ID) throw new Error(`unsupported protocol version ${version}`);
   const mode = r.u8();
   if (mode === Mode.Reconnect) {
     const keyId = r.bytes(KEY_ID_LEN).slice();
     return { mode, keyId };
   }
-  if (mode === Mode.Pair || mode === Mode.Recover) return { mode };
+  if (mode === Mode.Pair) {
+    // A v1 client names no code, and a v2 host still serves it from its legacy
+    // single slot — which is what keeps every daemon already in the field
+    // pairing after this ships.
+    if (version !== VERSION_CODE_ID) return { mode };
+    return { mode, codeId: r.bytes(CODE_ID_LEN).slice() };
+  }
+  if (mode === Mode.Recover) {
+    // Recovery has one high-entropy key, never a set, so a code id is
+    // meaningless here and is refused rather than quietly ignored.
+    if (version === VERSION_CODE_ID) throw new Error('a recover header cannot carry a code id');
+    return { mode };
+  }
   throw new Error(`unknown mode ${mode}`);
 }
 

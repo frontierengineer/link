@@ -98,8 +98,12 @@ export async function spakeClient(
   password: Uint8Array,
   mode: Mode.Pair | Mode.Recover,
   timeoutMs: number = DEFAULT_HANDSHAKE_TIMEOUT_MS,
+  // Which of the host's live pairing codes this one is, when the host issued an
+  // id alongside the code. Omitted, the host falls back to its single legacy
+  // slot, which is exactly how every client built before this behaved.
+  codeId?: Uint8Array,
 ): Promise<PairClientResult> {
-  const header: Header = { mode };
+  const header: Header = mode === Mode.Pair && codeId ? { mode, codeId } : { mode };
   const headerBytes = encodeHeader(header);
   const spake = new Spake2('A', deriveW(password), identities(header));
 

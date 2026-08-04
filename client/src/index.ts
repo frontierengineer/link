@@ -462,7 +462,12 @@ export interface ServeHostOptions {
   // Pre-existing issued devices (persisted token store). Defaults to empty.
   tokens?: TokenStore;
   onRequest?: RequestHandler;
-  onConnect?: (session: SecureSession, info: { keyId?: string; via: string; mode: Mode }) => void;
+  // `codeId` is set only on a Pair that named one, and tells the host WHICH of
+  // its live pairing codes admitted this device. Without it a host holding
+  // several codes cannot attribute a new device to the code it came in on —
+  // which is exactly what anything parked on a code (a name to christen it, the
+  // machine it was provisioned for) needs in order to reach the right worker.
+  onConnect?: (session: SecureSession, info: { keyId?: string; via: string; mode: Mode; codeId?: string }) => void;
   onLog?: (event: string, detail: Record<string, unknown>) => void;
   // Relay usage telemetry for this host's connections, as RELATIVE fractions (or
   // `unlimited` when the operator set no quota) — never absolute bytes. Fires both
@@ -619,8 +624,11 @@ export async function serveHost(opts: ServeHostOptions): Promise<Host> {
         lockout.refund(lockKey); // recovery success: release the slot (not single-use)
       }
       settled = true;
-      opts.onLog?.('paired', { keyId: toB64url(device.keyId), mode: header.mode });
-      registerSession(new SecureSession(pipe, transport, sessionOpts()), { keyId: toB64url(device.keyId), via, mode: header.mode });
+      opts.onLog?.('paired', { keyId: toB64url(device.keyId), mode: header.mode, ...(namedId !== null ? { codeId: namedId } : {}) });
+      registerSession(new SecureSession(pipe, transport, sessionOpts()), {
+        keyId: toB64url(device.keyId), via, mode: header.mode,
+        ...(namedId !== null ? { codeId: namedId } : {}),
+      });
     } catch (e) {
       if (e instanceof PairingAuthError) {
         // A real (wrong) guess. For pairing it permanently counts toward K; for
@@ -657,7 +665,7 @@ export async function serveHost(opts: ServeHostOptions): Promise<Host> {
     };
   }
 
-  function registerSession(session: SecureSession, info: { keyId?: string; via: string; mode: Mode }): void {
+  function registerSession(session: SecureSession, info: { keyId?: string; via: string; mode: Mode; codeId?: string }): void {
     sessions.add(session);
     void session.done.then(() => sessions.delete(session));
     opts.onConnect?.(session, info);

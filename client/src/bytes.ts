@@ -31,12 +31,55 @@ export function equalCt(a: Uint8Array, b: Uint8Array): boolean {
 // base64url without padding — the wire form for tokens, key ids, and the
 // serialized DeviceCredential. URL-safe so a credential can live in a config
 // value, env var, or QR payload without escaping.
+//
+// Written out rather than `Buffer.from(b).toString('base64url')`. `Buffer` is a
+// Node global, and this library runs in a browser too: reaching for it made
+// every page that dials a Link install a `Buffer` stand-in on the global object
+// before importing this file, which is a shim a caller had to know to load and
+// a global nobody declared. Sixty lines of table lookup costs less than that,
+// and it is the kind of thing this file already holds.
+const B64URL_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+const B64URL_VALUES: ReadonlyMap<string, number> = new Map(
+  [...B64URL_ALPHABET].map((c, i) => [c, i]),
+);
+
 export function toB64url(b: Uint8Array): string {
-  return Buffer.from(b).toString('base64url');
+  let out = '';
+  for (let i = 0; i < b.length; i += 3) {
+    const b0 = b[i]!;
+    const b1 = b[i + 1];
+    const b2 = b[i + 2];
+    out += B64URL_ALPHABET[b0 >> 2]!;
+    out += B64URL_ALPHABET[((b0 & 0b11) << 4) | ((b1 ?? 0) >> 4)]!;
+    if (b1 === undefined) break;
+    out += B64URL_ALPHABET[((b1 & 0b1111) << 2) | ((b2 ?? 0) >> 6)]!;
+    if (b2 === undefined) break;
+    out += B64URL_ALPHABET[b2 & 0b111111]!;
+  }
+  return out;
 }
 
+// Lenient in exactly the way `Buffer.from(s, 'base64url')` was: padding and any
+// character outside the alphabet are skipped rather than refused, so a
+// credential that decoded before decodes the same now. Tightening this is a
+// separate decision with its own blast radius, not something to smuggle in
+// behind a portability fix.
 export function fromB64url(s: string): Uint8Array {
-  return new Uint8Array(Buffer.from(s, 'base64url'));
+  const out: number[] = [];
+  let acc = 0;
+  let bits = 0;
+  for (const ch of s) {
+    const v = B64URL_VALUES.get(ch);
+    if (v === undefined) continue;
+    acc = (acc << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push((acc >> bits) & 0xff);
+    }
+  }
+  return Uint8Array.from(out);
 }
 
 // A monotonic write buffer for length-prefixed framing. `u32` lengths are

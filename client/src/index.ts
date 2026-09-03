@@ -7,7 +7,7 @@
 // Everything below composes the audited layers: linkClient (transport),
 // secureChannel (Noise + sealed stream), pairing (SPAKE2 + credentials).
 
-import { establish, HostUplinks, type Reach, type DialOptions, type LinkUsage } from './linkClient.js';
+import { establish, HostUplinks, type Reach, type DialOptions, type LinkUsage, type OpenSocket } from './linkClient.js';
 import {
   Mode,
   reconnectInitiator,
@@ -72,6 +72,10 @@ export {
 export { DeviceRevokedError } from './secureChannel.js';
 // Per-connection relay usage (fractions / unlimited) — see serveHost onUsage.
 export type { LinkUsage } from './linkClient.js';
+// The transport seam. A caller in a realm `ws` does not serve — a browser — says
+// what dials instead of the package deciding for it: pass `openSocket` on
+// `ConnectOptions.dial` or `ServeHostOptions`, and `ws` is never loaded.
+export type { LinkWebSocket, OpenSocket } from './linkClient.js';
 
 // Generate a fresh host static identity (x25519). The host persists the private
 // key; clients pin the public key on first pair. This is the host's long-term
@@ -483,6 +487,9 @@ export interface ServeHostOptions {
   // Cap concurrent relay dial-backs per uplink (an untrusted Link could otherwise
   // drive unbounded outbound sockets). Default 64 — see HostUplinksOptions.
   maxConcurrentDialBacks?: number;
+  // What dials. Defaults to `ws`, which is what a Node host wants; a realm `ws`
+  // does not serve supplies its own and `ws` is never loaded.
+  openSocket?: OpenSocket;
 }
 
 export interface Host {
@@ -675,6 +682,7 @@ export async function serveHost(opts: ServeHostOptions): Promise<Host> {
     address,
     registerSigner,
     ...(opts.maxConcurrentDialBacks !== undefined ? { maxConcurrentDialBacks: opts.maxConcurrentDialBacks } : {}),
+    ...(opts.openSocket ? { openSocket: opts.openSocket } : {}),
     // Return the handshake promise (don't `void` it) so HostUplinks holds the
     // dial-back slot for the whole introduced handshake — a hard concurrency cap.
     onIntroduced: (pipe, via) => onIntroduced(pipe, via),

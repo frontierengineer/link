@@ -1,6 +1,6 @@
 {
   "name": "@frontierengineer/link-client",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Auditable, multi-uplink secure-connection client for the Link relay model: Noise (NKpsk0) sealed channel + SPAKE2 (RFC 9382) short-code pairing, end-to-end encrypted over content-blind relays.",
   "license": "MIT",
   "repository": {
@@ -31,7 +31,7 @@
     "build:cjs": "node scripts/build-cjs.mjs",
     "prepack": "npm run build && npm run build:cjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:unit": "node --import tsx --test test/secureChannel.test.ts test/envelope.test.ts test/pairing.test.ts test/hardening.test.ts test/registerAuth.test.ts",
+    "test:unit": "node --import tsx --test test/secureChannel.test.ts test/socketSeam.test.ts test/envelope.test.ts test/pairing.test.ts test/hardening.test.ts test/registerAuth.test.ts",
     "test:e2e": "tsx test/e2e.selftest.ts",
     "test": "npm run typecheck && npm run test:unit && npm run test:e2e"
   },

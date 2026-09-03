@@ -10,8 +10,8 @@
 // so a host never listens on a port. Link only ever sees ciphertext spliced
 // between two sockets; this file never looks inside a relayed frame.
 
-import { WebSocket, type RawData } from 'ws';
 import { type Pipe, type CloseInfo, PipeClosedError, PipeTimeoutError } from './pipe.js';
+import { fromUtf8 } from './bytes.js';
 import { makeRegisterAuth, type RegisterSigner } from './registerAuth.js';
 import { DeviceRevokedError } from './secureChannel.js';
 
@@ -39,11 +39,83 @@ function originOf(url: string): string {
 // we create at the same ceiling as the server.
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
-function toBuffer(data: RawData): Buffer {
-  if (Array.isArray(data)) return Buffer.concat(data);
-  if (data instanceof ArrayBuffer) return Buffer.from(data);
-  return data as Buffer;
+// A frame as bytes, whatever the socket handed us. `ws` gives a Buffer (or an
+// array of them when fragmented), a browser gives an ArrayBuffer, and a text
+// frame arrives as a string. Buffer IS a Uint8Array, so the Node path is a
+// no-op and nothing copies that did not copy before.
+function toBytes(data: unknown): Uint8Array {
+  if (typeof data === 'string') return new TextEncoder().encode(data);
+  if (data instanceof Uint8Array) return data;
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (Array.isArray(data)) {
+    const parts = data.map(toBytes);
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let at = 0;
+    for (const part of parts) { out.set(part, at); at += part.length; }
+    return out;
+  }
+  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  throw new TypeError('socket delivered a frame of an unknown shape');
 }
+
+// THE SOCKET, AS A DEPENDENCY.
+//
+// This client speaks a protocol; it should not also decide what carries it.
+// Node had no WebSocket client when this was written, so `ws` was imported
+// directly — and that made the package unusable in a browser except by lying to
+// the bundler, aliasing the `ws` specifier at a hand-written stand-in. Frontier
+// carried two such files and three build aliases to keep this one import happy.
+//
+// What is actually required is the nine members below, which `ws` and every
+// browser's own WebSocket both answer. Supply `openSocket` to say what dials;
+// leave it out and this dials with `ws`, which is what every Node caller wants
+// and why `ws` stays a PEER dependency rather than a hard one.
+export interface LinkWebSocket {
+  readonly readyState: number;
+  send(data: string | Uint8Array, opts?: { binary?: boolean }): void;
+  close(code?: number, reason?: string): void;
+  terminate(): void;
+  on(event: 'message', fn: (data: unknown, isBinary: boolean) => void): unknown;
+  on(event: 'close', fn: (code: number, reason: unknown) => void): unknown;
+  on(event: 'error', fn: (err: Error) => void): unknown;
+  once(event: 'open', fn: () => void): unknown;
+  once(event: 'error', fn: (err: Error) => void): unknown;
+}
+
+/** How a socket is opened. `maxPayload` is the relay's own 16 MiB frame cap and
+ *  a factory that cannot enforce it should say so rather than ignore it: a peer
+ *  able to pin more memory than the relay would is the reason it is here.
+ *
+ *  May answer with a promise: the default has to load `ws` first, and `openWs`
+ *  is already async, so nothing is paid for making the seam await-able. */
+export type OpenSocket = (
+  url: string,
+  opts: { maxPayload: number },
+) => LinkWebSocket | Promise<LinkWebSocket>;
+
+// The default, and the only place this package names `ws`. The import is
+// DYNAMIC so that a bundle which supplies its own `openSocket` never has to
+// resolve the specifier: a static import is pulled in by every bundler whether
+// or not the branch runs, which is what forced a browser build to alias `ws` at
+// a hand-written stand-in in the first place.
+let wsModule: Promise<{ WebSocket: new (url: string, opts: { maxPayload: number }) => unknown }> | undefined;
+
+const dialWithWs: OpenSocket = async (url, opts) => {
+  wsModule ??= import('ws') as never;
+  const { WebSocket } = await wsModule;
+  const ws = new WebSocket(url, opts) as LinkWebSocket & { binaryType: string };
+  // `ws`'s own realm detail: deliver frames as Buffers. A browser socket has no
+  // such mode and its factory sets 'arraybuffer' instead — which is why this
+  // line lives with the factory and not in `LinkSocket`.
+  ws.binaryType = 'nodebuffer';
+  return ws;
+};
+
+// The readyState values, which are the same four numbers in `ws` and in every
+// browser. Named here because the socket is now an INTERFACE: there is no
+// constructor to read `WebSocket.OPEN` off.
+const CONNECTING = 0;
+const OPEN = 1;
 
 interface ControlMsg {
   type: string;
@@ -71,29 +143,31 @@ export class LinkSocket implements Pipe {
   private resolveClosed!: (info: CloseInfo) => void;
   readonly closed: Promise<CloseInfo> = new Promise((r) => (this.resolveClosed = r));
 
-  constructor(private readonly ws: WebSocket, opts: { piping?: boolean } = {}) {
+  constructor(private readonly ws: LinkWebSocket, opts: { piping?: boolean } = {}) {
     this.piping = opts.piping ?? false;
-    ws.binaryType = 'nodebuffer';
-    ws.on('message', (data: RawData, isBinary: boolean) => this.onMessage(toBuffer(data), isBinary));
-    ws.on('close', (code: number, reason: Buffer) => {
-      const r = reason.toString();
+    ws.on('message', (data: unknown, isBinary: boolean) => this.onMessage(toBytes(data), isBinary));
+    ws.on('close', (code: number, reason: unknown) => {
+      // Decoded, never `.toString()`d: on a Buffer that yields the text, but on
+      // a plain Uint8Array it yields "104,105" — the browser realm would have
+      // reported a close reason of comma-separated byte values.
+      const r = typeof reason === 'string' ? reason : reason ? fromUtf8(toBytes(reason)) : '';
       this.onClose(r ? { code, reason: r } : { code });
     });
     ws.on('error', () => this.onClose({ reason: 'socket error' }));
   }
 
   get isOpen(): boolean {
-    return this.closeInfo === undefined && this.ws.readyState === WebSocket.OPEN;
+    return this.closeInfo === undefined && this.ws.readyState === OPEN;
   }
 
-  private onMessage(buf: Buffer, isBinary: boolean): void {
+  private onMessage(buf: Uint8Array, isBinary: boolean): void {
     if (this.piping) {
-      this.deliverFrame(new Uint8Array(buf));
+      this.deliverFrame(buf);
       return;
     }
     if (!isBinary) {
       try {
-        const parsed: unknown = JSON.parse(buf.toString('utf8'));
+        const parsed: unknown = JSON.parse(fromUtf8(buf));
         if (parsed && typeof parsed === 'object' && typeof (parsed as ControlMsg).type === 'string') {
           const msg = parsed as ControlMsg;
           // Flip to piping the instant the splice goes live, so the frames that
@@ -153,7 +227,7 @@ export class LinkSocket implements Pipe {
   // — control plane —
 
   sendControl(msg: ControlMsg): void {
-    if (this.ws.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(msg));
+    if (this.ws.readyState === OPEN) this.ws.send(JSON.stringify(msg));
   }
 
   // Route unsolicited control messages to a handler (used by the host control
@@ -181,7 +255,7 @@ export class LinkSocket implements Pipe {
   // — Pipe (after the splice is live) —
 
   send(frame: Uint8Array): void {
-    if (this.ws.readyState === WebSocket.OPEN) this.ws.send(frame, { binary: true });
+    if (this.ws.readyState === OPEN) this.ws.send(frame, { binary: true });
   }
 
   recv(timeoutMs?: number): Promise<Uint8Array> {
@@ -204,7 +278,7 @@ export class LinkSocket implements Pipe {
   close(reason?: string): void {
     if (this.closeInfo === undefined) this.closeInfo = reason !== undefined ? { reason } : {};
     try {
-      if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
+      if (this.ws.readyState === OPEN || this.ws.readyState === CONNECTING) {
         this.ws.close(1000, reason);
       }
     } catch {
@@ -214,16 +288,19 @@ export class LinkSocket implements Pipe {
   }
 }
 
-function openWs(url: string, timeoutMs: number): Promise<WebSocket> {
+async function openWs(url: string, timeoutMs: number, open: OpenSocket = dialWithWs): Promise<LinkWebSocket> {
+  let ws: LinkWebSocket;
+  try {
+    ws = await open(url, { maxPayload: MAX_FRAME_BYTES });
+  } catch (e) {
+    throw e instanceof Error ? e : new Error('bad url');
+  }
+  // A factory may hand back a socket that is already open — a pooled or
+  // pre-warmed one — and `once('open')` on such a socket never fires. The
+  // handlers below still attach before any I/O event can be delivered (that is
+  // a task, this is a microtask), so the only case to answer is this one.
+  if (ws.readyState === OPEN) return ws;
   return new Promise((resolve, reject) => {
-    let ws: WebSocket;
-    try {
-      ws = new WebSocket(url, { maxPayload: MAX_FRAME_BYTES });
-    } catch (e) {
-      reject(e instanceof Error ? e : new Error('bad url'));
-      return;
-    }
-    ws.binaryType = 'nodebuffer';
     const timer = setTimeout(() => {
       ws.terminate();
       reject(new PipeTimeoutError(timeoutMs));
@@ -240,6 +317,8 @@ function openWs(url: string, timeoutMs: number): Promise<WebSocket> {
 }
 
 export interface DialOptions {
+  /** What dials. Defaults to `ws`; a browser passes its own realm's socket. */
+  openSocket?: OpenSocket;
   connectTimeoutMs?: number;
   controlTimeoutMs?: number;
 }
@@ -273,7 +352,7 @@ export async function establish<T>(
   for (const url of uplinks) {
     let sock: LinkSocket;
     try {
-      sock = new LinkSocket(await openWs(url, connectTimeout));
+      sock = new LinkSocket(await openWs(url, connectTimeout, opts.openSocket));
     } catch (e) {
       attempts.push({ url, error: `connect: ${errMsg(e)}` });
       continue;
@@ -316,6 +395,8 @@ export async function establish<T>(
 // — host side: register with N uplinks, dial back relays —
 
 export interface HostUplinksOptions {
+  /** What dials. Defaults to `ws`; a browser passes its own realm's socket. */
+  openSocket?: OpenSocket;
   // The host's routing address. Re-registered on every uplink (re)connect.
   address: string;
   // Signs every `register` frame so the Link pins this host's key (TOFU) and
@@ -385,7 +466,7 @@ export class HostUplinks {
 
   private async connectAndRegister(url: string): Promise<void> {
     if (this.stopped) return;
-    const ws = await openWs(url, this.opts.connectTimeoutMs ?? 8_000);
+    const ws = await openWs(url, this.opts.connectTimeoutMs ?? 8_000, this.opts.openSocket);
     const sock = new LinkSocket(ws);
     sock.sendControl(this.addressRegister(url));
     const ack = await sock.waitControl(this.opts.controlTimeoutMs ?? 8_000);
@@ -443,7 +524,7 @@ export class HostUplinks {
 
   private async dialBack(url: string, linkId: string): Promise<void> {
     try {
-      const ws = await openWs(url, this.opts.connectTimeoutMs ?? 8_000);
+      const ws = await openWs(url, this.opts.connectTimeoutMs ?? 8_000, this.opts.openSocket);
       const relay = new LinkSocket(ws);
       relay.sendControl({ type: 'accept', linkId });
       const relaying = await relay.waitControl(this.opts.controlTimeoutMs ?? 8_000);

@@ -86,10 +86,15 @@ WebSocket over TLS, path `/v1`. Text frames carry control messages, one JSON obj
    3. the signature, rebuilt with the relay's own origin and the challenge it sent (`4007`);
    4. `|now - ts| <= 300000` (`4007`);
    5. the roster is valid and its `network` equals `network` (`4008`);
-   6. `node` is a member of the roster (`4008`);
-   7. the roster's version is not lower than the newest the relay holds for the network
-      (`4008`).
-4. Relay → node: `{"type":"registered","node":"<id>","rosterVersion":12}`
+   6. the **effective roster** is the newer of the presented roster and the newest the relay
+      holds for the network. A presented roster newer than the relay's replaces it (it is signed
+      by the primary, so any member may deliver it);
+   7. `node` is a member of the effective roster (`4008`).
+4. Relay → node: `{"type":"registered","node":"<id>","rosterVersion":12}`. When the relay held a
+   newer roster than the node presented, it adds `"roster":{ ... }` with that newer roster, and
+   the node applies the acceptance rules of section 3. A member that was offline while the
+   roster changed is therefore brought up to date at registration, and is closed `4008` only if
+   the newest roster no longer lists it.
 
 A node must send nothing but `register` before `registered`. A second registration for the same
 node replaces the first connection, which is closed `4005`.

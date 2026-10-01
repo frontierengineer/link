@@ -9,8 +9,9 @@ import (
 )
 
 // Config holds every setting. A zero limit is off. The environment names are those of
-// section 9; the fields without one are timings the spec fixes, settable so tests can
-// shorten them.
+// section 9; the timings below them are fixed by the spec and settable (also through
+// LINK_PING_INTERVAL, LINK_PAIR_TIMEOUT and LINK_HELLO_TIMEOUT) only so tests can shorten
+// them.
 type Config struct {
 	Addr              string        // LINK_ADDR
 	Origin            string        // LINK_ORIGIN; empty: the request's Host
@@ -26,9 +27,9 @@ type Config struct {
 	IPNetworksPerHour int           // LINK_IP_NETWORKS_PER_HOUR
 	NetworkTTL        time.Duration // LINK_NETWORK_TTL
 
-	PingInterval time.Duration // 30 s (section 9)
-	PairTimeout  time.Duration // 60 s (section 5.2)
-	HelloTimeout time.Duration // time allowed between hello and register or pair
+	PingInterval time.Duration // 30 s (section 9); LINK_PING_INTERVAL
+	PairTimeout  time.Duration // 60 s (section 5.2); LINK_PAIR_TIMEOUT
+	HelloTimeout time.Duration // 30 s between hello and register or pair (section 4.1); LINK_HELLO_TIMEOUT
 	CloseGrace   time.Duration // time allowed to finish a frame, send a close and see the reply
 }
 
@@ -88,13 +89,19 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	num("LINK_IP_REGISTER_PER_MIN", &c.IPRegisterPerMin)
 	num("LINK_IP_PAIR_PER_MIN", &c.IPPairPerMin)
 	num("LINK_IP_NETWORKS_PER_HOUR", &c.IPNetworksPerHour)
-	if v := getenv("LINK_NETWORK_TTL"); v != "" {
-		d, err := parseDuration(v)
-		if err != nil || d <= 0 {
-			errs = append(errs, "LINK_NETWORK_TTL: not a positive duration such as 168h")
+	dur := func(name string, dst *time.Duration) {
+		if v := getenv(name); v != "" {
+			d, err := parseDuration(v)
+			if err != nil || d <= 0 {
+				errs = append(errs, name+": not a positive duration such as 168h or 30s")
+			}
+			*dst = d
 		}
-		c.NetworkTTL = d
 	}
+	dur("LINK_NETWORK_TTL", &c.NetworkTTL)
+	dur("LINK_PING_INTERVAL", &c.PingInterval)
+	dur("LINK_PAIR_TIMEOUT", &c.PairTimeout)
+	dur("LINK_HELLO_TIMEOUT", &c.HelloTimeout)
 	if (c.TLSCert == "") != (c.TLSKey == "") {
 		errs = append(errs, "LINK_TLS_CERT and LINK_TLS_KEY must be set together")
 	}

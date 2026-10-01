@@ -29,6 +29,10 @@ The environment variables of section 9. Unset, every limit is off (a self-hosted
 | `LINK_IP_NETWORKS_PER_HOUR` | off | new networks per IP |
 | `LINK_NETWORK_TTL` | `168h` | forget a network's roster after this long with nobody connected (Go duration or seconds) |
 
+Three timings are fixed by the spec and settable only so tests can shorten them (Go duration
+or seconds): `LINK_PING_INTERVAL` (`30s`, section 9), `LINK_PAIR_TIMEOUT` (`60s`, section 5.2)
+and `LINK_HELLO_TIMEOUT` (`30s`, section 4.1). Leave them unset in production.
+
 SIGTERM closes every connection `1001` (after writing what is queued for it) and exits.
 
 ## Shape

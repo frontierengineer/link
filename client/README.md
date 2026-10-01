@@ -68,7 +68,8 @@ connecting and returns at once):
   `roster`, `state`, `id`, `network`, `waitConnected(timeoutMs?)`, `close()`.
 
 A member reconnects after 500 ms, doubling to 10 s, forever, except after close code 4008: then it
-is `revoked`, a terminal state.
+is `revoked`, a terminal state. A member that registers with an older roster than the relay holds
+receives the newer one in `registered` and accepts it (a `roster` event) before it is `connected`.
 
 **`Primary`** extends `Member`: `Primary.connect(options)`, `openPairingCode(kind, { lifetimeMs? })`
 returning `{ code, codeId, kind, link, expiresAt }`, `cancelPairingCode(codeId)`,

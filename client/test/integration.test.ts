@@ -469,3 +469,48 @@ test('a member connecting with a roster it is not on, or an invalid one, is refu
     await net.close();
   }
 });
+
+test('a member offline while the roster changed is brought up to date at registration', async () => {
+  const net = await startNetwork();
+  try {
+    const worker = await net.add('worker');
+    const identity = worker.identity;
+    const stale = worker.roster;
+    worker.close();
+    await until(() => !net.relay.isConnected(net.primary.id, identity.id), 'worker offline');
+    const surface = await net.add('surface');
+    assert.equal(net.primary.roster.version, 3);
+    // It presents v2; the relay answers registered with v3, which the member accepts.
+    const back = new Member({ identity, roster: stale, timing: FAST });
+    const seen: number[] = [];
+    back.on('roster', (r) => seen.push(r.version));
+    await back.waitConnected();
+    assert.equal(back.roster.version, 3);
+    assert.deepEqual(seen, [3]);
+    const sIn = inbox(surface);
+    await back.send(surface.id, bytesOf('caught up'));
+    assert.equal(textOf((await sIn.next())[0]!.bytes), 'caught up');
+    back.close();
+  } finally {
+    await net.close();
+  }
+});
+
+test('a member revoked while offline is closed 4008 at registration and stays revoked', async () => {
+  const net = await startNetwork();
+  try {
+    const worker = await net.add('worker');
+    const identity = worker.identity;
+    const stale = worker.roster;
+    worker.close();
+    await until(() => !net.relay.isConnected(net.primary.id, identity.id), 'worker offline');
+    net.primary.revoke(identity.id);
+    const back = new Member({ identity, roster: stale, timing: FAST });
+    await assert.rejects(back.waitConnected(), { code: 'revoked' });
+    assert.equal(back.state, 'revoked');
+    assert.equal(back.roster.version, 2);
+    back.close();
+  } finally {
+    await net.close();
+  }
+});

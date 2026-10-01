@@ -1,0 +1,22 @@
+{
+  "name": "link-cross-tests",
+  "private": true,
+  "description": "The TypeScript client driven against the real Go relay binary.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "pretest": "npm --prefix ../client run build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test --test-concurrency=2 \"*.test.ts\""
+  },
+  "dependencies": {
+    "@frontierengineer/link-client": "file:../client"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

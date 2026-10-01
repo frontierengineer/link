@@ -361,7 +361,8 @@ func (c *conn) readPayload(h ws.Header) ([]byte, error) {
 }
 
 func (c *conn) serve() {
-	defer c.finalize()
+	peerClosed := false
+	defer func() { c.finalize(peerClosed) }()
 	c.sendJSON(helloMsg{Type: "hello", Version: 1, Challenge: link.B64u.EncodeToString(c.challenge[:])})
 	c.nc.SetReadDeadline(time.Now().Add(c.s.cfg.HelloTimeout))
 	var msg []byte
@@ -373,7 +374,7 @@ func (c *conn) serve() {
 			c.closeWith(closeBadRequest, "no register or pair in time", false)
 			return
 		}
-		if err != nil || c.isClosing() {
+		if err != nil {
 			return
 		}
 		if !h.Masked || h.Rsv != 0 {
@@ -402,9 +403,13 @@ func (c *conn) serve() {
 					}
 				}
 				c.closeWith(code, "", false)
+				peerClosed = true
 				return
 			}
 			continue
+		}
+		if c.isClosing() {
+			return // only the peer's close frame matters now
 		}
 		switch h.OpCode {
 		case ws.OpContinuation:
@@ -457,13 +462,15 @@ func (c *conn) serve() {
 }
 
 // finalize runs when the reader stops: the connection leaves every table, input is drained
-// until the peer answers our close (or the grace runs out), and the socket is closed once
-// the writer is done with it.
-func (c *conn) finalize() {
+// until the peer answers our close (unless it already sent its own, or the grace runs out),
+// and the socket is closed once the writer is done with it.
+func (c *conn) finalize(peerClosed bool) {
 	c.closeWith(0, "", false)
 	c.s.unregister(c)
-	c.nc.SetReadDeadline(time.Now().Add(c.s.cfg.CloseGrace))
-	io.Copy(io.Discard, c.r)
+	if !peerClosed {
+		c.nc.SetReadDeadline(time.Now().Add(c.s.cfg.CloseGrace))
+		io.Copy(io.Discard, c.r)
+	}
 	c.wmu.Lock()
 	c.readerDone = true
 	writing := c.writing

@@ -207,8 +207,8 @@ func (c *client) frame() []byte {
 	return b
 }
 
-// closeCode reads until the connection ends and returns the close code, or -1 when it
-// ended without a close frame.
+// closeCode reads until the connection ends and returns the close code: 1006 when it
+// ended without a close frame (gorilla's report of that), -1 on any other error.
 func (c *client) closeCode(timeout time.Duration) int {
 	c.t.Helper()
 	deadline := time.Now().Add(timeout)

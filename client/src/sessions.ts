@@ -29,7 +29,9 @@ import { CipherState, HandshakeState, PATTERNS } from './noise.js';
 import { findMember, type Roster } from './roster.js';
 
 export const MAX_MESSAGE = 64 * 1024 * 1024;
-export const MAX_FRAGMENT = 65535 - 16 - 2;
+/** One transport plaintext: a Noise message is at most 65535 bytes, 16 of them the tag (section 7.2). */
+export const MAX_PLAINTEXT = 65535 - 16;
+export const MAX_FRAGMENT = MAX_PLAINTEXT - 2;
 /** Credit every session starts with, in each direction (section 7.3). */
 export const INITIAL_CREDIT = 1024 * 1024;
 export const DEFAULT_CREDIT_WINDOW = INITIAL_CREDIT;
@@ -561,7 +563,10 @@ export class SessionManager {
 
   private transmit(s: Session, msg: SessionMessage): boolean {
     if (s.ended) return false;
-    const ct = s.send.encryptWithAd(EMPTY, encodeSessionMessage(msg));
+    const plaintext = encodeSessionMessage(msg);
+    // Checked before encrypting, so a refused message does not spend a nonce.
+    if (plaintext.length > MAX_PLAINTEXT) throw new InvalidError(`a ${msg.type} session message exceeds ${MAX_PLAINTEXT} bytes`);
+    const ct = s.send.encryptWithAd(EMPTY, plaintext);
     s.sent++;
     s.lastActivity = this.h.now();
     return this.h.sendFrame(FrameType.Data, s.peer, dataBody(s.remoteIndex, ct));

@@ -3,11 +3,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createIdentity, Member, pair, type Roster } from '../src/index.js';
-import { fromB64u } from '../src/bytes.js';
+import { canonicalize, createIdentity, Member, memberFromIdentity, nodeIdFromEd25519, pair, Primary, signRoster, type PairingKind, type Roster } from '../src/index.js';
+import { b64u, fromB64u, randomBytes } from '../src/bytes.js';
 import { encodeFrame, FrameType } from '../src/frames.js';
 import { NewcomerExchange } from '../src/pairing.js';
 import { FAST, bytesOf, inbox, startNetwork, textOf, until } from './support/network.js';
+import { TestRelay } from './support/relay.js';
 
 test('primary, pairing a worker and a surface, sessions both ways', async () => {
   const net = await startNetwork();
@@ -628,5 +629,50 @@ test('a responder keeps an expired session while a message is still crossing it,
     assert.deepEqual((await wReader.next()).value!.bytes, second);
   } finally {
     await net.close();
+  }
+});
+
+test('a roster too large for one session message is refused, not sent as an oversize Noise message', async () => {
+  // Found while sizing rosters for the Go relay: roster and resign session messages were
+  // encrypted whole, so a roster over 65519 bytes went out as a Noise message over 65535
+  // bytes (section 7.2), and one over 1 MiB spent a nonce on a frame that was never sent.
+  const relay = await TestRelay.start();
+  const id = createIdentity();
+  const fakes = Array.from({ length: 600 }, () => {
+    const pub = randomBytes(32);
+    return { id: nodeIdFromEd25519(pub), ed25519: b64u(pub), x25519: b64u(randomBytes(32)), kind: 'mcp' as const };
+  });
+  const members = [memberFromIdentity(id, 'primary'), ...fakes].sort((a, b) => (a.id < b.id ? -1 : 1));
+  const roster = signRoster({ network: id.id, version: 1, issuedAt: Date.now(), relay: relay.url, primary: { ed25519: b64u(id.ed25519.pub) }, members }, id);
+  assert.ok(canonicalize(roster).length > 65519);
+  const primary = await Primary.connect({ identity: id, roster, timing: FAST });
+  const joined: Member[] = [];
+  const add = async (kind: PairingKind) => {
+    const identity = createIdentity();
+    const { roster: r } = await pair({ link: primary.openPairingCode(kind).link, identity });
+    const m = await Member.connect({ identity, roster: r, timing: FAST });
+    joined.push(m);
+    return m;
+  };
+  try {
+    const worker = await add('worker');
+    const pIn = inbox(primary);
+    await worker.send(primary.id, bytesOf('hello'));
+    await pIn.next();
+    // v3 cannot travel to the worker in one session message.
+    await add('surface');
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(primary.roster.version, 3);
+    assert.equal(worker.roster.version, 2);
+    const data = relay.frameLog.filter((f) => f.type === FrameType.Data);
+    assert.ok(data.length > 0 && data.every((f) => f.size <= 18 + 4 + 65535), 'no Noise message over 65535 bytes');
+    // Nothing was encrypted that was not sent, so the session still works.
+    const wIn = inbox(worker);
+    await primary.send(worker.id, bytesOf('still here'));
+    assert.equal(textOf((await wIn.next())[0]!.bytes), 'still here');
+  } finally {
+    for (const m of joined) m.close();
+    primary.close();
+    await relay.stop();
   }
 });

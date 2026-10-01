@@ -58,6 +58,8 @@ func keys(t testing.TB, i byte) *link.Keys {
 
 func b64(b []byte) string { return link.B64u.EncodeToString(b) }
 
+func b64dec(s string) ([]byte, error) { return link.B64u.DecodeString(s) }
+
 // roster makes a roster signed by primary, listing it and the others as workers.
 func roster(t testing.TB, version int, primary *link.Keys, others ...*link.Keys) []byte {
 	t.Helper()

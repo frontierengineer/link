@@ -15,7 +15,7 @@ without padding. `b32` is RFC 4648 base32, lowercase, without padding.
 
 | Use | Primitive |
 |---|---|
-| Identity and signatures | Ed25519 (RFC 8032) |
+| Identity and signatures | Ed25519 (RFC 8032), strict verification: non-canonical encodings are rejected, as Go's `crypto/ed25519` does. Every implementation verifies identically. |
 | Session key agreement | X25519 |
 | Sessions | `Noise_IK_25519_ChaChaPoly_SHA256`, Noise revision 34 |
 | Pairing | SPAKE2, RFC 9382, ciphersuite P256-SHA256-HKDF-HMAC |
@@ -66,7 +66,7 @@ without padding. `b32` is RFC 4648 base32, lowercase, without padding.
 ## 4. Connecting to the relay
 
 WebSocket over TLS, path `/v1`. Text frames carry control messages, one JSON object each with a
-`type`, at most 64 KiB. Binary frames carry routed frames (section 6).
+`type`, at most 1 MiB (a roster travels inside some of them). Binary frames carry routed frames (section 6).
 
 ### 4.1 Registration
 
@@ -143,6 +143,9 @@ when answering a request. Codes: `forbidden`, `bad_request`, `unreachable`, `rat
 - Five failed confirmations burn the code. A slot is reserved when an attempt starts; a failed
   confirmation keeps it; a timeout or a dropped connection refunds it.
 - Pairing link: `frontier://pair?v=1&n=<network id>&c=<code>&i=<code id b64u>&r=<relay URL, percent-encoded>`.
+  `c` carries the code without the hyphen; parsers also accept the displayed form.
+- A malformed pairing message (an invalid point, a wrong length, a P5 that will not open) counts
+  as a failed confirmation.
 
 ### 5.2 Finding the primary
 
@@ -156,7 +159,9 @@ when answering a request. Codes: `forbidden`, `bad_request`, `unreachable`, `rat
 4. From then on, binary frames of type `pair` (section 6) between them carry the channel id in
    the peer field, and the relay forwards them. The relay ends the channel (and closes the
    newcomer's connection `1000`) when either side sends `{"type":"pairEnd","channel":"<b64u>"}`,
-   when the newcomer disconnects, or after 60 seconds.
+   when the newcomer disconnects, or after 60 seconds. In every case the relay sends `pairEnd`
+   to whichever side is still connected, so the primary learns that a newcomer left mid-pairing
+   and can refund its guess slot.
 5. Pairing attempts are limited per IP address (section 9).
 
 ### 5.3 The exchange
@@ -222,10 +227,11 @@ the channel id, unchanged.
 | `0x04` | unreachable | empty; relay → sender: the named peer is not connected |
 | `0x05` | refused | `u8(reason)`; a member will not talk to the sender. Reason `1`: not on my roster |
 | `0x06` | pair | a pairing message (section 5.3) |
+| `0x07` | reset | `u32be(index)`; member → member: I hold no session with this receiver index |
 
 - The maximum binary frame is 1 MiB (1048576 bytes) including the header. Larger frames close
   the connection `4000`.
-- The relay forwards `0x01`–`0x03` and `0x05` only between registered members of the same
+- The relay forwards `0x01`–`0x03`, `0x05` and `0x07` only between registered members of the same
   network, and answers `0x04` when the peer is not connected. It never parses bodies.
 
 ## 7. Sessions
@@ -241,7 +247,8 @@ roster.
   `sender index`. A data frame names the **receiver's** index, so a receiver can tell sessions
   apart during rekeying.
 - The responder looks up the initiator's static key (learned from message 1) on its current
-  roster. Not found: it answers `refused` with reason `1` and drops the handshake. The initiator
+  roster, and requires that entry to be the member the relay named as the frame's sender. Either
+  check failing: it answers `refused` with reason `1` and drops the handshake. The initiator
   likewise checks the responder's key when it reads message 2.
 - If a payload shows the peer holds a newer roster, the side that is behind asks the primary for
   it (section 7.3).
@@ -252,9 +259,18 @@ roster.
 - After the handshake, each direction uses its Noise CipherState: ChaCha20-Poly1305 with the
   64-bit counter nonce, never transmitted. Frames for one pair arrive in order, so a frame that
   fails to decrypt ends the session; the next send starts a new one.
+- A Noise message is at most 65535 bytes, so one transport plaintext is at most 65519 bytes.
+- **Unknown sessions.** A data frame naming a receiver index the receiver does not hold is
+  answered with `reset`. The sender drops that session, and its next send starts a new handshake.
+  The message in that frame is lost.
+- **Delivery is at most once.** `send` completing means the message was handed to the relay.
+  Applications that need confirmation build it on top. A client ends all its sessions when its
+  own relay connection drops.
 - **Rekeying:** the initiator starts a new handshake after 10 minutes or 2^32 messages in either
-  direction, whichever comes first. Both sides keep the previous session's keys for 30 seconds,
-  for frames already in flight.
+  direction, whichever comes first. A responder treats a session older than 10 minutes and 30
+  seconds as expired, and answers `reset`. Both sides keep the previous session's keys for 30
+  seconds, for frames already in flight, and longer while a message is still crossing it: a
+  message is never split across two sessions.
 - **Idle:** a session with no frame in either direction for 10 minutes is forgotten.
 
 ### 7.3 Session messages
@@ -269,25 +285,32 @@ Each decrypted plaintext starts with a type byte:
 | `0x04` | roster | UTF-8 JSON roster |
 | `0x05` | resign | UTF-8 JSON `{"node":"<id>","ts":1790000000000,"sig":"<b64u>"}`, sent to the primary |
 
-- **Messages** larger than one frame are split into fragments, joined by the receiver, and
-  delivered to the application whole and in order. Maximum message size: 64 MiB.
-- **Credit (flow control).** Each side starts with a credit window for the other (a client
-  setting, default 1 MiB). A sender may only send message bytes (the `bytes` of `message` plain
-  texts) up to the credit it holds, and waits otherwise. The receiver sends `credit` as its
-  application consumes messages.
+- **Messages** larger than one fragment (65517 bytes of `bytes`) are split, joined by the
+  receiver, and delivered to the application whole and in order. Maximum message size: 64 MiB.
+- **Credit (flow control).**
+  - Every session starts with **1 MiB** of credit in each direction. A sender may only send
+    message bytes (the `bytes` of `message` plaintexts) up to the credit it holds, and waits
+    otherwise.
+  - The receiver returns credit with `credit` messages: for complete messages as its application
+    takes them, and for fragments of a message still arriving at once while the application has
+    nothing waiting, so a message larger than the window cannot deadlock.
+  - A receiver that wants a larger window (a client setting) simply grants extra credit at any
+    time. Nothing is negotiated.
+  - Credit and reassembly belong to one session.
 - **Rosters.** Any member answers `roster-request` with the newest roster it holds. A member
   that receives a `roster` applies the acceptance rules of section 3.
 - **Resigning.** `sig` = Ed25519 by the member over
   `lenStr("frontier-link/1/resign") || lenStr(network) || lenStr(node) || u64be(ts)`. The primary
-  publishes a roster without the member.
+  accepts it only from that member's own session and with `ts` within 5 minutes of its clock,
+  then publishes a roster without the member.
 
 ## 8. Revocation
 
 - The primary publishes a roster without the member, pushes it to the relay (section 4.2) and to
   every member.
 - Members drop sessions with peers no longer on the roster, and refuse their handshakes.
-- A client whose registration is closed `4008` enters a terminal `revoked` state and stops
-  retrying.
+- A client whose registration is closed `4008`, or that accepts a roster no longer listing it,
+  enters a terminal `revoked` state and stops retrying.
 
 ## 9. Relay limits and flow control
 
@@ -334,7 +357,8 @@ A self-hosted relay defaults every limit to off; the values below are the public
 ## 11. Client behaviour
 
 - Reconnect after 500 ms, doubling to at most 10 seconds, forever; reset after `registered`.
-  Never after `4008`.
+  Never after `4008` (revoked) or `4005` (replaced): a replaced connection belongs to a copy of
+  the identity that is no longer the current one, and it stops rather than fight the new one.
 - A send to a peer that answers `unreachable` fails at once with a typed error. Nothing is queued
   for absent peers.
 - On `4009`, look the network up again and reconnect.

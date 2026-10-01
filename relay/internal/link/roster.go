@@ -22,6 +22,10 @@ const (
 
 const maxSafeInteger = 1<<53 - 1
 
+// MaxRosterBytes bounds a roster's JCS encoding, signature included (section 3), so that it
+// always fits one session message.
+const MaxRosterBytes = 65000
+
 // Member is one roster entry.
 type Member struct {
 	ID      ID
@@ -146,6 +150,13 @@ func ParseRoster(raw []byte) (*Roster, error) {
 	}
 	if IDFromKey(r.Primary) != r.Network {
 		return nil, errors.New("roster: network is not derived from the primary key")
+	}
+	whole, err := Canonicalize(obj)
+	if err != nil {
+		return nil, err
+	}
+	if len(whole) > MaxRosterBytes {
+		return nil, fmt.Errorf("roster: %d bytes of JCS, over the %d-byte limit", len(whole), MaxRosterBytes)
 	}
 	sigStr, ok := obj["signature"].(string)
 	if !ok {

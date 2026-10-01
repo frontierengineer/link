@@ -135,6 +135,7 @@ test('frames: layout, limits and every type', () => {
   assert.equal(encodeFrame(FrameType.Unreachable, peer, new Uint8Array(0)).length, 18);
   assert.equal(toHex(encodeFrame(FrameType.Refused, peer, Uint8Array.of(1))).slice(0, 4), '0105');
   assert.equal(encodeFrame(FrameType.Pair, peer, new Uint8Array(MAX_FRAME - 18)).length, MAX_FRAME);
+  assert.equal(toHex(encodeFrame(FrameType.Reset, peer, fromHex('0badcafe'))), '0107' + toHex(peer) + '0badcafe');
   assert.throws(() => encodeFrame(FrameType.Pair, peer, new Uint8Array(MAX_FRAME - 17)));
   assert.throws(() => decodeFrame(new Uint8Array(17)));
   assert.throws(() => decodeFrame(Uint8Array.of(2, 3, ...peer)));

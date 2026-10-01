@@ -125,16 +125,16 @@ export class TestRelay {
     if (prev === 'registered' && conn.network && conn.node) {
       const net = this.conns.get(conn.network);
       if (net?.get(conn.node) === conn) net.delete(conn.node);
-      for (const ch of [...this.channels.values()]) if (ch.primary === conn) this.endChannel(ch, false);
+      for (const ch of [...this.channels.values()]) if (ch.primary === conn) this.endChannel(ch, 'primary');
     }
     if (prev === 'pairing' && conn.channel) {
       const ch = this.channels.get(conn.channel);
-      if (ch) this.endChannel(ch, true);
+      if (ch) this.endChannel(ch, 'newcomer');
     }
   }
 
   private onText(conn: Conn, text: string): void {
-    if (text.length > 65536) return this.close(conn, 4000);
+    if (Buffer.byteLength(text) > 1048576) return this.close(conn, 4000);
     let msg: Record<string, unknown>;
     try {
       msg = JSON.parse(text) as Record<string, unknown>;
@@ -149,7 +149,7 @@ export class TestRelay {
     if (conn.state === 'pairing') {
       if (msg.type === 'pairEnd') {
         const ch = conn.channel ? this.channels.get(conn.channel) : undefined;
-        if (ch) this.endChannel(ch, true);
+        if (ch) this.endChannel(ch, 'newcomer');
       }
       return;
     }
@@ -168,7 +168,7 @@ export class TestRelay {
         return;
       case 'pairEnd': {
         const ch = typeof msg.channel === 'string' ? this.channels.get(msg.channel) : undefined;
-        if (ch && ch.primary === conn) this.endChannel(ch, false);
+        if (ch && ch.primary === conn) this.endChannel(ch, 'primary');
         return;
       }
       default:
@@ -269,7 +269,7 @@ export class TestRelay {
       network: msg.network,
       newcomer: conn,
       primary,
-      timer: setTimeout(() => this.endChannel(ch, true), 60_000),
+      timer: setTimeout(() => this.endChannel(ch, 'timeout'), 60_000),
     };
     this.channels.set(id, ch);
     conn.state = 'pairing';
@@ -278,14 +278,16 @@ export class TestRelay {
     primary.sock.sendText(JSON.stringify({ type: 'pairing', channel: id, code: msg.code }));
   }
 
-  /** Ends a channel; `tellPrimary` when the primary did not end it itself. */
-  private endChannel(ch: Channel, tellPrimary: boolean): void {
+  /** Ends a channel and tells whichever side is still connected and did not end it (section 5.2). */
+  private endChannel(ch: Channel, endedBy: 'primary' | 'newcomer' | 'timeout'): void {
     if (!this.channels.delete(ch.id)) return;
     clearTimeout(ch.timer);
-    if (tellPrimary && ch.primary.state === 'registered') {
-      ch.primary.sock.sendText(JSON.stringify({ type: 'pairEnd', channel: ch.id }));
+    const notice = JSON.stringify({ type: 'pairEnd', channel: ch.id });
+    if (endedBy !== 'primary' && ch.primary.state === 'registered') ch.primary.sock.sendText(notice);
+    if (ch.newcomer.state === 'pairing') {
+      if (endedBy !== 'newcomer') ch.newcomer.sock.sendText(notice);
+      this.close(ch.newcomer, 1000);
     }
-    if (ch.newcomer.state === 'pairing') this.close(ch.newcomer, 1000);
   }
 
   private onBinary(conn: Conn, bytes: Uint8Array): void {
@@ -309,7 +311,8 @@ export class TestRelay {
       if (ch && ch.primary === conn) ch.newcomer.sock.sendBinary(bytes);
       return;
     }
-    if (![FrameType.HandshakeInit, FrameType.HandshakeResp, FrameType.Data, FrameType.Refused].includes(f.type as 1)) return;
+    const routed: number[] = [FrameType.HandshakeInit, FrameType.HandshakeResp, FrameType.Data, FrameType.Refused, FrameType.Reset];
+    if (!routed.includes(f.type)) return;
     const to = nodeIdFromBytes(f.peer);
     this.bytesFrom.set(from, (this.bytesFrom.get(from) ?? 0) + bytes.length);
     const entry = { from, to, type: f.type, size: bytes.length };

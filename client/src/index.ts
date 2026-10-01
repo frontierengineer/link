@@ -46,13 +46,14 @@ export {
   type PrimaryEvents,
   type UsageReport,
 } from './primary.js';
-export { DEFAULT_CREDIT_WINDOW, MAX_MESSAGE } from './sessions.js';
+export { DEFAULT_CREDIT_WINDOW, INITIAL_CREDIT, MAX_MESSAGE } from './sessions.js';
 export { CloseCode } from './relay.js';
 export {
   LinkError,
   UnreachableError,
   RefusedError,
   RevokedError,
+  ReplacedError,
   TimeoutError,
   ClosedError,
   PairingError,

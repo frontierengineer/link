@@ -1,14 +1,14 @@
 // A member of a network: one relay connection, sessions with the other
 // members, the roster it holds, and the application's message stream.
 
-import { ClosedError, InvalidError, RevokedError, TimeoutError, type LinkError } from './errors.js';
+import { ClosedError, InvalidError, ReplacedError, RevokedError, TimeoutError, type LinkError } from './errors.js';
 import { Emitter } from './events.js';
 import { decodeFrame, encodeFrame, FrameType, type SessionMessage } from './frames.js';
 import { nodeIdFromBytes, nodeIdToBytes, type Identity } from './identity.js';
 import { canonicalize } from './jcs.js';
 import { RelayConnection, type RelayState } from './relay.js';
 import { acceptanceProblem, cloneRoster, findMember, isValidRoster, type Roster } from './roster.js';
-import { DEFAULT_CREDIT_WINDOW, DEFAULT_SESSION_TIMING, SessionManager, type SessionTiming } from './sessions.js';
+import { DEFAULT_CREDIT_WINDOW, DEFAULT_SESSION_TIMING, INITIAL_CREDIT, SessionManager, type SessionTiming } from './sessions.js';
 import { signResignation } from './signed.js';
 import { defaultWebSocket, type ControlMessage, type WebSocketConstructor } from './socket.js';
 
@@ -38,7 +38,7 @@ export interface MemberOptions {
   pinnedPrimary?: string;
   /** Defaults to globalThis.WebSocket. */
   WebSocket?: WebSocketConstructor;
-  /** Bytes each side may have in flight to the other (1 MiB). */
+  /** The receive window this member grants each session: 1 MiB (the initial credit) or more. */
   creditWindow?: number;
   timing?: Partial<Timing>;
   /** On close code 4009: where the network lives now. */
@@ -47,7 +47,7 @@ export interface MemberOptions {
   now?: () => number;
 }
 
-export type MemberState = 'connecting' | 'connected' | 'disconnected' | 'revoked' | 'closed';
+export type MemberState = 'connecting' | 'connected' | 'disconnected' | 'revoked' | 'replaced' | 'closed';
 
 export interface InboundMessage {
   from: string;
@@ -103,8 +103,8 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     this.timing = { ...DEFAULT_TIMING, ...opts.timing };
     this.now = opts.now ?? Date.now;
     const creditWindow = opts.creditWindow ?? DEFAULT_CREDIT_WINDOW;
-    if (!Number.isInteger(creditWindow) || creditWindow < 1 || creditWindow > 0xffffffff) {
-      throw new InvalidError('creditWindow must be a positive 32-bit integer');
+    if (!Number.isInteger(creditWindow) || creditWindow < INITIAL_CREDIT || creditWindow > 0xffffffff) {
+      throw new InvalidError('creditWindow must be an integer from 1 MiB to 2^32 - 1');
     }
     this.relay = new RelayConnection({
       url: opts.relayUrl ?? opts.roster.relay,
@@ -169,8 +169,8 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   }
 
   /**
-   * Resolves when registered with the relay. Rejects with RevokedError or
-   * ClosedError if the member reaches a terminal state, and with TimeoutError
+   * Resolves when registered with the relay. Rejects with RevokedError,
+   * ReplacedError or ClosedError if the member reaches a terminal state, and with TimeoutError
    * after `timeoutMs` when given.
    */
   waitConnected(timeoutMs?: number): Promise<void> {
@@ -180,6 +180,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
         const s = this.state;
         if (s === 'connected') resolve();
         else if (s === 'revoked') reject(new RevokedError());
+        else if (s === 'replaced') reject(new ReplacedError());
         else if (s === 'closed') reject(new ClosedError());
         else return false;
         clearTimeout(timer);
@@ -202,7 +203,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   /**
    * Sends one message to a member. Resolves once every fragment is handed to
    * the relay connection. Rejects with UnreachableError, RefusedError,
-   * RevokedError, TimeoutError, ClosedError or InvalidError.
+   * RevokedError, ReplacedError, TimeoutError, ClosedError or InvalidError.
    */
   async send(peerId: string, bytes: Uint8Array): Promise<void> {
     if (!(bytes instanceof Uint8Array)) throw new InvalidError('bytes must be a Uint8Array');
@@ -253,7 +254,18 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     await this.online();
     const before = this.currentRoster.version;
     const got = this.waitForRoster(this.timing.requestTimeoutMs);
-    await this.sessions.sendControl(this.network, { type: 'roster-request' });
+    // Delivery is at most once (a request on a session the primary lost is
+    // answered with reset), so the idempotent request is repeated until answered.
+    let answered = false;
+    got.then(
+      () => (answered = true),
+      () => (answered = true),
+    );
+    const retry = Math.max(50, this.timing.requestTimeoutMs / 4);
+    while (!answered) {
+      await this.sessions.sendControl(this.network, { type: 'roster-request' }).catch(() => undefined);
+      await Promise.race([got.catch(() => undefined), new Promise((r) => setTimeout(r, retry))]);
+    }
     await got;
     return this.currentRoster.version > before;
   }
@@ -279,7 +291,17 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
         }
       });
     });
-    await this.sessions.sendControl(this.network, { type: 'resign', json: JSON.stringify(r) });
+    // Repeated until the relay closes this member, since delivery is at most once.
+    let finished = false;
+    const settled = done.then(
+      () => (finished = true),
+      () => (finished = true),
+    );
+    const retry = Math.max(50, this.timing.requestTimeoutMs / 4);
+    while (!finished && this.state === 'connected') {
+      await this.sessions.sendControl(this.network, { type: 'resign', json: JSON.stringify(r) }).catch(() => undefined);
+      await Promise.race([settled, new Promise((t) => setTimeout(t, retry))]);
+    }
     return done;
   }
 
@@ -296,12 +318,12 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   }
 
   protected isTerminal(): boolean {
-    const s = this.relay.state;
-    return s === 'closed' || s === 'revoked';
+    return this.relay.terminal;
   }
 
   protected async online(): Promise<void> {
     if (this.relay.state === 'revoked') throw new RevokedError();
+    if (this.relay.state === 'replaced') throw new ReplacedError();
     if (this.relay.state === 'closed') throw new ClosedError();
     if (this.relay.state !== 'registered') await this.waitConnected(this.timing.handshakeTimeoutMs);
   }
@@ -313,10 +335,16 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   private onRelayState(s: RelayState): void {
     if (s !== 'registered') {
       const err: LinkError =
-        s === 'revoked' ? new RevokedError() : s === 'closed' ? new ClosedError() : new ClosedError('relay connection lost');
+        s === 'revoked'
+          ? new RevokedError()
+          : s === 'replaced'
+            ? new ReplacedError()
+            : s === 'closed'
+              ? new ClosedError()
+              : new ClosedError('relay connection lost');
       this.sessions.dropAll(err);
     }
-    if (s === 'revoked' || s === 'closed') {
+    if (this.relay.terminal) {
       this.sessions.close();
       for (const r of this.readers.splice(0)) r({ value: undefined, done: true });
     }

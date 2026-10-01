@@ -5,7 +5,7 @@
 
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { b64u, concat, EMPTY, fromHex, toHex, u64be, utf8 } from '../src/bytes.js';
+import { b64u, concat, EMPTY, fromHex, toHex, u32be, u64be, utf8 } from '../src/bytes.js';
 import { buildPairingLink, formatCode, normalizeCode } from '../src/code.js';
 import { open } from '../src/crypto.js';
 import {
@@ -302,6 +302,7 @@ export function buildVectors(): unknown {
     frame('unreachable', FrameType.Unreachable, EMPTY),
     frame('refused', FrameType.Refused, Uint8Array.of(1)),
     frame('pair', FrameType.Pair, p1),
+    frame('reset', FrameType.Reset, u32be(0x0badcafe)),
   ];
   const resignJson = JSON.stringify({ node: resignation.node, ts: resignation.ts, sig: resignation.sig });
   const sm = (name: string, m: SessionMessage) => ({ name, encoding: toHex(encodeSessionMessage(m)) });

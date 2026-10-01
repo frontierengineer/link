@@ -8,7 +8,7 @@ import type { Roster } from './roster.js';
 import { originOf, registerSigningBytes } from './signed.js';
 import { Channel, type ControlMessage, type WebSocketConstructor } from './socket.js';
 
-export type RelayState = 'connecting' | 'registered' | 'disconnected' | 'revoked' | 'closed';
+export type RelayState = 'connecting' | 'registered' | 'disconnected' | 'revoked' | 'replaced' | 'closed';
 
 export const CloseCode = {
   Normal: 1000,
@@ -68,6 +68,11 @@ export class RelayConnection extends Emitter<RelayEvents> {
     return this.url;
   }
 
+  /** closed, revoked or replaced: no further connection attempts. */
+  get terminal(): boolean {
+    return this._state === 'closed' || this._state === 'revoked' || this._state === 'replaced';
+  }
+
   start(): void {
     if (this._state === 'disconnected') this.dial();
   }
@@ -91,7 +96,7 @@ export class RelayConnection extends Emitter<RelayEvents> {
 
   /** Enter the terminal revoked state (also used when a roster drops this node). */
   revoke(): void {
-    if (this._state === 'closed' || this._state === 'revoked') return;
+    if (this.terminal) return;
     clearTimeout(this.timer);
     this.setState('revoked');
     this.channel?.close(1000);
@@ -161,9 +166,14 @@ export class RelayConnection extends Emitter<RelayEvents> {
   }
 
   private afterClose(code: number): void {
-    if (this._state === 'closed' || this._state === 'revoked') return;
+    if (this.terminal) return;
     if (code === CloseCode.NotMember) {
       this.setState('revoked');
+      return;
+    }
+    if (code === CloseCode.Replaced) {
+      // Section 11: a newer copy of this identity holds the connection; stop rather than fight it.
+      this.setState('replaced');
       return;
     }
     this.setState('disconnected');

@@ -14,6 +14,7 @@ export const FrameType = {
   Unreachable: 0x04,
   Refused: 0x05,
   Pair: 0x06,
+  Reset: 0x07,
 } as const;
 export type FrameType = (typeof FrameType)[keyof typeof FrameType];
 

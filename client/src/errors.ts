@@ -5,6 +5,7 @@ export type LinkErrorCode =
   | 'unreachable'
   | 'refused'
   | 'revoked'
+  | 'replaced'
   | 'timeout'
   | 'closed'
   | 'pairing'
@@ -40,6 +41,13 @@ export class RefusedError extends LinkError {
 export class RevokedError extends LinkError {
   constructor() {
     super('revoked', 'this node is not a member of the network');
+  }
+}
+
+/** A newer connection for this node took over (close 4005). Terminal: this copy stops. */
+export class ReplacedError extends LinkError {
+  constructor() {
+    super('replaced', 'a newer connection for this node replaced this one');
   }
 }
 

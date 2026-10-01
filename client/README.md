@@ -50,25 +50,26 @@ connecting and returns at once):
 | `relayUrl` | defaults to `roster.relay` |
 | `pinnedPrimary` | defaults to `roster.primary.ed25519` |
 | `WebSocket` | a WHATWG WebSocket constructor; defaults to `globalThis.WebSocket` |
-| `creditWindow` | bytes in flight per session and direction, default 1 MiB |
+| `creditWindow` | the receive window granted per session: 1 MiB (every session's initial credit) or more, granted as extra credit |
 | `resolveRelay(network)` | called on close code 4009; may return a new relay URL |
 | `timing` | overrides for the protocol timers (rekey, idle, handshake timeout, backoff), for tests |
 
 - `send(peerId, bytes)` resolves once every fragment is handed to the relay connection. It
   rejects with a `LinkError` whose `code` is `unreachable` (the peer is not connected; nothing is
-  queued), `refused` (the peer's roster does not list this node), `revoked`, `timeout`,
-  `closed`, or `invalid` (unknown peer, over 64 MiB).
+  queued), `refused` (the peer's roster does not list this node), `revoked`, `replaced`,
+  `timeout`, `closed`, or `invalid` (unknown peer, over 64 MiB). Delivery is at most once:
+  resolving means handed to the relay.
 - `onMessage(handler)` or the async iterator `messages` deliver `{ from, bytes }` whole and in
   order per sender. A message is credited back to its sender when the application takes it, so a
   slow reader slows its senders.
 - Events (`on(name, listener)` returns an unsubscribe function): `state`
-  (`connecting`, `connected`, `disconnected`, `revoked`, `closed`), `roster`, `disconnect`
+  (`connecting`, `connected`, `disconnected`, `revoked`, `replaced`, `closed`), `roster`, `disconnect`
   (`{ code, reason }`), `moved` (4009), `relayError`.
 - `syncRoster()` asks the primary for its newest roster. `resign()` leaves the network.
   `roster`, `state`, `id`, `network`, `waitConnected(timeoutMs?)`, `close()`.
 
-A member reconnects after 500 ms, doubling to 10 s, forever, except after close code 4008: then it
-is `revoked`, a terminal state. A member that registers with an older roster than the relay holds
+A member reconnects after 500 ms, doubling to 10 s, forever, except after close code 4008 (it is
+`revoked`) or 4005 (`replaced`: another copy of the identity connected); both are terminal. A member that registers with an older roster than the relay holds
 receives the newer one in `registered` and accepts it (a `roster` event) before it is `connected`.
 
 **`Primary`** extends `Member`: `Primary.connect(options)`, `openPairingCode(kind, { lifetimeMs? })`
@@ -81,22 +82,17 @@ returning `{ code, codeId, kind, link, expiresAt }`, `cancelPairingCode(codeId)`
 not connected) or `TimeoutError`. Codes: `generateCode`, `normalizeCode`, `formatCode`;
 links: `buildPairingLink`, `parsePairingLink`.
 
-## Behaviour the spec leaves open
+## Sessions in brief
 
-- **Credit.** Credit and reassembly belong to one Noise session. A sender starts with its own
-  `creditWindow` as the credit it holds, so the members of a network should use the same value. A
-  receiver credits fragments of a message in progress at once while its application has nothing
-  waiting (so messages larger than the window can complete) and credits complete messages when
-  the application takes them.
-- **Rekeying** switches to the new session at a message boundary. A message under way finishes on
-  the session it started on, which stays alive past the 30 s grace for as long as it is in use.
-- **Fragment size.** At most 65517 message bytes per fragment, so every transport message fits
-  Noise's 65535-byte limit. Larger ciphertexts from other implementations are accepted.
-- **Lost session state.** A data frame for an unknown receiver index makes the receiver open a
-  new session to the sender, which adopts it for its next message. The frame itself is lost:
-  delivery is at most once.
-- **The relay connection** dropping ends every session. Sends wait up to the handshake timeout
-  for the connection to come back.
+- Every session starts with 1 MiB of credit each way; a larger `creditWindow` is granted as extra
+  credit when the session comes up. Fragments of a message in progress are credited at once while
+  the application has nothing waiting; complete messages when the application takes them.
+- A message is never split across sessions: a rekey switches at a message boundary.
+- Fragments carry at most 65517 bytes, so each transport message fits Noise's 65535 bytes.
+- A data frame for a session the receiver does not hold is answered `reset`; the sender drops the
+  session and its next send handshakes again. The message in that frame is lost.
+- Losing the relay connection ends every session. Sends wait up to the handshake timeout for the
+  connection to come back. `syncRoster()` and `resign()` repeat their request until answered.
 
 ## Develop
 
@@ -106,4 +102,5 @@ npm run typecheck
 npm test          # unit, vector and integration tests (an in-process test relay in test/support/)
 npm run build     # dist/ with .d.ts
 npm run vectors   # rewrite ../spec/vectors/client.json; the tests fail if it is stale
+(cd scripts/check-vectors-go && go run .)   # independent check of the vectors in Go
 ```

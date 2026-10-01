@@ -45,6 +45,8 @@ export function scalarFromRandom(r: Uint8Array): bigint {
 }
 
 export interface Spake2Keys {
+  /** The shared point K, uncompressed SEC1. */
+  K: Uint8Array;
   /** The full TT transcript. */
   tt: Uint8Array;
   /** SHA-256(TT). */
@@ -127,7 +129,7 @@ export class Spake2 {
     const cA = hmacSha256(kcA, tt);
     const cB = hmacSha256(kcB, tt);
     return {
-      tt, hash, ke, ka, kcA, kcB, cA, cB,
+      K, tt, hash, ke, ka, kcA, kcB, cA, cB,
       ours: this.role === 'A' ? cA : cB,
       theirs: this.role === 'A' ? cB : cA,
     };

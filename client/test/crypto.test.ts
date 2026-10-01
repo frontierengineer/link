@@ -44,6 +44,7 @@ test('SPAKE2 reproduces every RFC 9382 Appendix B vector, both roles', () => {
     const ka = a.finish(b.share);
     const kb = b.finish(a.share);
     for (const k of [ka, kb]) {
+      assert.equal(toHex(k.K), v.K);
       assert.equal(toHex(k.tt), v.TT);
       assert.equal(toHex(k.hash), v.hashTT);
       assert.equal(toHex(k.ke), v.Ke);

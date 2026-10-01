@@ -177,12 +177,14 @@ func (s *Server) upgrade(w http.ResponseWriter, r *http.Request) {
 	go c.serve()
 }
 
-// originOf is LINK_ORIGIN, else the request's Host, lowercased, without a default port.
+// originOf is LINK_ORIGIN, else the request's Host, lowercased, without the port when it is
+// 80 or 443, whatever the scheme (section 4.1): what a member dialling it signed.
 func (s *Server) originOf(r *http.Request) string {
-	if s.cfg.Origin != "" {
-		return strings.ToLower(s.cfg.Origin)
+	host := s.cfg.Origin
+	if host == "" {
+		host = r.Host
 	}
-	host := strings.ToLower(r.Host)
+	host = strings.ToLower(host)
 	if h, p, err := net.SplitHostPort(host); err == nil && (p == "80" || p == "443") {
 		if strings.Contains(h, ":") {
 			h = "[" + h + "]"

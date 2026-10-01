@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -215,5 +216,39 @@ func TestNonCanonicalSignatureRefused(t *testing.T) {
 	}
 	if ed25519.Verify(k.Ed25519Public, msg, NonCanonical(sig)) {
 		t.Fatal("non-canonical signature accepted")
+	}
+}
+
+// Section 3 (spec 71b8288): a roster's JCS encoding, signature included, is at most 65000
+// bytes; one byte over is invalid.
+func TestRosterSizeLimit(t *testing.T) {
+	size := func(raw []byte) int {
+		tree, err := ParseJSON(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		canon, err := Canonicalize(tree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(canon)
+	}
+	withRelay := func(relay string) []byte {
+		return testRoster(t, func(r map[string]any) { r["relay"] = relay })
+	}
+	base := size(withRelay(""))
+	exact := withRelay(strings.Repeat("x", MaxRosterBytes-base))
+	if n := size(exact); n != MaxRosterBytes {
+		t.Fatalf("built %d bytes", n)
+	}
+	if _, err := ParseRoster(exact); err != nil {
+		t.Fatalf("a roster of exactly %d bytes refused: %v", MaxRosterBytes, err)
+	}
+	if _, err := ParseRoster(withRelay(strings.Repeat("x", MaxRosterBytes-base+1))); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Fatalf("a roster one byte over accepted: %v", err)
+	}
+	// Bytes, not characters: two-byte characters reach the limit at half the count.
+	if _, err := ParseRoster(withRelay(strings.Repeat("é", (MaxRosterBytes-base)/2+1))); err == nil {
+		t.Fatal("a roster over the limit in multi-byte characters accepted")
 	}
 }

@@ -529,7 +529,8 @@ export class SessionManager {
           this.endSession(s, new ClosedError(`session with ${s.peer} went idle`));
         } else if (s.retired && quiet >= t.retireGraceMs && s.activeSends === 0 && s.partialLen === 0 && s.held === 0) {
           this.endSession(s, new ClosedError(`session with ${s.peer} was replaced`));
-        } else {
+        } else if (s.sent + s.received > 0) {
+          // A session that never carried a frame is left to expire, not rekeyed.
           this.maybeRekey(s);
         }
       }

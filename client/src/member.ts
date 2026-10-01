@@ -357,7 +357,14 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
       if (this.handler) {
         const item = this.inbox.shift()!;
         item.release();
-        this.handler(item.msg);
+        try {
+          this.handler(item.msg);
+        } catch (e) {
+          // The handler's error is the application's; it must not stall delivery.
+          queueMicrotask(() => {
+            throw e;
+          });
+        }
         continue;
       }
       const reader = this.readers.shift();

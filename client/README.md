@@ -39,7 +39,9 @@ Persist `seed`; everything else derives from it (section 2).
 
 **Rosters.** `createNetwork({ identity, relay })` makes version 1 with the primary alone.
 `rosterProblem(r)` returns why a roster is invalid, or `null`; `acceptanceProblem(r, pinned, held)`
-applies the acceptance rule; `canonicalize(value)` is RFC 8785 JCS.
+applies the acceptance rule; `canonicalize(value)` is RFC 8785 JCS. A roster's JCS encoding,
+signature included, is at most `MAX_ROSTER_BYTES` (65000 bytes, about 400 members; `rosterSize(r)`
+measures it), so it always fits one session message; a larger one is invalid.
 
 **`Member`** (`Member.connect(options)` resolves once registered; `new Member(options)` starts
 connecting and returns at once):
@@ -75,6 +77,8 @@ receives the newer one in `registered` and accepts it (a `roster` event) before 
 **`Primary`** extends `Member`: `Primary.connect(options)`, `openPairingCode(kind, { lifetimeMs? })`
 returning `{ code, codeId, kind, link, expiresAt }`, `cancelPairingCode(codeId)`,
 `revoke(nodeId)` returning the new roster, `usage()`. Extra events: `usageAlert`, `paired`,
+`pairingFailed`. When no further member fits under the roster limit, `openPairingCode` throws
+`RosterFullError` (code `roster-full`), and a code opened earlier fails its pairing with
 `pairingFailed`.
 
 **Pairing.** `pair({ link, identity, WebSocket?, timeoutMs? })` returns

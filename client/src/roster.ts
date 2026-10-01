@@ -34,6 +34,14 @@ export interface Roster extends UnsignedRoster {
 
 const ROSTER_LABEL = utf8('frontier-link/1/roster');
 
+/** The most a roster's JCS encoding, signature included, may take (section 3): one session message. */
+export const MAX_ROSTER_BYTES = 65000;
+
+/** The length of a roster's JCS encoding, signature included. */
+export function rosterSize(roster: Roster): number {
+  return utf8(canonicalize(roster)).length;
+}
+
 /** The bytes the primary signs: the label followed by JCS of the roster without `signature`. */
 export function rosterSigningBytes(roster: UnsignedRoster | Roster): Uint8Array {
   const { signature: _omit, ...rest } = roster as Roster;
@@ -127,6 +135,13 @@ export function rosterProblem(value: unknown): string | null {
     }
   }
   if (primaries !== 1) return 'roster must have exactly one primary member';
+  let size: number;
+  try {
+    size = rosterSize(r as unknown as Roster);
+  } catch (e) {
+    return (e as Error).message;
+  }
+  if (size > MAX_ROSTER_BYTES) return `roster is ${size} bytes, over the ${MAX_ROSTER_BYTES}-byte limit`;
   let sig: Uint8Array;
   try {
     sig = fromB64uLen(r.signature, 64, 'signature');

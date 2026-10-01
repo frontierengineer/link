@@ -11,10 +11,13 @@ import {
   acceptanceProblem,
   createNetwork,
   memberFromIdentity,
+  MAX_ROSTER_BYTES,
   rosterProblem,
   rosterSigningBytes,
+  rosterSize,
   signRoster,
   type Roster,
+  type RosterMember,
 } from '../src/roster.js';
 import { originOf, registerSigningBytes, signResignation, verifyResignation } from '../src/signed.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
@@ -129,6 +132,11 @@ test('registration signing bytes and origin', () => {
   assert.equal(originOf('ws://127.0.0.1:80/v1'), '127.0.0.1');
   assert.equal(originOf('ws://127.0.0.1:9000/v1'), '127.0.0.1:9000');
   assert.equal(originOf('ws://[::1]:9000/v1'), '[::1]:9000');
+  // Section 4.1 (spec 71b8288): 80 and 443 are dropped whatever the scheme, as the relay does.
+  assert.equal(originOf('ws://eu.example.com:443/v1'), 'eu.example.com');
+  assert.equal(originOf('wss://eu.example.com:80/v1'), 'eu.example.com');
+  assert.equal(originOf('ws://[::1]:443/v1'), '[::1]');
+  assert.equal(originOf('wss://eu.example.com:4430/v1'), 'eu.example.com:4430');
   const challenge = fromHex('aa'.repeat(32));
   const bytes = registerSigningBytes({ network: 'n', node: 'm', challenge, ts: 1, origin: 'o:1' });
   assert.equal(
@@ -148,4 +156,31 @@ test('resignation signatures verify only for the signer, network and node', () =
   assert.ok(!verifyResignation(r, worker.id, worker.ed25519.pub));
   assert.ok(!verifyResignation({ ...r, ts: r.ts + 1 }, primary.id, worker.ed25519.pub));
   assert.ok(!verifyResignation(r, primary.id, surface.ed25519.pub));
+});
+
+test('a roster is valid up to 65000 bytes of JCS, signature included, and invalid one byte over', () => {
+  const p = identityFromSeed(seed(9));
+  const members: RosterMember[] = [memberFromIdentity(p, 'primary')];
+  for (let i = 0; i < 300; i++) {
+    const s = Uint8Array.from({ length: 32 }, (_, j) => (j === 0 ? i >> 8 : j === 1 ? i & 0xff : 7));
+    members.push(memberFromIdentity(identityFromSeed(s), 'mcp'));
+  }
+  const make = (relay: string) => signRoster({ network: p.id, version: 3, issuedAt: 1790000000000, relay, primary: { ed25519: members[0]!.ed25519 }, members }, p);
+  const base = rosterSize(make(''));
+  assert.ok(base < MAX_ROSTER_BYTES);
+  const exact = make('x'.repeat(MAX_ROSTER_BYTES - base));
+  assert.equal(rosterSize(exact), MAX_ROSTER_BYTES);
+  assert.equal(rosterProblem(exact), null);
+  // signRoster refuses to produce one over; a hand-signed one is invalid on arrival.
+  assert.throws(() => make('x'.repeat(MAX_ROSTER_BYTES - base + 1)), /over the 65000-byte limit/);
+  const { signature: _s, ...unsigned } = exact;
+  const over = { ...unsigned, relay: exact.relay + 'x' };
+  const signed: Roster = { ...over, signature: b64u(p.sign(rosterSigningBytes(over))) };
+  assert.equal(rosterSize(signed), MAX_ROSTER_BYTES + 1);
+  assert.match(rosterProblem(signed)!, /over the 65000-byte limit/);
+  assert.match(acceptanceProblem(signed, signed.primary.ed25519, 1)!, /over the 65000-byte limit/);
+  // Multi-byte characters count as bytes, not characters.
+  const chars = MAX_ROSTER_BYTES - base;
+  assert.throws(() => make('\u00e9'.repeat(Math.ceil(chars / 2) + 1)), /over the 65000-byte limit/);
+  assert.equal(rosterSize(make('\u00e9'.repeat(Math.floor(chars / 2)))) <= MAX_ROSTER_BYTES, true);
 });

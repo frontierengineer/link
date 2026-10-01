@@ -8,6 +8,8 @@ export {
   isValidRoster,
   acceptanceProblem,
   rosterSigningBytes,
+  rosterSize,
+  MAX_ROSTER_BYTES,
   memberFromIdentity,
   findMember,
   MEMBER_KINDS,
@@ -58,6 +60,7 @@ export {
   ClosedError,
   PairingError,
   InvalidError,
+  RosterFullError,
   type LinkErrorCode,
 } from './errors.js';
 export type { WebSocketLike, WebSocketConstructor } from './socket.js';

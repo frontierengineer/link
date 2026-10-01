@@ -5,7 +5,7 @@
 
 import { b64u, fromB64u, fromB64uLen, randomBytes } from './bytes.js';
 import { buildPairingLink, formatCode, generateCode, generateCodeId } from './code.js';
-import { ClosedError, InvalidError, LinkError, TimeoutError } from './errors.js';
+import { ClosedError, InvalidError, LinkError, RosterFullError, TimeoutError } from './errors.js';
 import { encodeFrame, FrameType } from './frames.js';
 import { nodeIdFromEd25519 } from './identity.js';
 import { canonicalize } from './jcs.js';
@@ -13,17 +13,28 @@ import { Member, type MemberEvents, type MemberOptions, type UsageAlert } from '
 import { PrimaryExchange } from './pairing.js';
 import type { RelayState } from './relay.js';
 import {
+  MAX_ROSTER_BYTES,
   PAIRING_KINDS,
   findMember,
+  rosterSize,
   signRoster,
+  compareIds,
   type PairingKind,
   type Roster,
   type RosterMember,
+  type UnsignedRoster,
 } from './roster.js';
 import { verifyResignation, type Resignation } from './signed.js';
 import type { ControlMessage } from './socket.js';
 
 export const CODE_LIFETIME_MS = 15 * 60_000;
+/** An Ed25519 signature's b64u length, for measuring a roster before it is signed. */
+const PLACEHOLDER_SIGNATURE = 'A'.repeat(86);
+
+/** A member entry of `kind` with every field at its fixed length. */
+function placeholderMember(kind: PairingKind): RosterMember {
+  return { id: 'a'.repeat(26), ed25519: 'A'.repeat(43), x25519: 'A'.repeat(43), kind };
+}
 export const CODE_ATTEMPTS = 5;
 export const PAIRING_CHANNEL_MS = 60_000;
 const RESIGN_SKEW_MS = 300_000;
@@ -100,6 +111,9 @@ export class Primary extends Member<PrimaryEvents> {
   /** Opens a code that admits one node of `kind` for 15 minutes. */
   openPairingCode(kind: PairingKind, opts: { lifetimeMs?: number } = {}): PairingCode {
     if (!PAIRING_KINDS.includes(kind)) throw new InvalidError(`kind must be one of ${PAIRING_KINDS.join(', ')}`);
+    // Every entry has the same shape, so a placeholder of this kind measures the next roster.
+    const room = this.sizeWith([...this.currentRoster.members, placeholderMember(kind)]);
+    if (room > MAX_ROSTER_BYTES) throw new RosterFullError(room);
     this.pruneCodes();
     const code = generateCode();
     const codeId = b64u(generateCodeId());
@@ -151,20 +165,29 @@ export class Primary extends Member<PrimaryEvents> {
 
   // ── Roster publication ──
 
-  /** The next roster version with `members`, signed. */
-  private nextRoster(members: RosterMember[]): Roster {
+  /** The next roster version with `members`, unsigned. */
+  private nextUnsigned(members: RosterMember[]): UnsignedRoster {
     const prev = this.currentRoster;
-    return signRoster(
-      {
-        network: prev.network,
-        version: prev.version + 1,
-        issuedAt: Math.max(this.now(), prev.issuedAt),
-        relay: prev.relay,
-        primary: prev.primary,
-        members,
-      },
-      this.identity,
-    );
+    return {
+      network: prev.network,
+      version: prev.version + 1,
+      issuedAt: Math.max(this.now(), prev.issuedAt),
+      relay: prev.relay,
+      primary: prev.primary,
+      members: [...members].sort((a, b) => compareIds(a.id, b.id)),
+    };
+  }
+
+  /** The JCS size the next roster with `members` would have once signed. */
+  private sizeWith(members: RosterMember[]): number {
+    return rosterSize({ ...this.nextUnsigned(members), signature: PLACEHOLDER_SIGNATURE });
+  }
+
+  /** The next roster version with `members`, signed. Throws RosterFullError over 65000 bytes. */
+  private nextRoster(members: RosterMember[]): Roster {
+    const size = this.sizeWith(members);
+    if (size > MAX_ROSTER_BYTES) throw new RosterFullError(size);
+    return signRoster(this.nextUnsigned(members), this.identity);
   }
 
   /** Adopts a roster this primary signed and pushes it to the relay and every member. */
@@ -314,13 +337,19 @@ export class Primary extends Member<PrimaryEvents> {
     const id = nodeIdFromEd25519(keys.ed25519);
     if (findMember(this.currentRoster, id)) return this.endChannel(ch.key, `${id} is already a member`, true);
     const member: RosterMember = { id, ed25519: b64u(keys.ed25519), x25519: b64u(keys.x25519), kind: ch.entry.kind };
+    let next: Roster;
+    try {
+      next = this.nextRoster([...this.currentRoster.members, member]);
+    } catch (e) {
+      if (e instanceof RosterFullError) return this.endChannel(ch.key, e.message, true);
+      throw e;
+    }
     ch.stage = 'done';
     clearTimeout(ch.timer);
     this.channels.delete(ch.key);
     ch.entry.inFlight--;
     ch.entry.burned = true;
     this.codes.delete(ch.entry.codeId);
-    const next = this.nextRoster([...this.currentRoster.members, member]);
     this.sendPair(ch, ch.exchange.p6(next));
     this.publish(next);
     this.relay.sendControl({ type: 'pairEnd', channel: ch.key });

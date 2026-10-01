@@ -53,6 +53,9 @@ without padding. `b32` is RFC 4648 base32, lowercase, without padding.
 
 - `version` is a positive integer that increases with every change. `issuedAt` is Unix
   milliseconds. `kind` is one of `primary`, `worker`, `surface`, `mcp`.
+- A roster's JCS encoding (with its signature) is at most **65000 bytes**, about 400 members,
+  so that it always fits in one session message. A primary refuses to add a member beyond that,
+  and a roster over the limit is invalid everywhere.
 - `members` is sorted by `id`. Exactly one member has kind `primary`, and its `ed25519` equals
   `primary.ed25519`. Its `id` equals `network`.
 - **Signature** = Ed25519 by the primary over
@@ -78,9 +81,10 @@ WebSocket over TLS, path `/v1`. Text frames carry control messages, one JSON obj
    ```
    `sig` = Ed25519 by the node over
    `lenStr("frontier-link/1/register") || lenStr(network) || lenStr(node) || challenge (32 raw bytes) || u64be(ts) || lenStr(origin)`,
-   where `origin` is the lowercased `host[:port]` of the URL the node dialled (the port only if
-   it is not the scheme's default). A relay behind a TLS terminator cannot tell the scheme, so it
-   drops both `:80` and `:443` from the `Host` it compares against.
+   where `origin` is the lowercased `host[:port]` of the URL the node dialled, with the port
+   omitted when it is `80` or `443`, whatever the scheme. The relay builds its side the same way
+   from `LINK_ORIGIN` or the request's `Host`. (A relay behind a TLS terminator cannot tell the
+   scheme, so both ports are dropped on both sides.)
 3. The relay checks, in this order, and closes with the given code on the first failure:
    1. the message's shape (`4000`);
    2. `node` equals the id derived from `ed25519` (`4007`);
@@ -282,7 +286,8 @@ roster.
   own relay connection drops.
 - **Rekeying:** the initiator starts a new handshake after 10 minutes or 2^32 messages in either
   direction, whichever comes first. A responder treats a session older than 10 minutes and 30
-  seconds as expired, and answers `reset`. Both sides keep the previous session's keys for 30
+  seconds as expired, and answers `reset`, except while a message is still crossing it, which
+  always completes first. Both sides keep the previous session's keys for 30
   seconds, for frames already in flight, and longer while a message is still crossing it: a
   message is never split across two sessions.
 - **Idle:** a session with no frame in either direction for 10 minutes is forgotten.

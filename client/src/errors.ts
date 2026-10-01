@@ -9,6 +9,7 @@ export type LinkErrorCode =
   | 'timeout'
   | 'closed'
   | 'pairing'
+  | 'roster-full'
   | 'invalid';
 
 export class LinkError extends Error {
@@ -67,6 +68,13 @@ export class ClosedError extends LinkError {
 export class PairingError extends LinkError {
   constructor(message: string) {
     super('pairing', message);
+  }
+}
+
+/** Adding a member would take the roster's JCS encoding over 65000 bytes (section 3). */
+export class RosterFullError extends LinkError {
+  constructor(readonly bytes: number) {
+    super('roster-full', `the roster would be ${bytes} bytes, over the 65000-byte limit`);
   }
 }
 

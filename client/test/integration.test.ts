@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canonicalize, createIdentity, Member, memberFromIdentity, nodeIdFromEd25519, pair, Primary, signRoster, type PairingKind, type Roster } from '../src/index.js';
+import { canonicalize, createIdentity, MAX_ROSTER_BYTES, Member, memberFromIdentity, nodeIdFromEd25519, pair, Primary, RosterFullError, rosterSize, signRoster, type Roster } from '../src/index.js';
 import { b64u, fromB64u, randomBytes } from '../src/bytes.js';
 import { encodeFrame, FrameType } from '../src/frames.js';
 import { NewcomerExchange } from '../src/pairing.js';
@@ -632,41 +632,55 @@ test('a responder keeps an expired session while a message is still crossing it,
   }
 });
 
-test('a roster too large for one session message is refused, not sent as an oversize Noise message', async () => {
-  // Found while sizing rosters for the Go relay: roster and resign session messages were
-  // encrypted whole, so a roster over 65519 bytes went out as a Noise message over 65535
-  // bytes (section 7.2), and one over 1 MiB spent a nonce on a frame that was never sent.
+test('a roster near 65000 bytes travels in one session message; the primary refuses a member beyond it', async () => {
+  // Section 3 (spec 71b8288): a roster's JCS encoding, signature included, is at most 65000
+  // bytes, so it always fits one session message; a primary refuses to add a member beyond.
   const relay = await TestRelay.start();
   const id = createIdentity();
-  const fakes = Array.from({ length: 600 }, () => {
+  const fake = () => {
     const pub = randomBytes(32);
     return { id: nodeIdFromEd25519(pub), ed25519: b64u(pub), x25519: b64u(randomBytes(32)), kind: 'mcp' as const };
-  });
-  const members = [memberFromIdentity(id, 'primary'), ...fakes].sort((a, b) => (a.id < b.id ? -1 : 1));
-  const roster = signRoster({ network: id.id, version: 1, issuedAt: Date.now(), relay: relay.url, primary: { ed25519: b64u(id.ed25519.pub) }, members }, id);
-  assert.ok(canonicalize(roster).length > 65519);
-  const primary = await Primary.connect({ identity: id, roster, timing: FAST });
-  const joined: Member[] = [];
-  const add = async (kind: PairingKind) => {
-    const identity = createIdentity();
-    const { roster: r } = await pair({ link: primary.openPairingCode(kind).link, identity });
-    const m = await Member.connect({ identity, roster: r, timing: FAST });
-    joined.push(m);
-    return m;
   };
+  const sign = (members: ReturnType<typeof fake>[]) =>
+    signRoster({ network: id.id, version: 1, issuedAt: Date.now(), relay: relay.url, primary: { ed25519: b64u(id.ed25519.pub) }, members: [memberFromIdentity(id, 'primary'), ...members] }, id);
+  // Every entry has the same length, so the room left is a whole number of entries.
+  const entry = canonicalize(fake()).length + 1;
+  const base = rosterSize(sign([fake()]));
+  const fakes = Array.from({ length: Math.floor((MAX_ROSTER_BYTES - base) / entry) - 1 }, fake); // room for two more
+  const roster = sign(fakes);
+  const primary = await Primary.connect({ identity: id, roster, timing: FAST });
+  const failures: string[] = [];
+  primary.on('pairingFailed', (f) => failures.push(f.reason));
+  const codes = { worker: primary.openPairingCode('worker'), surface: primary.openPairingCode('surface'), mcp: primary.openPairingCode('mcp') };
+  const joined: Member[] = [];
   try {
-    const worker = await add('worker');
+    const wId = createIdentity();
+    const worker = await Member.connect({ identity: wId, roster: (await pair({ link: codes.worker.link, identity: wId })).roster, timing: FAST });
+    joined.push(worker);
     const pIn = inbox(primary);
     await worker.send(primary.id, bytesOf('hello'));
     await pIn.next();
-    // v3 cannot travel to the worker in one session message.
-    await add('surface');
-    await new Promise((r) => setTimeout(r, 200));
+
+    // The last member that fits: v3 is just under the limit and reaches the worker in a session.
+    await pair({ link: codes.surface.link, identity: createIdentity() });
     assert.equal(primary.roster.version, 3);
-    assert.equal(worker.roster.version, 2);
+    const size = rosterSize(primary.roster);
+    assert.ok(size <= MAX_ROSTER_BYTES && size > MAX_ROSTER_BYTES - entry, `v3 is ${size} bytes`);
+    await until(() => worker.roster.version === 3, 'the worker to receive v3 in a session');
     const data = relay.frameLog.filter((f) => f.type === FrameType.Data);
-    assert.ok(data.length > 0 && data.every((f) => f.size <= 18 + 4 + 65535), 'no Noise message over 65535 bytes');
-    // Nothing was encrypted that was not sent, so the session still works.
+    assert.ok(data.every((f) => f.size <= 18 + 4 + 65535), 'no Noise message over 65535 bytes');
+
+    // No room left: a new code is refused at once, and a code opened earlier fails at P5.
+    assert.throws(() => primary.openPairingCode('mcp'), (e: unknown) => e instanceof RosterFullError && e.code === 'roster-full');
+    await assert.rejects(pair({ link: codes.mcp.link, identity: createIdentity() }), { code: 'pairing' });
+    assert.equal(failures.length, 1);
+    assert.match(failures[0]!, /over the 65000-byte limit/);
+    assert.equal(primary.roster.version, 3);
+
+    // A session message over one Noise message is refused before it is encrypted, so the
+    // session stays usable.
+    const sessions = (primary as unknown as { sessions: { sendControl(p: string, m: { type: 'roster'; json: string }): Promise<void> } }).sessions;
+    await assert.rejects(sessions.sendControl(worker.id, { type: 'roster', json: 'x'.repeat(70_000) }), { code: 'invalid' });
     const wIn = inbox(worker);
     await primary.send(worker.id, bytesOf('still here'));
     assert.equal(textOf((await wIn.next())[0]!.bytes), 'still here');

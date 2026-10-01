@@ -23,7 +23,8 @@ before(() => {
   }
   work = mkdtempSync(join(tmpdir(), 'link-server-pack-'));
   const packed = JSON.parse(execFileSync(npm, ['pack', '--json', '--pack-destination', work], { cwd: pkg, encoding: 'utf8' }));
-  listing = packed[0];
+  // npm 10 and 11 print an array of packages; npm 12 an object keyed by package name.
+  listing = Array.isArray(packed) ? packed[0] : Object.values(packed)[0];
   const app = join(work, 'app');
   execFileSync('mkdir', ['-p', app]);
   writeFileSync(join(app, 'package.json'), '{"name":"app","private":true}');

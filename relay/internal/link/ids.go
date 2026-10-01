@@ -3,6 +3,7 @@
 package link
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/hkdf"
@@ -116,4 +117,19 @@ func RegisterMessage(network, node string, challenge []byte, ts uint64, origin s
 	b = append(b, challenge...)
 	b = binary.BigEndian.AppendUint64(b, ts)
 	return appendLenStr(b, origin)
+}
+
+// NonCanonical returns sig with L added to its S half: the same signature in a non-canonical
+// encoding, which strict verification must refuse. For tests and vectors.
+func NonCanonical(sig []byte) []byte {
+	// L = 2^252 + 27742317777372353535851937790883648493, little-endian.
+	l := [32]byte{0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10}
+	out := bytes.Clone(sig)
+	carry := 0
+	for i := range 32 {
+		v := int(out[32+i]) + int(l[i]) + carry
+		out[32+i], carry = byte(v), v>>8
+	}
+	return out
 }

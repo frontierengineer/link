@@ -203,3 +203,17 @@ func TestRegisterMessage(t *testing.T) {
 		t.Fatal("signature does not verify")
 	}
 }
+
+// Verification is strict RFC 8032 (crypto/ed25519): a signature whose S is not reduced
+// modulo the group order is refused even though S - L would verify.
+func TestNonCanonicalSignatureRefused(t *testing.T) {
+	k, _ := DeriveKeys(bytes.Repeat([]byte{3}, 32))
+	msg := []byte("frontier")
+	sig := ed25519.Sign(k.Ed25519, msg)
+	if !ed25519.Verify(k.Ed25519Public, msg, sig) {
+		t.Fatal("canonical signature refused")
+	}
+	if ed25519.Verify(k.Ed25519Public, msg, NonCanonical(sig)) {
+		t.Fatal("non-canonical signature accepted")
+	}
+}

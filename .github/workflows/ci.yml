@@ -1,0 +1,101 @@
+name: CI
+
+# Every pull request and every push to master: the relay's suite, the client's suite, the
+# client driven against the real relay binary (test/), and an independent Go check of the
+# client's vectors. Each half also checks the other's vectors inside its own suite.
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+jobs:
+  relay:
+    name: relay (go vet, race tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+
+  client:
+    name: client (typecheck, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  cross:
+    name: client against the real relay
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            client/package-lock.json
+            test/package-lock.json
+      - run: npm ci
+        working-directory: client
+      - run: npm ci
+        working-directory: test
+      - run: npm run typecheck
+        working-directory: test
+      # pretest builds the client; the tests build the relay with `go build`.
+      - run: npm test
+        working-directory: test
+
+  vectors-go:
+    name: client vectors, checked in Go
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client/scripts/check-vectors-go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: client/scripts/check-vectors-go/go.mod
+          cache-dependency-path: client/scripts/check-vectors-go/go.sum
+      - run: go run .
+
+  relay-package:
+    name: relay npm package (cross-compile, pack, run)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: relay/npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm run build
+      - run: npm test

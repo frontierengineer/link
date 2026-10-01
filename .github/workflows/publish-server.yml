@@ -1,0 +1,58 @@
+name: Publish @frontierengineer/link-server
+
+# The relay as an npm package: static Go binaries for linux-x64, linux-arm64, darwin-x64,
+# darwin-arm64 and win32-x64, and a `link-relay` launcher that runs the right one.
+#
+# TRIGGER: push a tag `server-v<version>` that matches relay/npm/package.json "version"
+# (e.g. server-v1.0.0-alpha.0), or run this workflow manually.
+#
+# AUTH: OIDC Trusted Publishing — NO token, nothing to rotate. GitHub mints a
+# short-lived credential per run and npm verifies it came from this repo + workflow.
+# ONE-TIME SETUP on npmjs.com: package @frontierengineer/link-server -> Settings ->
+# Trusted Publisher -> GitHub Actions -> repository `frontierengineer/link`,
+# workflow `publish-server.yml`. (No repo secret needed.)
+on:
+  push:
+    tags: ["server-v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC: mint the short-lived npm publish credential (Trusted Publishing)
+      contents: read
+    defaults:
+      run:
+        working-directory: relay/npm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install -g npm@latest # Trusted Publishing needs npm >= 11.5.1
+      - name: the tag matches package.json
+        if: github.ref_type == 'tag'
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          if [ "${GITHUB_REF_NAME}" != "server-v${version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match relay/npm/package.json version ${version}" >&2
+            exit 1
+          fi
+      - run: go vet ./... && go test -race -count=1 ./...
+        working-directory: relay
+      # CGO_ENABLED=0 cross-compiles into vendor/<platform>-<arch>/.
+      - run: npm run build
+      # Packs the package, installs the tarball and runs the linux-x64 binary through the launcher.
+      - run: npm test
+      - name: publish
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          tag=latest
+          case "$version" in *-*) tag=next ;; esac
+          npm publish --provenance --access public --tag "$tag"

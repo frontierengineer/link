@@ -1,0 +1,50 @@
+name: Publish @frontierengineer/link-client
+
+# TRIGGER: push a tag `client-v<version>` that matches client/package.json "version"
+# (e.g. client-v1.0.0-alpha.0), or run this workflow manually.
+#
+# AUTH: OIDC Trusted Publishing — NO token, nothing to rotate. GitHub mints a
+# short-lived credential per run and npm verifies it came from this repo + workflow.
+# ONE-TIME SETUP on npmjs.com: package @frontierengineer/link-client -> Settings ->
+# Trusted Publisher -> GitHub Actions -> repository `frontierengineer/link`,
+# workflow `publish-client.yml`. (No repo secret needed.)
+on:
+  push:
+    tags: ["client-v*"]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # OIDC: mint the short-lived npm publish credential (Trusted Publishing)
+      contents: read
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install -g npm@latest # Trusted Publishing needs npm >= 11.5.1
+      - name: the tag matches package.json
+        if: github.ref_type == 'tag'
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          if [ "${GITHUB_REF_NAME}" != "client-v${version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match client/package.json version ${version}" >&2
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # prepack builds dist/. Authenticates via OIDC (no NPM_TOKEN); --provenance records
+      # where and how the package was built. A prerelease version goes out under `next`.
+      - name: publish
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          tag=latest
+          case "$version" in *-*) tag=next ;; esac
+          npm publish --provenance --access public --tag "$tag"

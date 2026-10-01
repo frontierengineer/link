@@ -28,8 +28,8 @@ const (
 )
 
 const (
-	maxText   = 64 << 10 // a control message (section 4)
-	maxBinary = 1 << 20  // a routed frame, header included (section 6)
+	maxText   = 1 << 20 // a control message (section 4)
+	maxBinary = 1 << 20 // a routed frame, header included (section 6)
 )
 
 type connState uint8

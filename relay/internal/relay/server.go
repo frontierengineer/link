@@ -220,7 +220,7 @@ func (s *Server) unregister(c *conn) {
 		n.mu.Unlock()
 	}
 	if ch := c.channel; ch != nil {
-		s.endChannel(ch, true)
+		s.endChannel(ch, true, false) // the newcomer left
 	}
 	s.chmu.Lock()
 	var owned []*channel
@@ -229,7 +229,7 @@ func (s *Server) unregister(c *conn) {
 	}
 	s.chmu.Unlock()
 	for _, ch := range owned {
-		s.endChannel(ch, false)
+		s.endChannel(ch, false, true) // the primary left
 	}
 	sh := s.shardOf(c)
 	sh.mu.Lock()

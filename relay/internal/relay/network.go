@@ -22,6 +22,7 @@ const (
 	typeUnreachable = 0x04
 	typeRefused     = 0x05
 	typePair        = 0x06
+	typeReset       = 0x07
 )
 
 const maxClockSkewMs = 300000
@@ -79,7 +80,7 @@ func (c *conn) handleText(data []byte) bool {
 	case statePairing:
 		if env.Type == "pairEnd" {
 			if ch, ok := c.channelOf(data); ok && ch == c.channel {
-				c.s.endChannel(ch, true)
+				c.s.endChannel(ch, true, false)
 				return false
 			}
 		}
@@ -98,7 +99,7 @@ func (c *conn) handleText(data []byte) bool {
 			mine := c.s.channels[ch.id] == ch && ch.primary == c
 			c.s.chmu.Unlock()
 			if mine {
-				c.s.endChannel(ch, false)
+				c.s.endChannel(ch, false, true)
 			}
 		}
 	default:
@@ -307,7 +308,7 @@ func (c *conn) handleBinary(f []byte) bool {
 		return true
 	case stateRegistered:
 		switch f[1] {
-		case typeInit, typeResp, typeData, typeRefused:
+		case typeInit, typeResp, typeData, typeRefused, typeReset:
 			c.route(f, peer)
 			return true
 		case typePair:

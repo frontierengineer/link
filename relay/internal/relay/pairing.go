@@ -69,14 +69,14 @@ func (c *conn) pair(data []byte) bool {
 		p.pairs = map[link.ID]*channel{}
 	}
 	p.pairs[ch.id] = ch
-	ch.timer = time.AfterFunc(s.cfg.PairTimeout, func() { s.endChannel(ch, true) })
+	ch.timer = time.AfterFunc(s.cfg.PairTimeout, func() { s.endChannel(ch, true, true) })
 	s.chmu.Unlock()
 	c.state, c.channel = statePairing, ch
 	c.nc.SetReadDeadline(time.Time{})
 	chID := link.B64u.EncodeToString(ch.id[:])
 	// The primary hears first, so it knows the channel before the newcomer's first frame.
 	if !p.sendJSON(pairingMsg{Type: "pairing", Channel: chID, Code: *m.Code}) {
-		s.endChannel(ch, false)
+		s.endChannel(ch, false, true)
 		return false
 	}
 	c.sendJSON(pairingMsg{Type: "pairing", Channel: chID})
@@ -101,10 +101,10 @@ func (c *conn) channelOf(data []byte) (*channel, bool) {
 	return ch, ch != nil
 }
 
-// endChannel ends a pairing channel once: the newcomer is closed 1000 after what is queued
-// for it (the primary's last pair frame among it) is written. notifyPrimary tells the
-// primary the channel is gone when it did not end it itself.
-func (s *Server) endChannel(ch *channel, notifyPrimary bool) {
+// endChannel ends a pairing channel once: pairEnd goes to each side still connected that did
+// not end it itself, and the newcomer is closed 1000 after what is queued for it (the
+// primary's last pair frame among it) is written.
+func (s *Server) endChannel(ch *channel, toPrimary, toNewcomer bool) {
 	s.chmu.Lock()
 	if s.channels[ch.id] != ch {
 		s.chmu.Unlock()
@@ -114,8 +114,12 @@ func (s *Server) endChannel(ch *channel, notifyPrimary bool) {
 	delete(ch.primary.pairs, ch.id)
 	ch.timer.Stop()
 	s.chmu.Unlock()
-	if notifyPrimary {
-		ch.primary.sendJSON(pairEndMsg{Type: "pairEnd", Channel: link.B64u.EncodeToString(ch.id[:])})
+	end := pairEndMsg{Type: "pairEnd", Channel: link.B64u.EncodeToString(ch.id[:])}
+	if toPrimary {
+		ch.primary.sendJSON(end)
+	}
+	if toNewcomer {
+		ch.newcomer.sendJSON(end)
 	}
 	ch.newcomer.closeWith(closeNormal, "pairing ended", true)
 }

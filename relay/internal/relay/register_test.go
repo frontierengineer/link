@@ -109,6 +109,12 @@ func TestRegistrationChecks(t *testing.T) {
 			resign(h, c, m, stranger, net, h.origin, c.challenge, now())
 			return m
 		}},
+		{"non-canonical signature (S + L)", 4007, func(h *harness, c *client) any {
+			m := h.registerMsg(c, w, net, r)
+			sig, _ := b64dec(m["sig"].(string))
+			m["sig"] = b64(link.NonCanonical(sig))
+			return m
+		}},
 		{"bad signature beats a bad roster", 4007, func(h *harness, c *client) any {
 			m := h.registerMsg(c, w, net, r)
 			m["roster"] = json.RawMessage(`{"network":"x"}`)

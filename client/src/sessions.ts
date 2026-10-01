@@ -44,7 +44,8 @@ export interface SessionTiming {
   /** ...or after this many messages in either direction (2^32). */
   rekeyMessages: number;
   /** Previous session's keys are kept this long after a rekey (30 s); a responder also
-   * treats a session older than rekeyIntervalMs + retireGraceMs as expired. */
+   * treats a session older than rekeyIntervalMs + retireGraceMs as expired, except while a
+   * message is still crossing it, which always completes first. */
   retireGraceMs: number;
   /** A session with no frame in either direction this long is forgotten (10 min). */
   idleMs: number;
@@ -454,7 +455,13 @@ export class SessionManager {
   private async ensureSession(peer: string): Promise<Session> {
     const ps = this.peer(peer);
     const cur = ps.current;
-    if (cur && this.expired(cur)) this.endSession(cur, new ClosedError(`session with ${peer} expired`));
+    if (cur && this.expired(cur)) {
+      // Expiry yields to a message in flight (section 7.2): one still crossing finishes on
+      // the old session, which is retired; this send takes a new one.
+      if (this.crossing(cur)) cur.retired = true;
+      else this.endSession(cur, new ClosedError(`session with ${peer} expired`));
+      return this.initiate(peer);
+    }
     if (cur && !cur.ended) {
       this.maybeRekey(cur);
       return cur;

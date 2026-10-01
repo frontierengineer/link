@@ -690,3 +690,32 @@ test('a roster near 65000 bytes travels in one session message; the primary refu
     await relay.stop();
   }
 });
+
+test('a responder that sends on an expired session lets a message still arriving on it finish', async () => {
+  // Section 7.2 (spec 71b8288): expiry yields to a message in flight. The responder's own
+  // send used to end the expired session at once, so the rest of a message still arriving
+  // on it was answered with reset and lost.
+  const net = await startNetwork();
+  try {
+    let skew = 0;
+    const worker = await net.add('worker', { timing: { ...FAST, rekeyIntervalMs: 3_600_000 } });
+    const surface = await net.add('surface', { timing: { ...FAST, rekeyIntervalMs: 1000, retireGraceMs: 500 }, now: () => Date.now() + skew });
+    const sReader = surface.messages;
+    const wIn = inbox(worker);
+    const first = new Uint8Array(700 * 1024).fill(1);
+    const second = new Uint8Array(2 * 1024 * 1024).fill(2);
+    await worker.send(surface.id, first);
+    let done = false;
+    const sent = worker.send(surface.id, second).then(() => (done = true));
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(done, false, 'the second message is part-way across, stalled on credit');
+    skew = 10_000;
+    await surface.send(worker.id, bytesOf('a reply on a new session'));
+    assert.equal(textOf((await wIn.next())[0]!.bytes), 'a reply on a new session');
+    assert.deepEqual((await sReader.next()).value!.bytes, first);
+    await sent;
+    assert.deepEqual((await sReader.next()).value!.bytes, second);
+  } finally {
+    await net.close();
+  }
+});

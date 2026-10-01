@@ -303,14 +303,17 @@ func TestNetworkForgottenAfterTTL(t *testing.T) {
 	pc := h.register(p, p, roster(t, 5, p))
 	pc.ws.Close()
 	time.Sleep(50 * time.Millisecond)
-	// Still remembered: version 3 is older than the 5 it holds.
+	// Still remembered: presenting version 3, it is handed the 5 the relay holds.
 	c := h.dial()
 	c.send(h.registerMsg(c, p, p.ID.String(), roster(t, 3, p)))
-	c.expectClose(4008)
+	if m := c.json(); m["rosterVersion"] != float64(5) || m["roster"] == nil {
+		t.Fatalf("got %v", m)
+	}
+	c.ws.Close()
 	time.Sleep(700 * time.Millisecond)
 	c = h.dial()
 	c.send(h.registerMsg(c, p, p.ID.String(), roster(t, 3, p)))
-	if m := c.json(); m["type"] != "registered" || m["rosterVersion"] != float64(3) {
+	if m := c.json(); m["type"] != "registered" || m["rosterVersion"] != float64(3) || m["roster"] != nil {
 		t.Fatalf("got %v", m)
 	}
 }
@@ -323,7 +326,9 @@ func TestNetworkKeptWhileAMemberIsConnected(t *testing.T) {
 	time.Sleep(600 * time.Millisecond)
 	c := h.dial()
 	c.send(h.registerMsg(c, p, p.ID.String(), roster(t, 3, p, w)))
-	c.expectClose(4008)
+	if m := c.json(); m["rosterVersion"] != float64(5) {
+		t.Fatalf("got %v", m)
+	}
 }
 
 func TestPingClosesASilentPeer(t *testing.T) {

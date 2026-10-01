@@ -140,7 +140,7 @@ func TestRosterPushAndRevocation(t *testing.T) {
 	if m := pc.json(); m["code"] != "bad_request" {
 		t.Fatalf("got %v", m)
 	}
-	// w2 cannot come back: with the old roster it is older, with the new one not a member.
+	// w2 cannot come back: whichever roster it presents, the relay's version 2 does not list it.
 	for _, rr := range [][]byte{r1, roster(t, 2, p, w1)} {
 		c := h.dial()
 		c.send(h.registerMsg(c, w2, p.ID.String(), rr))

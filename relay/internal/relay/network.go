@@ -51,9 +51,10 @@ type helloMsg struct {
 }
 
 type registeredMsg struct {
-	Type          string `json:"type"`
-	Node          string `json:"node"`
-	RosterVersion int64  `json:"rosterVersion"`
+	Type          string          `json:"type"`
+	Node          string          `json:"node"`
+	RosterVersion int64           `json:"rosterVersion"`
+	Roster        json.RawMessage `json:"roster,omitempty"` // the relay's, when newer than the node's
 }
 
 func (c *conn) handleText(data []byte) bool {
@@ -161,19 +162,26 @@ func (c *conn) register(data []byte) bool {
 	if r.Network != netID {
 		return fail(closeNotMember, "roster is for another network")
 	}
-	// 6. Membership.
-	if mem := r.Member(nodeID); mem == nil || !bytes.Equal(mem.Ed25519, pub) {
-		return fail(closeNotMember, "not a member")
-	}
-	// 7. Not older than what we hold; then admit.
-	return c.admit(r, nodeID, now)
+	// 6 and 7, against the effective roster, under the network's lock.
+	return c.admit(r, nodeID, pub, now)
 }
 
-func (c *conn) admit(r *link.Roster, id link.ID, now time.Time) bool {
+// admit settles the effective roster (the newer of the presented one and the relay's; a
+// newer presented roster replaces the relay's), checks membership against it, and admits.
+func (c *conn) admit(r *link.Roster, id link.ID, pub ed25519.PublicKey, now time.Time) bool {
 	s := c.s
+	isMember := func(rr *link.Roster) bool {
+		m := rr.Member(id)
+		return m != nil && bytes.Equal(m.Ed25519, pub)
+	}
 	s.mu.Lock()
 	n := s.networks[r.Network]
 	if n == nil {
+		if !isMember(r) {
+			s.mu.Unlock()
+			c.closeWith(closeNotMember, "not a member", false)
+			return false
+		}
 		if !s.ipNetworks.allow(c.ip, now) {
 			s.mu.Unlock()
 			c.sendError("rate_limited", "too many new networks from this address", "")
@@ -185,30 +193,37 @@ func (c *conn) admit(r *link.Roster, id link.ID, now time.Time) bool {
 	}
 	n.mu.Lock()
 	s.mu.Unlock()
-	if r.Version < n.roster.Version {
-		n.mu.Unlock()
-		c.closeWith(closeNotMember, "roster is older than the relay's", false)
+	var evict []*conn
+	var newer json.RawMessage
+	switch {
+	case r.Version > n.roster.Version:
+		evict = n.adoptLocked(r)
+	case r.Version < n.roster.Version:
+		newer = n.roster.Raw
+	}
+	member := isMember(n.roster)
+	var old *conn
+	if member {
+		old = n.members[id]
+		n.members[id] = c
+		c.network, c.id, c.state = n, id, stateRegistered
+		c.primary = id == n.id
+		// Queued before the connection is visible to senders, so it is the first thing sent.
+		c.sendJSON(registeredMsg{Type: "registered", Node: id.String(), RosterVersion: n.roster.Version, Roster: newer})
+	}
+	n.mu.Unlock()
+	for _, e := range evict {
+		e.closeWith(closeNotMember, "not a member", false)
+	}
+	if !member {
+		c.closeWith(closeNotMember, "not a member", false)
 		return false
 	}
-	var evict []*conn
-	if r.Version > n.roster.Version {
-		evict = n.adoptLocked(r)
-	}
-	old := n.members[id]
-	n.members[id] = c
-	c.network, c.id, c.state = n, id, stateRegistered
-	c.primary = id == n.id
-	// Queued before the connection is visible to senders, so it is the first thing sent.
-	c.sendJSON(registeredMsg{Type: "registered", Node: id.String(), RosterVersion: n.roster.Version})
-	n.mu.Unlock()
 
 	c.nc.SetReadDeadline(time.Time{})
 	c.origin = ""
 	if old != nil && old != c {
 		old.closeWith(closeReplaced, "replaced by a newer connection", false)
-	}
-	for _, e := range evict {
-		e.closeWith(closeNotMember, "not a member", false)
 	}
 	return true
 }

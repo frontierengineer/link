@@ -79,7 +79,8 @@ WebSocket over TLS, path `/v1`. Text frames carry control messages, one JSON obj
    `sig` = Ed25519 by the node over
    `lenStr("frontier-link/1/register") || lenStr(network) || lenStr(node) || challenge (32 raw bytes) || u64be(ts) || lenStr(origin)`,
    where `origin` is the lowercased `host[:port]` of the URL the node dialled (the port only if
-   it is not the scheme's default).
+   it is not the scheme's default). A relay behind a TLS terminator cannot tell the scheme, so it
+   drops both `:80` and `:443` from the `Host` it compares against.
 3. The relay checks, in this order, and closes with the given code on the first failure:
    1. the message's shape (`4000`);
    2. `node` equals the id derived from `ed25519` (`4007`);
@@ -96,15 +97,28 @@ WebSocket over TLS, path `/v1`. Text frames carry control messages, one JSON obj
    roster changed is therefore brought up to date at registration, and is closed `4008` only if
    the newest roster no longer lists it.
 
-A node must send nothing but `register` before `registered`. A second registration for the same
-node replaces the first connection, which is closed `4005`.
+A node must send nothing but `register` (or `pair`) before `registered`, and must send it within
+30 seconds of `hello`; otherwise the relay closes `4000`. Malformed ids, or keys and signatures of
+the wrong length, are shape errors (`4000`). Per-IP limits are checked before signatures; over
+the limit, the relay answers `rate_limited` and closes `4002`. Membership is checked before a
+network the relay does not know is created, so a non-member never uses up an IP address's
+allowance of new networks. A second registration for the same node replaces the first
+connection, which is closed `4005`.
+
+When a presented roster has the same version as the relay's but different contents, the relay's
+copy wins and nothing is sent back.
 
 ### 4.2 Rosters at the relay
 
 - The relay keeps, in memory, the newest valid roster per network.
 - The primary pushes every new roster: `{"type":"roster","roster":{ ... }}`. The relay accepts it
   from the primary only, if valid and newer, and then closes `4008` every connection of that
-  network whose node is no longer a member.
+  network whose node is no longer a member. There is no acknowledgement. An invalid or older
+  roster is answered with error `bad_request`, an equal version is ignored, and a push from any
+  other member is answered `forbidden`.
+- After registration, an unknown control message type is answered `bad_request` and the
+  connection stays open. A node sending a frame of type `0x04` or an unknown type is closed
+  `4000`.
 - The relay forgets a network's roster once it has had no connected member for
   `LINK_NETWORK_TTL` (default 7 days).
 
@@ -337,8 +351,14 @@ A self-hosted relay defaults every limit to off; the values below are the public
 - **Back-pressure.** When the bytes queued for one recipient exceed `LINK_QUEUE_BYTES`, the relay
   stops reading from connections that have frames waiting for it, and resumes below the
   threshold.
-- **Liveness.** The relay sends a WebSocket ping every 30 seconds and closes a connection that
-  has not answered by the next one.
+- **Liveness.** The relay sends a WebSocket ping every 30 seconds and drops a connection that
+  has not answered by the next one. A connection the relay is currently pausing is exempt, since
+  its answer may be stuck behind frames held back.
+- **Slowed** means the trickle rate is in effect. A quota without a trickle rate is reported but
+  never slows.
+- With `LINK_QUEUE_BYTES` off, a recipient's queue counts as full for the slow-peer rule as soon
+  as anything is waiting for it.
+- `pair` frames do not count towards usage or rate limits.
 
 ## 10. Close codes
 

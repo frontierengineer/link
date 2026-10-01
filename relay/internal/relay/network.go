@@ -35,7 +35,7 @@ type network struct {
 	roster      *link.Roster
 	members     map[link.ID]*conn
 	emptySince  time.Time
-	usage       usage
+	usage       *usage             // made on the network's first relayed byte
 	memberUsage map[link.ID]*usage // made on a member's first relayed byte
 	bucket      bucket
 	alertBand   int
@@ -341,6 +341,9 @@ func (c *conn) route(f []byte, peer link.ID) {
 // accountLocked counts a relayed frame and returns how long its sender must wait for the
 // network's bucket: LINK_RATE_BPS, or LINK_TRICKLE_BPS once the hourly quota is spent.
 func (s *Server) accountLocked(n *network, from link.ID, size int, now time.Time) time.Duration {
+	if n.usage == nil {
+		n.usage = &usage{}
+	}
 	n.usage.add(size, now)
 	mu := n.memberUsage[from]
 	if mu == nil {

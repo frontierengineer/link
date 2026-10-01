@@ -458,6 +458,9 @@ func (c *conn) serve() {
 		if !ok {
 			return
 		}
+		// Answers queued for this connection itself (errors, usage, unreachable) are
+		// back-pressure too: a peer that sends but never reads is paused like any other.
+		c.waitQueue(c)
 	}
 }
 

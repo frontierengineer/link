@@ -370,3 +370,35 @@ func TestShutdownClosesGoingAway(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A peer that sends to absent members but never reads its unreachable answers is paused
+// once its own queue passes the threshold.
+func TestBackPressureOnAnswersToTheSender(t *testing.T) {
+	h := start(t, func(c *Config) { c.QueueBytes = 64 << 10 })
+	p, w := keys(t, 1), keys(t, 2)
+	pc := h.register(p, p, roster(t, 1, p, w), smallBuffers)
+	var sent atomic.Int64
+	go func() {
+		f := frame(typeData, w.ID, nil)
+		for range 1_000_000 {
+			if pc.ws.WriteMessage(websocket.BinaryMessage, f) != nil {
+				return
+			}
+			sent.Add(1)
+		}
+	}()
+	last, still := int64(-1), time.Now()
+	for time.Since(still) < time.Second {
+		if n := sent.Load(); n != last {
+			last, still = n, time.Now()
+		}
+		if q := h.s.queuedFor(p.ID, p.ID); q > 64<<10+18 {
+			t.Fatalf("own queue reached %d bytes", q)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if last >= 1_000_000 {
+		t.Fatal("never paused")
+	}
+	t.Logf("paused after %d frames", last)
+}

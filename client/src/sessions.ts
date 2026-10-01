@@ -302,9 +302,10 @@ export class SessionManager {
   private onData(from: string, body: Uint8Array): void {
     const { receiverIndex, ciphertext } = parseData(body);
     const s = this.byIndex.get(receiverIndex);
-    if (!(s instanceof Session) || s.peer !== from || s.ended || this.expired(s)) {
+    if (!(s instanceof Session) || s.peer !== from || s.ended || (this.expired(s) && !this.crossing(s))) {
       // Section 7.2: a receiver index this side does not hold (or a responder
-      // session past its lifetime) is answered with reset.
+      // session past its lifetime, unless a message is still crossing it in
+      // either direction) is answered with reset.
       if (s instanceof Session && s.peer === from) this.endSession(s, new ClosedError(`session with ${from} expired`));
       this.h.sendFrame(FrameType.Reset, from, u32be(receiverIndex));
       return;
@@ -521,6 +522,11 @@ export class SessionManager {
   private expired(s: Session): boolean {
     const t = this.h.timing;
     return !s.initiator && this.h.now() - s.createdAt > t.rekeyIntervalMs + t.retireGraceMs;
+  }
+
+  /** A message is part-way across the session: one being received, or one this side is sending. */
+  private crossing(s: Session): boolean {
+    return s.partialLen > 0 || s.activeSends > 0;
   }
 
   private maybeRekey(s: Session): void {

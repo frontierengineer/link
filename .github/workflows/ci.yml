@@ -43,7 +43,7 @@ jobs:
       - run: npm run build
 
   cross:
-    name: client against the real relay
+    name: client against the real relay (Node and Chromium)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +61,9 @@ jobs:
       - run: npm ci
         working-directory: client
       - run: npm ci
+        working-directory: test
+      # The browser test runs the client in headless Chromium, at the playwright version test/ pins.
+      - run: npx playwright install --with-deps chromium
         working-directory: test
       - run: npm run typecheck
         working-directory: test

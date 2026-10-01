@@ -575,3 +575,58 @@ test('a member revoked while offline is closed 4008 at registration and stays re
     await net.close();
   }
 });
+
+test('a responder keeps an expired session while a message is still crossing it, in either direction', async () => {
+  // Found against the Go relay: a message still in flight when the responder's session
+  // passed rekeyIntervalMs + retireGraceMs was answered with reset half-way and lost.
+  // Section 7.2: keys are kept longer while a message is still crossing a session.
+  const net = await startNetwork();
+  try {
+    let skew = 0;
+    const worker = await net.add('worker', { timing: { ...FAST, rekeyIntervalMs: 3_600_000 } });
+    const surface = await net.add('surface', {
+      timing: { ...FAST, rekeyIntervalMs: 1000, retireGraceMs: 500 },
+      now: () => Date.now() + skew,
+    });
+    const sessions = (m: Member) => (m as unknown as { sessions: { sessionInfo(p: string): { localIndex: number }[] } }).sessions;
+
+    // Worker to surface: the surface holds one message unread, so the second stalls on
+    // credit half-way; the surface's clock then passes the session's lifetime.
+    const sReader = surface.messages;
+    const first = new Uint8Array(700 * 1024).fill(1);
+    const second = new Uint8Array(2 * 1024 * 1024).fill(2);
+    await worker.send(surface.id, first);
+    let done = false;
+    const sent = worker.send(surface.id, second).then(() => (done = true));
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(done, false, 'the second message stalls on credit');
+    const index = sessions(worker).sessionInfo(surface.id)[0]!.localIndex;
+    skew = 10_000;
+    assert.deepEqual((await sReader.next()).value!.bytes, first);
+    await sent;
+    assert.deepEqual((await sReader.next()).value!.bytes, second);
+    assert.equal(sessions(worker).sessionInfo(surface.id)[0]!.localIndex, index, 'the same session carried it');
+
+    // A responder sending: the credit that lets it finish arrives on its old session,
+    // which it must not reset while its own message is still crossing.
+    let backSkew = 0;
+    const back = await net.add('mcp', {
+      timing: { ...FAST, rekeyIntervalMs: 1000, retireGraceMs: 500 },
+      now: () => Date.now() + backSkew,
+    });
+    const wReader = worker.messages;
+    await worker.send(back.id, new Uint8Array(1)); // the worker initiates; back is the responder
+    await back.messages.next();
+    await back.send(worker.id, first);
+    let backDone = false;
+    const backSent = back.send(worker.id, second).then(() => (backDone = true));
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(backDone, false, 'the reply stalls on credit');
+    backSkew = 10_000;
+    assert.deepEqual((await wReader.next()).value!.bytes, first);
+    await backSent;
+    assert.deepEqual((await wReader.next()).value!.bytes, second);
+  } finally {
+    await net.close();
+  }
+});

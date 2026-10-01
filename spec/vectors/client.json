@@ -1,0 +1,974 @@
+{
+  "description": "Link protocol v1 vectors produced by the TypeScript client (client/scripts/vectors.ts). Byte strings are lowercase hex unless the field name ends in B64u or the spec puts them in JSON as b64u.",
+  "keys": [
+    {
+      "seed": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "ed25519Seed": "5bec622636619f9c9a23e9fb1460d93be32a87ae60805910081504b50d163bc8",
+      "ed25519Public": "c66f8c1ca97b3146240d73c6031de9668f93ab5f545cc215991ef593c756a19f",
+      "ed25519PublicB64u": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+      "x25519Private": "887612a67af8e4ad5b6f709dd49052830744a6b986bfb8b8033500649deeb942",
+      "x25519Public": "d4489587b02ecbc74e3b6382b05488b4df94e9b31a839f7bfd3b442ebafbaf3f",
+      "x25519PublicB64u": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+      "nodeIdBytes": "45d639ab7846f4fe425dda14effbba01",
+      "nodeId": "ixldtk3yi32p4qs53iko7652ae"
+    },
+    {
+      "seed": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "ed25519Seed": "95395cabca246335e084e56888f6d3bc60aa0d95c9a07ea03c5d674dc187a7b5",
+      "ed25519Public": "3cc13f2f6c8061b420db037625aa77dbc14b17292dcce12d54e119a5651dfda4",
+      "ed25519PublicB64u": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+      "x25519Private": "a0bed7db93661f857999f5f3dd282f73bdc8104b68ab4ac6f3c502a4f134115a",
+      "x25519Public": "5277abbdb81ad93db350f8b31cf25182116d9ad2a2e87a69b92cd6168209254e",
+      "x25519PublicB64u": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+      "nodeIdBytes": "dbc38fcadfccbe069645dfe24a247b82",
+      "nodeId": "3pby7sw7zs7anfsf37reujd3qi"
+    },
+    {
+      "seed": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+      "ed25519Seed": "9d1b1ed4b09d9832d80b006064609f6623024f9bfad890d09f722445aa05dd5b",
+      "ed25519Public": "2dc0f6dfb25ca52ea10861d2dab91668388cd4bd7d9f1de7c08fa554d5b2c00d",
+      "ed25519PublicB64u": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+      "x25519Private": "a026154957e3bbb72d1b6340dfb96dc68c9d1a5b335eb9ce0516faddb7b4706b",
+      "x25519Public": "5e40ea0bb5fbfcddc4374cd8f6590c5e13c6bf996a25cebd0c374431a90a544b",
+      "x25519PublicB64u": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+      "nodeIdBytes": "07a19895b54c726500151005766dda2c",
+      "nodeId": "a6qzrfnvjrzgkaavcacxm3o2fq"
+    },
+    {
+      "seed": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "ed25519Seed": "a8a77aab8eee5e06db2925ed44f24e92844d9ad6448e372ead6e2118cea8b28a",
+      "ed25519Public": "36a20162aa40e986ab60a2b2e5c782c301322a342f4726c8cd154df9808b20a0",
+      "ed25519PublicB64u": "NqIBYqpA6YarYKKy5ceCwwEyKjQvRybIzRVN-YCLIKA",
+      "x25519Private": "086c85478459f9a6f99d7af65cc71fd1311d71830d0c888076830469f869ad40",
+      "x25519Public": "e1ba4f80f90db97a2fd78f6448f3790cabca74e90df10a110f751da96671580f",
+      "x25519PublicB64u": "4bpPgPkNuXov149kSPN5DKvKdOkN8QoRD3UdqWZxWA8",
+      "nodeIdBytes": "a7cdba31a009004c757174a19f2eaf19",
+      "nodeId": "u7g3umnabeaey5lrosqz6lvpde"
+    }
+  ],
+  "roster": {
+    "signing": {
+      "roster": {
+        "network": "ixldtk3yi32p4qs53iko7652ae",
+        "version": 12,
+        "issuedAt": 1790000000000,
+        "relay": "wss://eu.frontierengineer.link/v1",
+        "primary": {
+          "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+        },
+        "members": [
+          {
+            "id": "3pby7sw7zs7anfsf37reujd3qi",
+            "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+            "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+            "kind": "worker"
+          },
+          {
+            "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+            "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+            "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+            "kind": "surface"
+          },
+          {
+            "id": "ixldtk3yi32p4qs53iko7652ae",
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+            "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+            "kind": "primary"
+          }
+        ],
+        "signature": "t3jOssckhba_eMEEMAOd5lPaQTPinLGV90EZ1p9e5vgqiVSsCuX6fo8LUjs4eCpjBhe1rDqFF8ISGhNkYBzvAA"
+      },
+      "jcs": "{\"issuedAt\":1790000000000,\"members\":[{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0\",\"id\":\"a6qzrfnvjrzgkaavcacxm3o2fq\",\"kind\":\"surface\",\"x25519\":\"XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs\"},{\"ed25519\":\"xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8\",\"id\":\"ixldtk3yi32p4qs53iko7652ae\",\"kind\":\"primary\",\"x25519\":\"1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8\"}],\"network\":\"ixldtk3yi32p4qs53iko7652ae\",\"primary\":{\"ed25519\":\"xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8\"},\"relay\":\"wss://eu.frontierengineer.link/v1\",\"version\":12}",
+      "signedBytes": "66726f6e746965722d6c696e6b2f312f726f737465727b226973737565644174223a313739303030303030303030302c226d656d62657273223a5b7b2265643235353139223a22504d455f4c3279415962516732774e324a6170333238464c46796b747a4f4574564f455a705755645f6151222c226964223a2233706279377377377a7337616e66736633377265756a64337169222c226b696e64223a22776f726b6572222c22783235353139223a22556e6572766267613254327a5550697a48504a52676846746d744b693648707075537a57466f494a4a5534227d2c7b2265643235353139223a224c63443233374a63705336684347485332726b576144694d314c31396e78336e77492d6c564e5779774130222c226964223a226136717a72666e766a727a676b616176636163786d336f326671222c226b696e64223a2273757266616365222c22783235353139223a22586b4471433758375f4e33454e307a59396c6b4d5868504776356c714a633639444464454d616b4b564573227d2c7b2265643235353139223a22786d2d4d484b6c374d55596b44585047417833705a6f2d5471313955584d49566d5237316b3864576f5a38222c226964223a2269786c64746b3379693332703471733533696b6f373635326165222c226b696e64223a227072696d617279222c22783235353139223a2231456956683741757938644f4f324f4373465349744e2d5536624d61673539375f5474454c727237727a38227d5d2c226e6574776f726b223a2269786c64746b3379693332703471733533696b6f373635326165222c227072696d617279223a7b2265643235353139223a22786d2d4d484b6c374d55596b44585047417833705a6f2d5471313955584d49566d5237316b3864576f5a38227d2c2272656c6179223a227773733a2f2f65752e66726f6e74696572656e67696e6565722e6c696e6b2f7631222c2276657273696f6e223a31327d",
+      "signature": "t3jOssckhba_eMEEMAOd5lPaQTPinLGV90EZ1p9e5vgqiVSsCuX6fo8LUjs4eCpjBhe1rDqFF8ISGhNkYBzvAA"
+    },
+    "unicode": {
+      "roster": {
+        "network": "ixldtk3yi32p4qs53iko7652ae",
+        "version": 12,
+        "issuedAt": 1790000000000,
+        "relay": "wss://relé.example/v1?q=ü€😀",
+        "primary": {
+          "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+        },
+        "members": [
+          {
+            "id": "3pby7sw7zs7anfsf37reujd3qi",
+            "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+            "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+            "kind": "worker"
+          },
+          {
+            "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+            "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+            "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+            "kind": "surface"
+          },
+          {
+            "id": "ixldtk3yi32p4qs53iko7652ae",
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+            "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+            "kind": "primary"
+          }
+        ],
+        "signature": "tIDq-ijzdXbmasJhWS8zFmqt57dQkqT0ZAMG0IcxJgpmxeeKsZRJCJ-SpAlzieMHtatPYaWpOcclh8TANR70BQ"
+      },
+      "jcs": "{\"issuedAt\":1790000000000,\"members\":[{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0\",\"id\":\"a6qzrfnvjrzgkaavcacxm3o2fq\",\"kind\":\"surface\",\"x25519\":\"XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs\"},{\"ed25519\":\"xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8\",\"id\":\"ixldtk3yi32p4qs53iko7652ae\",\"kind\":\"primary\",\"x25519\":\"1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8\"}],\"network\":\"ixldtk3yi32p4qs53iko7652ae\",\"primary\":{\"ed25519\":\"xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8\"},\"relay\":\"wss://relé.example/v1?q=ü€😀\",\"version\":12}"
+    },
+    "valid": [
+      {
+        "name": "three members",
+        "roster": {
+          "network": "ixldtk3yi32p4qs53iko7652ae",
+          "version": 12,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "worker"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "surface"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+              "kind": "primary"
+            }
+          ],
+          "signature": "t3jOssckhba_eMEEMAOd5lPaQTPinLGV90EZ1p9e5vgqiVSsCuX6fo8LUjs4eCpjBhe1rDqFF8ISGhNkYBzvAA"
+        }
+      },
+      {
+        "name": "non-ASCII relay URL",
+        "roster": {
+          "network": "ixldtk3yi32p4qs53iko7652ae",
+          "version": 12,
+          "issuedAt": 1790000000000,
+          "relay": "wss://relé.example/v1?q=ü€😀",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "worker"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "surface"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+              "kind": "primary"
+            }
+          ],
+          "signature": "tIDq-ijzdXbmasJhWS8zFmqt57dQkqT0ZAMG0IcxJgpmxeeKsZRJCJ-SpAlzieMHtatPYaWpOcclh8TANR70BQ"
+        }
+      },
+      {
+        "name": "another network",
+        "roster": {
+          "network": "3pby7sw7zs7anfsf37reujd3qi",
+          "version": 20,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "primary"
+            }
+          ],
+          "signature": "Rat5ljEPArCeymo_6KFG8SWs6-nrmtj9Kd5gmSP8ek1mdfkHWAEKyZDBYZHe6pyyHtkj9tyA4HTbtsIiLyRuAg"
+        }
+      }
+    ],
+    "invalid": [
+      {
+        "name": "body changed after signing",
+        "roster": {
+          "network": "ixldtk3yi32p4qs53iko7652ae",
+          "version": 13,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "worker"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "surface"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+              "kind": "primary"
+            }
+          ],
+          "signature": "t3jOssckhba_eMEEMAOd5lPaQTPinLGV90EZ1p9e5vgqiVSsCuX6fo8LUjs4eCpjBhe1rDqFF8ISGhNkYBzvAA"
+        }
+      },
+      {
+        "name": "signature by another key",
+        "roster": {
+          "network": "ixldtk3yi32p4qs53iko7652ae",
+          "version": 12,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "worker"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "surface"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+              "kind": "primary"
+            }
+          ],
+          "signature": "uZbErK0wDrmZSUC9YWLxhgEm80jx7KjUPCR8HYZMbERuh3PCdJdKRVarnuHDtSY3Hncdco7JXajV_4n_cckjAw"
+        }
+      },
+      {
+        "name": "network not derived from primary.ed25519",
+        "roster": {
+          "network": "3pby7sw7zs7anfsf37reujd3qi",
+          "version": 12,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "worker"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "surface"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+              "kind": "primary"
+            }
+          ],
+          "signature": "7xLU_or5g9A6lr0d1v7GKdi2qD95oaWwZZ5BHkWrOIEgJo3iSt22RgHKp_4xKKR4znY0xhNAuv90GSuYcB73AQ"
+        }
+      },
+      {
+        "name": "members not sorted by id",
+        "roster": {
+          "network": "ixldtk3yi32p4qs53iko7652ae",
+          "version": 12,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+              "kind": "primary"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "surface"
+            },
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "worker"
+            }
+          ],
+          "signature": "zReKfTcxd_mg4xXH9qQ1E7jLpGPJoeOoq1GBMZMztOLJPW2eOpPmMjtswJu817i7bDH4zZz_9Su4dycQjKeGDw"
+        }
+      },
+      {
+        "name": "member id not derived from its ed25519",
+        "roster": {
+          "network": "ixldtk3yi32p4qs53iko7652ae",
+          "version": 12,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "worker"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "surface"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+              "kind": "primary"
+            }
+          ],
+          "signature": "ZepMkB_WYsl1Uj9g0H_H72gbeRlZNK2uT9ibD69SWNXyYd_xzoZkRjguW_ZuKYfgD-CzIS9QJLKGs8ZRDJ5wBg"
+        }
+      },
+      {
+        "name": "two primary members",
+        "roster": {
+          "network": "ixldtk3yi32p4qs53iko7652ae",
+          "version": 12,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "primary"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "surface"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+              "kind": "primary"
+            }
+          ],
+          "signature": "o11PA9NvSJiPOuFQmwJiIW7azy2ZCrv9JFAAy_GnaT01m3bZzXvzsmGi6IdEzzD7EXfUPvWWd1sWjJHBo8ceAQ"
+        }
+      },
+      {
+        "name": "no primary member",
+        "roster": {
+          "network": "ixldtk3yi32p4qs53iko7652ae",
+          "version": 12,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "worker"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "surface"
+            }
+          ],
+          "signature": "ey9CZXR17XkEK0WkJZVwH2g5_nTwZLpDX42ssEPnu70DwR4fa0jcpZPhGkdtVP31gF-J7sUvfNket6Xgu4WeBg"
+        }
+      },
+      {
+        "name": "primary member key differs from primary.ed25519",
+        "roster": {
+          "network": "ixldtk3yi32p4qs53iko7652ae",
+          "version": 12,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "primary"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "surface"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+              "kind": "worker"
+            }
+          ],
+          "signature": "muzzhM8kpFV7RqB74b_khDoACiNoh958njATLLOWbtKf7fvkGudpo7hH2Bbj3zoBNJ8SYXhGGTOFZqFop-OcAA"
+        }
+      },
+      {
+        "name": "unknown kind",
+        "roster": {
+          "network": "ixldtk3yi32p4qs53iko7652ae",
+          "version": 12,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "worker"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "admin"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+              "kind": "primary"
+            }
+          ],
+          "signature": "n5ANa7262iIHEREVkcZmVN6yMHd6tsWDYQzMPxJs6A8O3mLU7UXxAMjXEFVi3-eCKIsH-VOCBe0Z7W7cqxmNDQ"
+        }
+      },
+      {
+        "name": "version zero",
+        "roster": {
+          "network": "ixldtk3yi32p4qs53iko7652ae",
+          "version": 0,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "worker"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "surface"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+              "kind": "primary"
+            }
+          ],
+          "signature": "PJzC_MscxUnGat4cGQge5nyGjZkANeR1HSm8fvOnE9NBe3OCu--ebt3eq8wJFpIttPk-LXP1f8PbbQzFsBMfDw"
+        }
+      }
+    ],
+    "acceptance": [
+      {
+        "name": "newer, pinned primary",
+        "roster": {
+          "network": "ixldtk3yi32p4qs53iko7652ae",
+          "version": 12,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "worker"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "surface"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+              "kind": "primary"
+            }
+          ],
+          "signature": "t3jOssckhba_eMEEMAOd5lPaQTPinLGV90EZ1p9e5vgqiVSsCuX6fo8LUjs4eCpjBhe1rDqFF8ISGhNkYBzvAA"
+        },
+        "pinnedPrimary": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+        "heldVersion": 11,
+        "accept": true
+      },
+      {
+        "name": "same version",
+        "roster": {
+          "network": "ixldtk3yi32p4qs53iko7652ae",
+          "version": 12,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "worker"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "surface"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+              "kind": "primary"
+            }
+          ],
+          "signature": "t3jOssckhba_eMEEMAOd5lPaQTPinLGV90EZ1p9e5vgqiVSsCuX6fo8LUjs4eCpjBhe1rDqFF8ISGhNkYBzvAA"
+        },
+        "pinnedPrimary": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+        "heldVersion": 12,
+        "accept": false
+      },
+      {
+        "name": "older version",
+        "roster": {
+          "network": "ixldtk3yi32p4qs53iko7652ae",
+          "version": 12,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "worker"
+            },
+            {
+              "id": "a6qzrfnvjrzgkaavcacxm3o2fq",
+              "ed25519": "LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0",
+              "x25519": "XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs",
+              "kind": "surface"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8",
+              "kind": "primary"
+            }
+          ],
+          "signature": "t3jOssckhba_eMEEMAOd5lPaQTPinLGV90EZ1p9e5vgqiVSsCuX6fo8LUjs4eCpjBhe1rDqFF8ISGhNkYBzvAA"
+        },
+        "pinnedPrimary": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+        "heldVersion": 13,
+        "accept": false
+      },
+      {
+        "name": "valid but signed by another primary",
+        "roster": {
+          "network": "3pby7sw7zs7anfsf37reujd3qi",
+          "version": 20,
+          "issuedAt": 1790000000000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "primary": {
+            "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ"
+          },
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4",
+              "kind": "primary"
+            }
+          ],
+          "signature": "Rat5ljEPArCeymo_6KFG8SWs6-nrmtj9Kd5gmSP8ek1mdfkHWAEKyZDBYZHe6pyyHtkj9tyA4HTbtsIiLyRuAg"
+        },
+        "pinnedPrimary": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+        "heldVersion": 1,
+        "accept": false
+      }
+    ]
+  },
+  "register": [
+    {
+      "seed": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "url": "wss://EU.FrontierEngineer.link/v1",
+      "origin": "eu.frontierengineer.link",
+      "network": "ixldtk3yi32p4qs53iko7652ae",
+      "node": "3pby7sw7zs7anfsf37reujd3qi",
+      "challenge": "n5-fn5-fn5-fn5-fn5-fnwEBAQEBAQEBAQEBAQEBAQE",
+      "ts": 1790000000123,
+      "signedBytes": "0000001866726f6e746965722d6c696e6b2f312f72656769737465720000001a69786c64746b3379693332703471733533696b6f3736353261650000001a33706279377377377a7337616e66736633377265756a643371699f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f01010101010101010101010101010101000001a0c4506c7b0000001865752e66726f6e74696572656e67696e6565722e6c696e6b",
+      "sig": "mIT6dVDoS_jtCis-KM9CTcYGpmlY6l1ykNrGOnQ1MLb1lThmVaBkXNs7gOKfA7bcXa4z-ORY8xBXE-8z6MH6AQ"
+    },
+    {
+      "seed": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "url": "wss://eu.frontierengineer.link:443/v1",
+      "origin": "eu.frontierengineer.link",
+      "network": "ixldtk3yi32p4qs53iko7652ae",
+      "node": "3pby7sw7zs7anfsf37reujd3qi",
+      "challenge": "n5-fn5-fn5-fn5-fn5-fnwEBAQEBAQEBAQEBAQEBAQE",
+      "ts": 1790000000123,
+      "signedBytes": "0000001866726f6e746965722d6c696e6b2f312f72656769737465720000001a69786c64746b3379693332703471733533696b6f3736353261650000001a33706279377377377a7337616e66736633377265756a643371699f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f01010101010101010101010101010101000001a0c4506c7b0000001865752e66726f6e74696572656e67696e6565722e6c696e6b",
+      "sig": "mIT6dVDoS_jtCis-KM9CTcYGpmlY6l1ykNrGOnQ1MLb1lThmVaBkXNs7gOKfA7bcXa4z-ORY8xBXE-8z6MH6AQ"
+    },
+    {
+      "seed": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "url": "ws://127.0.0.1:8080/v1",
+      "origin": "127.0.0.1:8080",
+      "network": "ixldtk3yi32p4qs53iko7652ae",
+      "node": "3pby7sw7zs7anfsf37reujd3qi",
+      "challenge": "n5-fn5-fn5-fn5-fn5-fnwEBAQEBAQEBAQEBAQEBAQE",
+      "ts": 1790000000123,
+      "signedBytes": "0000001866726f6e746965722d6c696e6b2f312f72656769737465720000001a69786c64746b3379693332703471733533696b6f3736353261650000001a33706279377377377a7337616e66736633377265756a643371699f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f01010101010101010101010101010101000001a0c4506c7b0000000e3132372e302e302e313a38303830",
+      "sig": "WcPfIfJ8mx9vulWzpyDBT-GZ8kVjA9nom_0WgJ5RpdEMZ_be4mqQ68-8LRPIMSTnmBlc9rTFRSpHUYH2TxZVDQ"
+    }
+  ],
+  "resign": {
+    "seed": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+    "network": "ixldtk3yi32p4qs53iko7652ae",
+    "node": "3pby7sw7zs7anfsf37reujd3qi",
+    "ts": 1790000000456,
+    "signedBytes": "0000001666726f6e746965722d6c696e6b2f312f72657369676e0000001a69786c64746b3379693332703471733533696b6f3736353261650000001a33706279377377377a7337616e66736633377265756a64337169000001a0c4506dc8",
+    "sig": "FUSnLuq1dLdjI0-4K6sMElTg2iKVurDD0P4Lth2pypwNTF5oVhSWNTcz_-pm7s0vmYs3XYN7ClO0ukRpjtbsBg"
+  },
+  "pairing": {
+    "link": {
+      "network": "ixldtk3yi32p4qs53iko7652ae",
+      "code": "7K2M9QXZ",
+      "codeIdB64u": "AQIDBAUGBwg",
+      "relay": "wss://eu.frontierengineer.link/v1",
+      "link": "frontier://pair?v=1&n=ixldtk3yi32p4qs53iko7652ae&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1"
+    },
+    "codeNormalisation": [
+      {
+        "input": "7k2m-9qxz",
+        "code": "7K2M9QXZ"
+      },
+      {
+        "input": "7K2M9QXZ",
+        "code": "7K2M9QXZ"
+      },
+      {
+        "input": " 7k2m 9qxz ",
+        "code": "7K2M9QXZ"
+      },
+      {
+        "input": "o1l1-i0OK",
+        "code": "0111100K"
+      }
+    ]
+  },
+  "spake2": {
+    "rfc9382": [
+      {
+        "A": "server",
+        "B": "client",
+        "w": "2ee57912099d31560b3a44b1184b9b4866e904c49d12ac5042c97dca461b1a5f",
+        "x": "43dd0fd7215bdcb482879fca3220c6a968e66d70b1356cac18bb26c84a78d729",
+        "y": "dcb60106f276b02606d8ef0a328c02e4b629f84f89786af5befb0bc75b6e66be",
+        "pA": "04a56fa807caaa53a4d28dbb9853b9815c61a411118a6fe516a8798434751470f9010153ac33d0d5f2047ffdb1a3e42c9b4e6be662766e1eeb4116988ede5f912c",
+        "pB": "0406557e482bd03097ad0cbaa5df82115460d951e3451962f1eaf4367a420676d09857ccbc522686c83d1852abfa8ed6e4a1155cf8f1543ceca528afb591a1e0b7",
+        "K": "0412af7e89717850671913e6b469ace67bd90a4df8ce45c2af19010175e37eed69f75897996d539356e2fa6a406d528501f907e04d97515fbe83db277b715d3325",
+        "TT": "06000000000000007365727665720600000000000000636c69656e74410000000000000004a56fa807caaa53a4d28dbb9853b9815c61a411118a6fe516a8798434751470f9010153ac33d0d5f2047ffdb1a3e42c9b4e6be662766e1eeb4116988ede5f912c41000000000000000406557e482bd03097ad0cbaa5df82115460d951e3451962f1eaf4367a420676d09857ccbc522686c83d1852abfa8ed6e4a1155cf8f1543ceca528afb591a1e0b741000000000000000412af7e89717850671913e6b469ace67bd90a4df8ce45c2af19010175e37eed69f75897996d539356e2fa6a406d528501f907e04d97515fbe83db277b715d332520000000000000002ee57912099d31560b3a44b1184b9b4866e904c49d12ac5042c97dca461b1a5f",
+        "hashTT": "0e0672dc86f8e45565d338b0540abe6915bdf72e2b35b5c9e5663168e960a91b",
+        "Ke": "0e0672dc86f8e45565d338b0540abe69",
+        "Ka": "15bdf72e2b35b5c9e5663168e960a91b",
+        "KcA": "00c12546835755c86d8c0db7851ae86f",
+        "KcB": "a9fa3406c3b781b93d804485430ca27a",
+        "cA": "58ad4aa88e0b60d5061eb6b5dd93e80d9c4f00d127c65b3b35b1b5281fee38f0",
+        "cB": "d3e2e547f1ae04f2dbdbf0fc4b79f8ecff2dff314b5d32fe9fcef2fb26dc459b"
+      },
+      {
+        "A": "",
+        "B": "client",
+        "w": "0548d8729f730589e579b0475a582c1608138ddf7054b73b5381c7e883e2efae",
+        "x": "403abbe3b1b4b9ba17e3032849759d723939a27a27b9d921c500edde18ed654b",
+        "y": "903023b6598908936ea7c929bd761af6039577a9c3f9581064187c3049d87065",
+        "pA": "04a897b769e681c62ac1c2357319a3d363f610839c4477720d24cbe32f5fd85f44fb92ba966578c1b712be6962498834078262caa5b441ecfa9d4a9485720e918a",
+        "pB": "04e0f816fd1c35e22065d5556215c097e799390d16661c386e0ecc84593974a61b881a8c82327687d0501862970c64565560cb5671f696048050ca66ca5f8cc7fc",
+        "K": "048f83ec9f6e4f87cc6f9dc740bdc2769725f923364f01c84148c049a39a735ebda82eac03e00112fd6a5710682767cff5361f7e819e53d8d3c3a2922e0d837aa6",
+        "TT": "00000000000000000600000000000000636c69656e74410000000000000004a897b769e681c62ac1c2357319a3d363f610839c4477720d24cbe32f5fd85f44fb92ba966578c1b712be6962498834078262caa5b441ecfa9d4a9485720e918a410000000000000004e0f816fd1c35e22065d5556215c097e799390d16661c386e0ecc84593974a61b881a8c82327687d0501862970c64565560cb5671f696048050ca66ca5f8cc7fc4100000000000000048f83ec9f6e4f87cc6f9dc740bdc2769725f923364f01c84148c049a39a735ebda82eac03e00112fd6a5710682767cff5361f7e819e53d8d3c3a2922e0d837aa620000000000000000548d8729f730589e579b0475a582c1608138ddf7054b73b5381c7e883e2efae",
+        "hashTT": "642f05c473c2cd79909f9a841e2f30a70bf89b18180af97353ba198789c2b963",
+        "Ke": "642f05c473c2cd79909f9a841e2f30a7",
+        "Ka": "0bf89b18180af97353ba198789c2b963",
+        "KcA": "c6be376fc7cd1301fd0a13adf3e7bffd",
+        "KcB": "b7243f4ae60440a49b3f8cab3c1fba07",
+        "cA": "47d29e6666af1b7dd450d571233085d7a9866e4d49d2645e2df975489521232b",
+        "cB": "3313c5cefc361d27fb16847a91c2a73b766ffa90a4839122a9b70a2f6bd1d6df"
+      },
+      {
+        "A": "server",
+        "B": "",
+        "w": "626e0cdc7b14c9db3e52a0b1b3a768c98e37852d5db30febe0497b14eae8c254",
+        "x": "07adb3db6bc623d3399726bfdbfd3d15a58ea776ab8a308b00392621291f9633",
+        "y": "b6a4fc8dbb629d4ba51d6f91ed1532cf87adec98f25dd153a75accafafedec16",
+        "pA": "04f88fb71c99bfffaea370966b7eb99cd4be0ff1a7d335caac4211c4afd855e2e15a873b298503ad8ba1d9cbb9a392d2ba309b48bfd7879aefd0f2cea6009763b0",
+        "pB": "040c269d6be017dccb15182ac6bfcd9e2a14de019dd587eaf4bdfd353f031101e7cca177f8eb362a6e83e7d5e729c0732e1b528879c086f39ba0f31a9661bd34db",
+        "K": "0445ee233b8ecb51ebd6e7da3f307e88a1616bae2166121221fdc0dadb986afaf3ec8a988dc9c626fa3b99f58a7ca7c9b844bb3e8dd9554aafc5b53813504c1cbe",
+        "TT": "06000000000000007365727665720000000000000000410000000000000004f88fb71c99bfffaea370966b7eb99cd4be0ff1a7d335caac4211c4afd855e2e15a873b298503ad8ba1d9cbb9a392d2ba309b48bfd7879aefd0f2cea6009763b04100000000000000040c269d6be017dccb15182ac6bfcd9e2a14de019dd587eaf4bdfd353f031101e7cca177f8eb362a6e83e7d5e729c0732e1b528879c086f39ba0f31a9661bd34db41000000000000000445ee233b8ecb51ebd6e7da3f307e88a1616bae2166121221fdc0dadb986afaf3ec8a988dc9c626fa3b99f58a7ca7c9b844bb3e8dd9554aafc5b53813504c1cbe2000000000000000626e0cdc7b14c9db3e52a0b1b3a768c98e37852d5db30febe0497b14eae8c254",
+        "hashTT": "005184ff460da2ce59062c87733c299c3521297d736598fc0a1127600efa1afb",
+        "Ke": "005184ff460da2ce59062c87733c299c",
+        "Ka": "3521297d736598fc0a1127600efa1afb",
+        "KcA": "f3da53604f0aeecea5a33be7bddf6edf",
+        "KcB": "9e3f86848736f159bd92b6e107ec6799",
+        "cA": "bc9f9bbe99f26d0b2260e6456e05a86196a3307ec6663a18bf6ac825736533b2",
+        "cB": "c2370e1bf813b086dff0d834e74425a06e6390f48f5411900276dcccc5a297ec"
+      },
+      {
+        "A": "",
+        "B": "",
+        "w": "7bf46c454b4c1b25799527d896508afd5fc62ef4ec59db1efb49113063d70cca",
+        "x": "8cef65df64bb2d0f83540c53632de911b5b24b3eab6cc74a97609fd659e95473",
+        "y": "d7a66f64074a84652d8d623a92e20c9675c61cb5b4f6a0063e4648a2fdc02d53",
+        "pA": "04a65b367a3f613cf9f0654b1b28a1e3a8a40387956c8ba6063e8658563890f46ca1ef6a676598889fc28de2950ab8120b79a5ef1ea4c9f44bc98f585634b46d66",
+        "pB": "04589f13218822710d98d8b2123a079041052d9941b9cf88c6617ddb2fcc0494662eea8ba6b64692dc318250030c6af045cb738bc81ba35b043c3dcb46adf6f58d",
+        "K": "041a3c03d51b452537ca2a1fea6110353c6d5ed483c4f0f86f4492ca3f378d40a994b4477f93c64d928edbbcd3e85a7c709b7ea73ee97986ce3d1438e135543772",
+        "TT": "00000000000000000000000000000000410000000000000004a65b367a3f613cf9f0654b1b28a1e3a8a40387956c8ba6063e8658563890f46ca1ef6a676598889fc28de2950ab8120b79a5ef1ea4c9f44bc98f585634b46d66410000000000000004589f13218822710d98d8b2123a079041052d9941b9cf88c6617ddb2fcc0494662eea8ba6b64692dc318250030c6af045cb738bc81ba35b043c3dcb46adf6f58d4100000000000000041a3c03d51b452537ca2a1fea6110353c6d5ed483c4f0f86f4492ca3f378d40a994b4477f93c64d928edbbcd3e85a7c709b7ea73ee97986ce3d1438e13554377220000000000000007bf46c454b4c1b25799527d896508afd5fc62ef4ec59db1efb49113063d70cca",
+        "hashTT": "fc6374762ba5cf11f4b2caa08b2cd1b9907ae0e26e8d6234318d91583cd74c86",
+        "Ke": "fc6374762ba5cf11f4b2caa08b2cd1b9",
+        "Ka": "907ae0e26e8d6234318d91583cd74c86",
+        "KcA": "5dbd2f477166b7fb6d61febbd77a5563",
+        "KcB": "7689b4654407a5faeffdc8f18359d8a3",
+        "cA": "dfb4db8d48ae5a675963ea5e6c19d98d4ea028d8e898dad96ea19a80ade95dca",
+        "cB": "d0f0609d1613138d354f7e95f19fb556bf52d751947241e8c7118df5ef0ae175"
+      }
+    ],
+    "profile": {
+      "codeInput": "7k2m-9qxz",
+      "code": "7K2M9QXZ",
+      "display": "7K2M-9QXZ",
+      "codeId": "0102030405060708",
+      "codeIdB64u": "AQIDBAUGBwg",
+      "idA": "frontier-link/1/newcomer",
+      "idB": "frontier-link/1/primary",
+      "w": "9bce771a810de4dfecf5e2a389c72dc0eb6db18ae60e8da1eb6dfef36ddf870d",
+      "xRandom": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a53c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c",
+      "yRandom": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5ac3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+      "x": "2b6a8af937c4abee8cc3caef66649d7252194afb642d26015f21c8856712fa07",
+      "y": "17ae7a59643cbadfd86acbc866656d27158228e636a4434690fb278e95502b49",
+      "pA": "0474221d0643f8a407b14d4b55dff5fc5c161a888be7f0dd4c601c6268f8f90e2c5f86538af25769ef665c194b15f1e5cb7ac41bbe0ae5eb1cccc522de6fcbc870",
+      "pB": "04ef95f9792fc7b18ee7b5cf1f3e5243aade803361597566a10cf9fc96da948ed7f6f0ff25ac44cef0c19a03fdec2c1cf013b31171248ada2a3774ebe42188137e",
+      "K": "0482308b9bec6d111656f2dc3e0e8139ec3692fce9e627ead3fddf7d6964d4f3702f27b28d501203a4791fb057aad94cb29b622a28d5d465127183a1747ecf7d61",
+      "TT": "180000000000000066726f6e746965722d6c696e6b2f312f6e6577636f6d6572170000000000000066726f6e746965722d6c696e6b2f312f7072696d61727941000000000000000474221d0643f8a407b14d4b55dff5fc5c161a888be7f0dd4c601c6268f8f90e2c5f86538af25769ef665c194b15f1e5cb7ac41bbe0ae5eb1cccc522de6fcbc870410000000000000004ef95f9792fc7b18ee7b5cf1f3e5243aade803361597566a10cf9fc96da948ed7f6f0ff25ac44cef0c19a03fdec2c1cf013b31171248ada2a3774ebe42188137e41000000000000000482308b9bec6d111656f2dc3e0e8139ec3692fce9e627ead3fddf7d6964d4f3702f27b28d501203a4791fb057aad94cb29b622a28d5d465127183a1747ecf7d6120000000000000009bce771a810de4dfecf5e2a389c72dc0eb6db18ae60e8da1eb6dfef36ddf870d",
+      "hashTT": "581842370eb39f645d0d09fddc34cde0abf0745dcaf3f95d749c2734b6245dad",
+      "Ke": "581842370eb39f645d0d09fddc34cde0",
+      "Ka": "abf0745dcaf3f95d749c2734b6245dad",
+      "KcA": "15d15bbca4d6c10f28ad91252aeada51",
+      "KcB": "a264060797bd8f7b82b8be3bcfcac3ad",
+      "cA": "44c53cdaa4b29c40b4ac0088fe3f965bee2e6796c0f6f95ec117dc47864f2a32",
+      "cB": "092132c9dee55d9e30e0828e877e8c5c015c4955b7981732bdfa122ab6c6083a",
+      "okm": "6abfbec6c1a468dcdf39d025afa702944c42b6b88d264f83e8e9c3a1878443190ae3c566ee585c3ce0aa8d61287de6008126f6f946bad6c253b342d49cea93ee",
+      "p5Plaintext": "{\"ed25519\":\"NqIBYqpA6YarYKKy5ceCwwEyKjQvRybIzRVN-YCLIKA\",\"x25519\":\"4bpPgPkNuXov149kSPN5DKvKdOkN8QoRD3UdqWZxWA8\"}",
+      "p5": "8462004d257e40c131d50cc0635b544d193a5706833fe23ed90b47b22d32d5c44f88fce0281b6276ca6551d4a345314dd60d78177804de368f765f374e98ea847134854817e6a578e10eac395194c4370452860d79302fb9e65373837e7b1a6853674ff01c70b46a49262077f1101842cba61336c0a8530898fc771111b4b729",
+      "p6Plaintext": "{\"roster\":{\"network\":\"ixldtk3yi32p4qs53iko7652ae\",\"version\":13,\"issuedAt\":1790000000000,\"relay\":\"wss://eu.frontierengineer.link/v1\",\"primary\":{\"ed25519\":\"xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8\"},\"members\":[{\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\",\"kind\":\"worker\"},{\"id\":\"a6qzrfnvjrzgkaavcacxm3o2fq\",\"ed25519\":\"LcD237JcpS6hCGHS2rkWaDiM1L19nx3nwI-lVNWywA0\",\"x25519\":\"XkDqC7X7_N3EN0zY9lkMXhPGv5lqJc69DDdEMakKVEs\",\"kind\":\"surface\"},{\"id\":\"ixldtk3yi32p4qs53iko7652ae\",\"ed25519\":\"xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8\",\"x25519\":\"1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8\",\"kind\":\"primary\"},{\"id\":\"u7g3umnabeaey5lrosqz6lvpde\",\"ed25519\":\"NqIBYqpA6YarYKKy5ceCwwEyKjQvRybIzRVN-YCLIKA\",\"x25519\":\"4bpPgPkNuXov149kSPN5DKvKdOkN8QoRD3UdqWZxWA8\",\"kind\":\"mcp\"}],\"signature\":\"wSavcDnkyAMiEPV3laWhY-FAG5VFZXcu2rBZYw3s7NsCRXOaf1vjyPsPf07BgrXP61DZEu4vbedHH4HbPG8HCg\"}}",
+      "p6": "ecab2b914f6095cefdd8ca696edbfa2ede40672c3ca303876d4b169229b56f7002413b10301f08885d3f67acc4283c83edd45fdc0d2b029bbf1425ecfe20a88a5a47f674ae53b95ead092968afffc7275d420fe3495c1ea0184280889542dfc3ad8057d57dc6be6c8a7463cc8fa50937d898f3b05fcf4f65f923b475795e7d524a6ff1b903582d49de830cc56303e2621d11f22fb9e5c689d44ad909b5b053dfffb26056e7521a52888659c5d1d54ff28f797a4095d51ac00bb92974df5cee536fa6c9f15fcf0fb473363627b3acd2c817b934fc802a78be44f81fb2425992227fda859f19107b67a233f93c56412ed1d6a7a4301e9db485180ea2b71e967c60c17c823ae70defd0f791061480db2367623b76f68b6c913b7782352cbe1996adc7f260de2ea9eb93741a643fcc89daf80ee81d62ea6d73af8ecad70cc61bbc399d722053c724a3f62a0cb578622bbe8c9878e80a297a387e6fde14711275efa5b7d6ed4eec8953516207a54b5594a0a4aa3d62ac7bd628ad965d51b4f0f5ffd90e804de66ba08a88ddd251e27c7f6090ae3097a7a8d2104b0983b135c65d775a3c2fb85862e8c42e11ace7f8d7867f5b06438013002bbb5978cd97d2328a8ac47bd39fe9ec214c9dc03bb67d0b44da4d43715040c1cba4cb0a5276d26a00ca7aade54c24605dca9e9c871a30a2e7545de791e4ff97f37e94b8f88d36e5747798e09bb217aeb738d53751c0e2766cb8d12079c46b1bba63b96d50ae10ed5731f7d7c841cd42140b9085ebea9ebdc752a8e0e81fd11393a0ba52df66a6d130298074757821dcf14fa16199b80b5755999a8266d5669b21f8cedbda90eccfa664b3b390f666480e4261dde7211f83127ae3283a83269312038d850304de21aa311878f3c671d9af0d8ebea337625f8f6e8bd7069938254c0886ac80d34ceae9105ee5a49133caa574c18d64689d8e166fb537ac5c517cfce60f1618cdc041eaeae1538b7d7a7beba0469922fc8cb39b50a0cad492fdfe576158ebb9ae9c8cefbce3ebe63481d33efb0cb8c5a4f81dbea714638298aebf537fd6ab80bc242a1f3afee90f99753fe5419333ca6f9a82870a552391d5ebbc81fd26bd62a9f61fd670ff5ea8e746d8ccf557fc3df30e6f16df593312590184131906a87f3b85acca2b4148a89409ad18a9de93a1bfb6362b55968a1eaa5a82b26de2a01a00fe0162fb902b8238344342c21556124d1a64d0223e84d459c4c1cc565c6e52da3f9defef5a75dcec295afbc5d4bd615bc7639cbd4f082ebbc963b1766ea7abce26c88552ab35efa04f4be4180af68c1332154e8f067d868ac003ef2345ac375d366a815b9424a4d8571e47e56e3707826e6f19f98ac232747c9e",
+      "newcomerSeed": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+    }
+  },
+  "noise": {
+    "protocol": "Noise_IK_25519_ChaChaPoly_SHA256",
+    "network": "ixldtk3yi32p4qs53iko7652ae",
+    "prologue": "66726f6e746965722d6c696e6b2f312f73657373696f6e69786c64746b3379693332703471733533696b6f373635326165",
+    "initiator": {
+      "node": "3pby7sw7zs7anfsf37reujd3qi",
+      "seed": "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f",
+      "staticPrivate": "a0bed7db93661f857999f5f3dd282f73bdc8104b68ab4ac6f3c502a4f134115a",
+      "ephemeralPrivate": "505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f",
+      "index": 195939070
+    },
+    "responder": {
+      "node": "a6qzrfnvjrzgkaavcacxm3o2fq",
+      "seed": "303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f",
+      "staticPrivate": "a026154957e3bbb72d1b6340dfb96dc68c9d1a5b335eb9ce0516faddb7b4706b",
+      "ephemeralPrivate": "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f",
+      "index": 12648430
+    },
+    "message1": {
+      "payload": "000000000000000c",
+      "noise": "392d174a38b3b1beafaf1fe824870841c5fa531bc6eafdb6402c124664488c1ce7be90c6319b7ce8fe2f5ad6b2720d7fd09030d3f7c8aa50158288d8a02df49d6459f21d9e8f0c9ec6794bbcf5110519094a20bb2b0bbe01c3cd0e6e864fb9972ec2e29107033c76",
+      "frameSent": "010107a19895b54c726500151005766dda2c0badcafe392d174a38b3b1beafaf1fe824870841c5fa531bc6eafdb6402c124664488c1ce7be90c6319b7ce8fe2f5ad6b2720d7fd09030d3f7c8aa50158288d8a02df49d6459f21d9e8f0c9ec6794bbcf5110519094a20bb2b0bbe01c3cd0e6e864fb9972ec2e29107033c76",
+      "frameDelivered": "0101dbc38fcadfccbe069645dfe24a247b820badcafe392d174a38b3b1beafaf1fe824870841c5fa531bc6eafdb6402c124664488c1ce7be90c6319b7ce8fe2f5ad6b2720d7fd09030d3f7c8aa50158288d8a02df49d6459f21d9e8f0c9ec6794bbcf5110519094a20bb2b0bbe01c3cd0e6e864fb9972ec2e29107033c76"
+    },
+    "message2": {
+      "payload": "000000000000000d",
+      "noise": "675dd574ed7789310b3d2e7681f3790b466c773b1521fecf36577958371ea52f4b9a6c905816c151b200db75945521abd8c11f22a5b79656",
+      "frameSent": "0102dbc38fcadfccbe069645dfe24a247b8200c0ffee0badcafe675dd574ed7789310b3d2e7681f3790b466c773b1521fecf36577958371ea52f4b9a6c905816c151b200db75945521abd8c11f22a5b79656",
+      "frameDelivered": "010207a19895b54c726500151005766dda2c00c0ffee0badcafe675dd574ed7789310b3d2e7681f3790b466c773b1521fecf36577958371ea52f4b9a6c905816c151b200db75945521abd8c11f22a5b79656"
+    },
+    "handshakeHash": "2a34ac176bc8446d1e3a0367a4934e2f42a9a4d09f6299c55e23e52f01f37838",
+    "transport": [
+      {
+        "direction": "initiator->responder",
+        "nonce": 0,
+        "plaintext": "010068656c6c6f2073757266616365",
+        "ciphertext": "488ea62635e7f6bea2cf61bc67d8c79eea288ae24540670e52fc496194b344",
+        "frameSent": "010307a19895b54c726500151005766dda2c00c0ffee488ea62635e7f6bea2cf61bc67d8c79eea288ae24540670e52fc496194b344"
+      },
+      {
+        "direction": "responder->initiator",
+        "nonce": 0,
+        "plaintext": "020000000d",
+        "ciphertext": "fb295424730204171bac2fc3164c9c1c3255b821ff",
+        "frameSent": "0103dbc38fcadfccbe069645dfe24a247b820badcafefb295424730204171bac2fc3164c9c1c3255b821ff"
+      }
+    ]
+  },
+  "frames": [
+    {
+      "name": "handshake-init",
+      "type": 1,
+      "peer": "dbc38fcadfccbe069645dfe24a247b82",
+      "body": "00000001aaaaaaaaaaaaaaaa",
+      "frame": "0101dbc38fcadfccbe069645dfe24a247b8200000001aaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "handshake-resp",
+      "type": 2,
+      "peer": "dbc38fcadfccbe069645dfe24a247b82",
+      "body": "0000000200000001bbbbbbbbbbbbbbbb",
+      "frame": "0102dbc38fcadfccbe069645dfe24a247b820000000200000001bbbbbbbbbbbbbbbb"
+    },
+    {
+      "name": "data",
+      "type": 3,
+      "peer": "dbc38fcadfccbe069645dfe24a247b82",
+      "body": "fffffffecccccccccccccccccccccccccccccccccc",
+      "frame": "0103dbc38fcadfccbe069645dfe24a247b82fffffffecccccccccccccccccccccccccccccccccc"
+    },
+    {
+      "name": "unreachable",
+      "type": 4,
+      "peer": "dbc38fcadfccbe069645dfe24a247b82",
+      "body": "",
+      "frame": "0104dbc38fcadfccbe069645dfe24a247b82"
+    },
+    {
+      "name": "refused",
+      "type": 5,
+      "peer": "dbc38fcadfccbe069645dfe24a247b82",
+      "body": "01",
+      "frame": "0105dbc38fcadfccbe069645dfe24a247b8201"
+    },
+    {
+      "name": "pair",
+      "type": 6,
+      "peer": "dbc38fcadfccbe069645dfe24a247b82",
+      "body": "0474221d0643f8a407b14d4b55dff5fc5c161a888be7f0dd4c601c6268f8f90e2c5f86538af25769ef665c194b15f1e5cb7ac41bbe0ae5eb1cccc522de6fcbc870",
+      "frame": "0106dbc38fcadfccbe069645dfe24a247b820474221d0643f8a407b14d4b55dff5fc5c161a888be7f0dd4c601c6268f8f90e2c5f86538af25769ef665c194b15f1e5cb7ac41bbe0ae5eb1cccc522de6fcbc870"
+    },
+    {
+      "name": "reset",
+      "type": 7,
+      "peer": "dbc38fcadfccbe069645dfe24a247b82",
+      "body": "0badcafe",
+      "frame": "0107dbc38fcadfccbe069645dfe24a247b820badcafe"
+    }
+  ],
+  "sessionMessages": [
+    {
+      "name": "message, last fragment",
+      "encoding": "01006869"
+    },
+    {
+      "name": "message, more fragments follow",
+      "encoding": "010100ff"
+    },
+    {
+      "name": "message, empty",
+      "encoding": "0100"
+    },
+    {
+      "name": "credit 1 MiB",
+      "encoding": "0200100000"
+    },
+    {
+      "name": "roster-request",
+      "encoding": "03"
+    },
+    {
+      "name": "roster",
+      "encoding": "047b226973737565644174223a313739303030303030303030302c226d656d62657273223a5b7b2265643235353139223a22504d455f4c3279415962516732774e324a6170333238464c46796b747a4f4574564f455a705755645f6151222c226964223a2233706279377377377a7337616e66736633377265756a64337169222c226b696e64223a22776f726b6572222c22783235353139223a22556e6572766267613254327a5550697a48504a52676846746d744b693648707075537a57466f494a4a5534227d2c7b2265643235353139223a224c63443233374a63705336684347485332726b576144694d314c31396e78336e77492d6c564e5779774130222c226964223a226136717a72666e766a727a676b616176636163786d336f326671222c226b696e64223a2273757266616365222c22783235353139223a22586b4471433758375f4e33454e307a59396c6b4d5868504776356c714a633639444464454d616b4b564573227d2c7b2265643235353139223a22786d2d4d484b6c374d55596b44585047417833705a6f2d5471313955584d49566d5237316b3864576f5a38222c226964223a2269786c64746b3379693332703471733533696b6f373635326165222c226b696e64223a227072696d617279222c22783235353139223a2231456956683741757938644f4f324f4373465349744e2d5536624d61673539375f5474454c727237727a38227d5d2c226e6574776f726b223a2269786c64746b3379693332703471733533696b6f373635326165222c227072696d617279223a7b2265643235353139223a22786d2d4d484b6c374d55596b44585047417833705a6f2d5471313955584d49566d5237316b3864576f5a38227d2c2272656c6179223a227773733a2f2f65752e66726f6e74696572656e67696e6565722e6c696e6b2f7631222c227369676e6174757265223a2274336a4f7373636b6862615f654d45454d414f64356c5061515450696e4c47563930455a31703965357667716956537343755836666f384c556a73346543706a42686531724471464638495347684e6b59427a764141222c2276657273696f6e223a31327d"
+    },
+    {
+      "name": "resign",
+      "encoding": "057b226e6f6465223a2233706279377377377a7337616e66736633377265756a64337169222c227473223a313739303030303030303435362c22736967223a224655536e4c757131644c646a49302d344b36734d456c546732694b56757244443050344c746832707970774e5446356f566853574e54637a5f2d706d377330766d59733358594e37436c4f30756b52706a7462734267227d"
+    }
+  ]
+}

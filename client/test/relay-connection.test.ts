@@ -172,3 +172,17 @@ test('other close codes (4005, 4007, 1000) keep retrying', async () => {
   assert.equal(ScriptedSocket.all.length, 4);
   rc.close();
 });
+
+test('a roster in registered is surfaced before the state turns registered', async () => {
+  const { rc } = connection();
+  const order: string[] = [];
+  rc.on('registered', (m) => order.push(`registered:${(m.roster as { version: number }).version}`));
+  rc.on('state', (st) => order.push(st));
+  rc.start();
+  const ws = ScriptedSocket.all[0]!;
+  ws.open();
+  ws.text({ type: 'hello', version: 1, challenge: b64u(new Uint8Array(32)) });
+  ws.text({ type: 'registered', node: id.id, rosterVersion: 5, roster: { ...roster, version: 5 } });
+  assert.deepEqual(order, ['connecting', 'registered:5', 'registered']);
+  rc.close();
+});

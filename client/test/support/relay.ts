@@ -201,11 +201,12 @@ export class TestRelay {
     if (!ed25519Verify(signature, signed, key)) return this.close(conn, 4007);
     if (Math.abs(this.now() - ts) > 300_000) return this.close(conn, 4007);
     if (rosterProblem(roster) !== null || (roster as Roster).network !== network) return this.close(conn, 4008);
-    const r = roster as Roster;
-    if (!findMember(r, node)) return this.close(conn, 4008);
+    // The effective roster is the newer of the presented one and the relay's.
+    const presented = roster as Roster;
     const held = this.rosters.get(network);
-    if (held && r.version < held.version) return this.close(conn, 4008);
-    if (!held || r.version > held.version) this.rosters.set(network, r);
+    const effective = held && held.version > presented.version ? held : presented;
+    if (effective === presented) this.rosters.set(network, presented);
+    if (!findMember(effective, node)) return this.close(conn, 4008);
     let net = this.conns.get(network);
     if (!net) this.conns.set(network, (net = new Map()));
     const old = net.get(node);
@@ -214,7 +215,9 @@ export class TestRelay {
     conn.node = node;
     net.set(node, conn);
     if (old) old.sock.close(4005);
-    conn.sock.sendText(JSON.stringify({ type: 'registered', node, rosterVersion: this.rosters.get(network)!.version }));
+    const registered: Record<string, unknown> = { type: 'registered', node, rosterVersion: effective.version };
+    if (effective !== presented) registered.roster = effective;
+    conn.sock.sendText(JSON.stringify(registered));
   }
 
   private pushRoster(conn: Conn, roster: unknown): void {

@@ -39,6 +39,8 @@ export type RelayEvents = {
   state: RelayState;
   control: ControlMessage;
   binary: Uint8Array;
+  /** The `registered` message, emitted before the state turns `registered`. */
+  registered: ControlMessage;
   /** Every close of the underlying connection. */
   disconnect: { code: number; reason: string };
   /** 4009: the network moved; the connection looks it up again and reconnects. */
@@ -120,6 +122,8 @@ export class RelayConnection extends Emitter<RelayEvents> {
         }
         if (msg.type === 'registered' && challenge !== undefined && this._state === 'connecting') {
           this.backoff = this.o.backoffInitialMs;
+          // A newer roster in `registered` is applied before anything is sent under it.
+          this.emit('registered', msg);
           this.setState('registered');
           return;
         }

@@ -130,6 +130,10 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     this.relay.on('state', (s) => this.onRelayState(s));
     this.relay.on('disconnect', (d) => this.emitAny('disconnect', d));
     this.relay.on('moved', (m) => this.emitAny('moved', m));
+    this.relay.on('registered', (msg) => {
+      // Section 4.1: the relay returns its newer roster when this member presented an older one.
+      if (msg.roster !== undefined) this.offerRoster(msg.roster);
+    });
     this.relay.on('control', (msg) => this.onControl(msg));
     this.relay.on('binary', (b) => this.onBinary(b));
     // Started after construction completes, so subclass fields exist before the first event.

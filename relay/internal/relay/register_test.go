@@ -254,6 +254,7 @@ func TestConfigFromEnv(t *testing.T) {
 		"LINK_TRICKLE_BPS": "16384", "LINK_QUEUE_BYTES": "4194304", "LINK_SLOW_PEER_SEC": "30",
 		"LINK_IP_REGISTER_PER_MIN": "60", "LINK_IP_PAIR_PER_MIN": "61", "LINK_IP_NETWORKS_PER_HOUR": "10",
 		"LINK_NETWORK_TTL": "168h", "LINK_ORIGIN": "eu.example", "LINK_TRUST_PROXY": "true",
+		"LINK_PING_INTERVAL": "250ms", "LINK_PAIR_TIMEOUT": "2", "LINK_HELLO_TIMEOUT": "1s",
 	}
 	c, err := FromEnv(func(k string) string { return env[k] })
 	if err != nil {
@@ -262,11 +263,13 @@ func TestConfigFromEnv(t *testing.T) {
 	if c.Addr != "127.0.0.1:9" || c.RateBps != 1048576 || c.QuotaBytesHour != 5 || c.TrickleBps != 16384 ||
 		c.QueueBytes != 4194304 || c.SlowPeer != 30*time.Second || c.IPRegisterPerMin != 60 ||
 		c.IPPairPerMin != 61 || c.IPNetworksPerHour != 10 || c.NetworkTTL != 168*time.Hour ||
-		c.Origin != "eu.example" || !c.TrustProxy {
+		c.Origin != "eu.example" || !c.TrustProxy || c.PingInterval != 250*time.Millisecond ||
+		c.PairTimeout != 2*time.Second || c.HelloTimeout != time.Second {
 		t.Fatalf("config: %+v", c)
 	}
 	d, err := FromEnv(func(string) string { return "" })
-	if err != nil || d.RateBps != 0 || d.QueueBytes != 0 || d.SlowPeer != 0 || d.Addr != ":8080" || d.NetworkTTL != 168*time.Hour {
+	if err != nil || d.RateBps != 0 || d.QueueBytes != 0 || d.SlowPeer != 0 || d.Addr != ":8080" || d.NetworkTTL != 168*time.Hour ||
+		d.PingInterval != 30*time.Second || d.PairTimeout != 60*time.Second || d.HelloTimeout != 30*time.Second {
 		t.Fatalf("defaults: %+v %v", d, err)
 	}
 	if _, err := FromEnv(func(k string) string {

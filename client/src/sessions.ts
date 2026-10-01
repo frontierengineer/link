@@ -29,7 +29,9 @@ import { CipherState, HandshakeState, PATTERNS } from './noise.js';
 import { findMember, type Roster } from './roster.js';
 
 export const MAX_MESSAGE = 64 * 1024 * 1024;
-export const MAX_FRAGMENT = 65535 - 16 - 2;
+/** One transport plaintext: a Noise message is at most 65535 bytes, 16 of them the tag (section 7.2). */
+export const MAX_PLAINTEXT = 65535 - 16;
+export const MAX_FRAGMENT = MAX_PLAINTEXT - 2;
 /** Credit every session starts with, in each direction (section 7.3). */
 export const INITIAL_CREDIT = 1024 * 1024;
 export const DEFAULT_CREDIT_WINDOW = INITIAL_CREDIT;
@@ -302,9 +304,10 @@ export class SessionManager {
   private onData(from: string, body: Uint8Array): void {
     const { receiverIndex, ciphertext } = parseData(body);
     const s = this.byIndex.get(receiverIndex);
-    if (!(s instanceof Session) || s.peer !== from || s.ended || this.expired(s)) {
+    if (!(s instanceof Session) || s.peer !== from || s.ended || (this.expired(s) && !this.crossing(s))) {
       // Section 7.2: a receiver index this side does not hold (or a responder
-      // session past its lifetime) is answered with reset.
+      // session past its lifetime, unless a message is still crossing it in
+      // either direction) is answered with reset.
       if (s instanceof Session && s.peer === from) this.endSession(s, new ClosedError(`session with ${from} expired`));
       this.h.sendFrame(FrameType.Reset, from, u32be(receiverIndex));
       return;
@@ -523,6 +526,11 @@ export class SessionManager {
     return !s.initiator && this.h.now() - s.createdAt > t.rekeyIntervalMs + t.retireGraceMs;
   }
 
+  /** A message is part-way across the session: one being received, or one this side is sending. */
+  private crossing(s: Session): boolean {
+    return s.partialLen > 0 || s.activeSends > 0;
+  }
+
   private maybeRekey(s: Session): void {
     if (!s.initiator || s.retired || s.ended) return;
     const t = this.h.timing;
@@ -555,7 +563,10 @@ export class SessionManager {
 
   private transmit(s: Session, msg: SessionMessage): boolean {
     if (s.ended) return false;
-    const ct = s.send.encryptWithAd(EMPTY, encodeSessionMessage(msg));
+    const plaintext = encodeSessionMessage(msg);
+    // Checked before encrypting, so a refused message does not spend a nonce.
+    if (plaintext.length > MAX_PLAINTEXT) throw new InvalidError(`a ${msg.type} session message exceeds ${MAX_PLAINTEXT} bytes`);
+    const ct = s.send.encryptWithAd(EMPTY, plaintext);
     s.sent++;
     s.lastActivity = this.h.now();
     return this.h.sendFrame(FrameType.Data, s.peer, dataBody(s.remoteIndex, ct));

@@ -1,15 +1,18 @@
 // The relay's limits against the real client: shaping with LINK_RATE_BPS, liveness pings
-// while a sender is held back, the 1 MiB control message limit (a roster near it travels
-// both ways), and the relay's answers to control messages a member may not send.
+// while a sender is held back, the 65000-byte roster limit, the 1 MiB control message
+// limit, and the relay's answers to control messages a member may not send.
 
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createIdentity,
+  MAX_ROSTER_BYTES,
   Member,
   memberFromIdentity,
   nodeIdFromEd25519,
+  pair,
   Primary,
+  rosterSize,
   signRoster,
   type Identity,
   type Roster,
@@ -86,7 +89,7 @@ function rosterOf(primary: Identity, version: number, relay: string, members: Ro
   );
 }
 
-test('1 MiB control messages: a roster just under the limit travels in register and in registered', async () => {
+test('a roster at the 65000-byte limit travels in register, in registered and in a session; no member fits beyond', async () => {
   const relay = await startRelay();
   const opened: Member[] = [];
   try {
@@ -94,34 +97,31 @@ test('1 MiB control messages: a roster just under the limit travels in register 
     const w = createIdentity();
     const base = [memberFromIdentity(p, 'primary'), memberFromIdentity(w, 'worker')];
     const small = rosterOf(p, 1, relay.url, base);
-    // Fill v2 until its register message is as close to 1 MiB as a member allows. The
-    // signature adds a fixed length, so the unsigned form is measured.
-    const overhead = 600; // register's other fields; registered's are fewer
-    const target = 1048576 - overhead;
-    const signatureField = ',"signature":""'.length + 86;
-    const unsigned = (members: RosterMember[]) =>
-      JSON.stringify({ network: p.id, version: 2, issuedAt: Date.now(), relay: relay.url, primary: { ed25519: base[0]!.ed25519 }, members }).length + signatureField;
-    const fakes: RosterMember[] = [];
-    const per = JSON.stringify(fakeMember()).length + 1;
-    let size = unsigned(base);
-    while (size + per <= target) {
-      fakes.push(fakeMember());
-      size += per;
-    }
+    // Every entry has the same length: fill v2 so that exactly one more member fits.
+    const entry = JSON.stringify(fakeMember()).length + 1;
+    const room = MAX_ROSTER_BYTES - rosterSize(rosterOf(p, 2, relay.url, base));
+    const fakes = Array.from({ length: Math.floor(room / entry) - 1 }, fakeMember);
     const big = rosterOf(p, 2, relay.url, [...base, ...fakes]);
-    const actual = JSON.stringify(big).length;
-    assert.ok(actual > target - 2 * per && actual <= target, `roster of ${actual} bytes`);
+    assert.ok(MAX_ROSTER_BYTES - rosterSize(big) >= entry && MAX_ROSTER_BYTES - rosterSize(big) < 2 * entry);
 
     const primary = await Primary.connect({ identity: p, roster: big, timing: FAST });
     opened.push(primary);
     const worker = new Member({ identity: w, roster: small, timing: FAST });
     opened.push(worker);
     await worker.waitConnected(10_000);
-    assert.equal(worker.roster.version, 2, 'the relay handed the ~1 MiB roster back in registered');
-    assert.equal(worker.roster.members.length, base.length + fakes.length);
+    assert.equal(worker.roster.version, 2, 'the relay handed the big roster back in registered');
     const pIn = inbox(primary);
     await worker.send(p.id, bytesOf('under the big roster'));
     await pIn.next();
+
+    // The last member that fits; v3 reaches the worker over their session, through the relay.
+    const { roster: v3 } = await pair({ link: primary.openPairingCode('surface').link, identity: createIdentity() });
+    assert.ok(rosterSize(v3) <= MAX_ROSTER_BYTES && rosterSize(v3) > MAX_ROSTER_BYTES - entry);
+    await until(() => worker.roster.version === 3, 'the worker to receive v3 in a session');
+    // Full: the primary refuses another, and nobody accepts a roster over the limit.
+    assert.throws(() => primary.openPairingCode('mcp'), { code: 'roster-full' });
+    const over = { ...v3, relay: v3.relay + 'x'.repeat(MAX_ROSTER_BYTES) };
+    assert.throws(() => new Member({ identity: w, roster: over as Roster, timing: FAST }), { code: 'invalid' });
   } finally {
     for (const m of opened) m.close();
     assert.equal(await relay.stop(), 0);

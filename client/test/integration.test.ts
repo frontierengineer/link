@@ -3,11 +3,12 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createIdentity, Member, pair, type Roster } from '../src/index.js';
-import { fromB64u } from '../src/bytes.js';
+import { canonicalize, createIdentity, Member, memberFromIdentity, nodeIdFromEd25519, pair, Primary, signRoster, type PairingKind, type Roster } from '../src/index.js';
+import { b64u, fromB64u, randomBytes } from '../src/bytes.js';
 import { encodeFrame, FrameType } from '../src/frames.js';
 import { NewcomerExchange } from '../src/pairing.js';
 import { FAST, bytesOf, inbox, startNetwork, textOf, until } from './support/network.js';
+import { TestRelay } from './support/relay.js';
 
 test('primary, pairing a worker and a surface, sessions both ways', async () => {
   const net = await startNetwork();
@@ -573,5 +574,105 @@ test('a member revoked while offline is closed 4008 at registration and stays re
     back.close();
   } finally {
     await net.close();
+  }
+});
+
+test('a responder keeps an expired session while a message is still crossing it, in either direction', async () => {
+  // Found against the Go relay: a message still in flight when the responder's session
+  // passed rekeyIntervalMs + retireGraceMs was answered with reset half-way and lost.
+  // Section 7.2: keys are kept longer while a message is still crossing a session.
+  const net = await startNetwork();
+  try {
+    let skew = 0;
+    const worker = await net.add('worker', { timing: { ...FAST, rekeyIntervalMs: 3_600_000 } });
+    const surface = await net.add('surface', {
+      timing: { ...FAST, rekeyIntervalMs: 1000, retireGraceMs: 500 },
+      now: () => Date.now() + skew,
+    });
+    const sessions = (m: Member) => (m as unknown as { sessions: { sessionInfo(p: string): { localIndex: number }[] } }).sessions;
+
+    // Worker to surface: the surface holds one message unread, so the second stalls on
+    // credit half-way; the surface's clock then passes the session's lifetime.
+    const sReader = surface.messages;
+    const first = new Uint8Array(700 * 1024).fill(1);
+    const second = new Uint8Array(2 * 1024 * 1024).fill(2);
+    await worker.send(surface.id, first);
+    let done = false;
+    const sent = worker.send(surface.id, second).then(() => (done = true));
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(done, false, 'the second message stalls on credit');
+    const index = sessions(worker).sessionInfo(surface.id)[0]!.localIndex;
+    skew = 10_000;
+    assert.deepEqual((await sReader.next()).value!.bytes, first);
+    await sent;
+    assert.deepEqual((await sReader.next()).value!.bytes, second);
+    assert.equal(sessions(worker).sessionInfo(surface.id)[0]!.localIndex, index, 'the same session carried it');
+
+    // A responder sending: the credit that lets it finish arrives on its old session,
+    // which it must not reset while its own message is still crossing.
+    let backSkew = 0;
+    const back = await net.add('mcp', {
+      timing: { ...FAST, rekeyIntervalMs: 1000, retireGraceMs: 500 },
+      now: () => Date.now() + backSkew,
+    });
+    const wReader = worker.messages;
+    await worker.send(back.id, new Uint8Array(1)); // the worker initiates; back is the responder
+    await back.messages.next();
+    await back.send(worker.id, first);
+    let backDone = false;
+    const backSent = back.send(worker.id, second).then(() => (backDone = true));
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(backDone, false, 'the reply stalls on credit');
+    backSkew = 10_000;
+    assert.deepEqual((await wReader.next()).value!.bytes, first);
+    await backSent;
+    assert.deepEqual((await wReader.next()).value!.bytes, second);
+  } finally {
+    await net.close();
+  }
+});
+
+test('a roster too large for one session message is refused, not sent as an oversize Noise message', async () => {
+  // Found while sizing rosters for the Go relay: roster and resign session messages were
+  // encrypted whole, so a roster over 65519 bytes went out as a Noise message over 65535
+  // bytes (section 7.2), and one over 1 MiB spent a nonce on a frame that was never sent.
+  const relay = await TestRelay.start();
+  const id = createIdentity();
+  const fakes = Array.from({ length: 600 }, () => {
+    const pub = randomBytes(32);
+    return { id: nodeIdFromEd25519(pub), ed25519: b64u(pub), x25519: b64u(randomBytes(32)), kind: 'mcp' as const };
+  });
+  const members = [memberFromIdentity(id, 'primary'), ...fakes].sort((a, b) => (a.id < b.id ? -1 : 1));
+  const roster = signRoster({ network: id.id, version: 1, issuedAt: Date.now(), relay: relay.url, primary: { ed25519: b64u(id.ed25519.pub) }, members }, id);
+  assert.ok(canonicalize(roster).length > 65519);
+  const primary = await Primary.connect({ identity: id, roster, timing: FAST });
+  const joined: Member[] = [];
+  const add = async (kind: PairingKind) => {
+    const identity = createIdentity();
+    const { roster: r } = await pair({ link: primary.openPairingCode(kind).link, identity });
+    const m = await Member.connect({ identity, roster: r, timing: FAST });
+    joined.push(m);
+    return m;
+  };
+  try {
+    const worker = await add('worker');
+    const pIn = inbox(primary);
+    await worker.send(primary.id, bytesOf('hello'));
+    await pIn.next();
+    // v3 cannot travel to the worker in one session message.
+    await add('surface');
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal(primary.roster.version, 3);
+    assert.equal(worker.roster.version, 2);
+    const data = relay.frameLog.filter((f) => f.type === FrameType.Data);
+    assert.ok(data.length > 0 && data.every((f) => f.size <= 18 + 4 + 65535), 'no Noise message over 65535 bytes');
+    // Nothing was encrypted that was not sent, so the session still works.
+    const wIn = inbox(worker);
+    await primary.send(worker.id, bytesOf('still here'));
+    assert.equal(textOf((await wIn.next())[0]!.bytes), 'still here');
+  } finally {
+    for (const m of joined) m.close();
+    primary.close();
+    await relay.stop();
   }
 });

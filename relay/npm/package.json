@@ -1,0 +1,26 @@
+{
+  "name": "@frontierengineer/link-server",
+  "version": "1.0.0-alpha.0",
+  "description": "The Link relay: one static binary that routes end-to-end encrypted frames between the members of a network and never sees content. Run it with `npx @frontierengineer/link-server`.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frontierengineer/link.git",
+    "directory": "relay/npm"
+  },
+  "type": "module",
+  "bin": {
+    "link-relay": "bin/link-relay.js"
+  },
+  "files": ["bin", "vendor", "README.md"],
+  "os": ["linux", "darwin", "win32"],
+  "cpu": ["x64", "arm64"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

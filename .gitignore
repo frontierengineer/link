@@ -2,3 +2,5 @@ node_modules/
 dist/
 /relay/bin/
 *.log
+/relay/npm/vendor/
+*.tgz

@@ -58,6 +58,10 @@ export async function startRelay(env: Record<string, string> = {}): Promise<Rela
     env: { ...clean, LINK_ADDR: '127.0.0.1:0', ...env },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
+  // A test process that dies or is killed takes its relays with it.
+  const reap = () => child.kill('SIGKILL');
+  process.on('exit', reap);
+  child.on('exit', () => process.off('exit', reap));
   const log: string[] = [];
   const exited = new Promise<number | null>((resolve) => child.on('exit', (code) => resolve(code)));
   const port = await new Promise<number>((resolve, reject) => {

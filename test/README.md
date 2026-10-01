@@ -23,5 +23,8 @@ Playwright's Chromium at the version `package.json` pins (`npx playwright instal
 - `browser.test.ts` — the client bundled for the browser with esbuild and loaded into headless
   Chromium, where a surface pairs with a Node primary, exchanges small and several-MiB
   messages with it and with a Node worker, receives a roster push, and is revoked.
-- `limits.test.ts` — shaping with `LINK_RATE_BPS`, liveness pings, the 1 MiB control message
-  limit, control messages a member may not send.
+- `origin.test.ts` — members dialling `ws://127.0.0.1:443` register: both sides drop `:443`.
+  Needs permission to listen on 443 (root, or `net.ipv4.ip_unprivileged_port_start=0`); without
+  it the test is skipped and says why, except with `LINK_REQUIRE_PORT_443=1`, as in CI.
+- `limits.test.ts` — shaping with `LINK_RATE_BPS`, liveness pings, the 65000-byte roster limit,
+  the 1 MiB control message limit, control messages a member may not send.

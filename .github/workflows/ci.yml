@@ -65,11 +65,15 @@ jobs:
       # The browser test runs the client in headless Chromium, at the playwright version test/ pins.
       - run: npx playwright install --with-deps chromium
         working-directory: test
+      # origin.test.ts runs a relay on port 443 (section 4.1's ws://host:443 case).
+      - run: sudo sysctl -w net.ipv4.ip_unprivileged_port_start=0
       - run: npm run typecheck
         working-directory: test
       # pretest builds the client; the tests build the relay with `go build`.
       - run: npm test
         working-directory: test
+        env:
+          LINK_REQUIRE_PORT_443: "1"
 
   vectors-go:
     name: client vectors, checked in Go

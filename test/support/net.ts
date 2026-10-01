@@ -33,12 +33,19 @@ export async function startNet(
 ): Promise<Net> {
   const relay = await startRelay(opts.env);
   const id = createIdentity();
-  const primary = await Primary.connect({
+  const primary = new Primary({
     identity: id,
     roster: createNetwork({ identity: id, relay: relay.url }),
     timing: FAST,
     ...opts.member,
   });
+  try {
+    await primary.waitConnected(15_000);
+  } catch (e) {
+    primary.close();
+    await relay.stop();
+    throw e;
+  }
   const members: Member[] = [];
   const net: Net = {
     relay,

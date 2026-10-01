@@ -42,7 +42,7 @@ func TestRegistered(t *testing.T) {
 
 // Every check of section 4.1, in order, with its close code.
 func TestRegistrationChecks(t *testing.T) {
-	p, w, stranger := keys(t, 1), keys(t, 2), keys(t, 3)
+	p, w, stranger, dropped := keys(t, 1), keys(t, 2), keys(t, 3), keys(t, 5)
 	other := keys(t, 4) // another network's primary
 	r := roster(t, 5, p, w)
 	net := p.ID.String()
@@ -137,17 +137,16 @@ func TestRegistrationChecks(t *testing.T) {
 		{"roster of another network", 4008, func(h *harness, c *client) any {
 			return h.registerMsg(c, w, net, roster(t, 1, other, w))
 		}},
-		// 6. Membership.
+		// 7. Membership.
 		{"not a member", 4008, func(h *harness, c *client) any {
 			return h.registerMsg(c, stranger, net, r)
 		}},
-		// 7. Not older than the relay's (it holds version 5 from the primary below).
-		{"older roster", 4008, func(h *harness, c *client) any {
-			return h.registerMsg(c, w, net, roster(t, 4, p, w))
+		{"listed by an older roster but not by the relay's", 4008, func(h *harness, c *client) any {
+			return h.registerMsg(c, dropped, net, roster(t, 4, p, w, dropped))
 		}},
 	}
 	h := start(t, nil)
-	h.register(p, p, r) // the relay now holds version 5
+	h.register(p, p, r) // the relay now holds version 5, without dropped
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			c := h.dial()
@@ -271,5 +270,72 @@ func TestConfigFromEnv(t *testing.T) {
 		return ""
 	}); err == nil || !strings.Contains(err.Error(), "LINK_RATE_BPS") {
 		t.Fatalf("bad value accepted: %v", err)
+	}
+}
+
+// Rules 6 and 7: membership is judged against the newer of the presented roster and the
+// relay's, and a node behind the relay is handed the relay's roster.
+func TestEffectiveRoster(t *testing.T) {
+	h := start(t, nil)
+	p, w, x := keys(t, 1), keys(t, 2), keys(t, 3)
+	r2 := roster(t, 2, p, w, x)
+	h.register(p, p, r2)
+
+	// A member offline during a change (it holds version 1) is admitted and brought up to
+	// date: registered carries the relay's version 2, exactly as the primary signed it.
+	c := h.dial()
+	c.send(h.registerMsg(c, w, p.ID.String(), roster(t, 1, p, w)))
+	m := c.json()
+	if m["type"] != "registered" || m["rosterVersion"] != float64(2) {
+		t.Fatalf("got %v", m)
+	}
+	got, _ := json.Marshal(m["roster"])
+	var want any
+	json.Unmarshal(r2, &want)
+	wantJSON, _ := json.Marshal(want)
+	if string(got) != string(wantJSON) {
+		t.Fatalf("roster in registered:\n%s\nwant\n%s", got, wantJSON)
+	}
+	if _, err := link.ParseRoster(got); err != nil {
+		t.Fatalf("the roster handed over does not verify: %v", err)
+	}
+
+	// Presenting the relay's own version: no roster in registered.
+	c = h.dial()
+	c.send(h.registerMsg(c, x, p.ID.String(), r2))
+	if m := c.json(); m["type"] != "registered" || m["roster"] != nil {
+		t.Fatalf("got %v", m)
+	}
+
+	// A newer presented roster, delivered by a worker, replaces the relay's: x is no longer
+	// listed and its connection is closed 4008.
+	r3 := roster(t, 3, p, w)
+	wc := h.dial()
+	wc.send(h.registerMsg(wc, w, p.ID.String(), r3))
+	if m := wc.json(); m["type"] != "registered" || m["rosterVersion"] != float64(3) || m["roster"] != nil {
+		t.Fatalf("got %v", m)
+	}
+	c.expectClose(4008)
+	// The cache now holds version 3: a node presenting version 2 receives it, and x, listed
+	// by version 2 but not by 3, is closed 4008.
+	pc := h.dial()
+	pc.send(h.registerMsg(pc, p, p.ID.String(), r2))
+	if m := pc.json(); m["rosterVersion"] != float64(3) || m["roster"] == nil {
+		t.Fatalf("got %v", m)
+	}
+	xc := h.dial()
+	xc.send(h.registerMsg(xc, x, p.ID.String(), r2))
+	xc.expectClose(4008)
+
+	// A newer presented roster that does not list the presenter still replaces the relay's
+	// (the primary signed it), and the presenter is closed 4008.
+	r4 := roster(t, 4, p)
+	wc2 := h.dial()
+	wc2.send(h.registerMsg(wc2, w, p.ID.String(), r4))
+	wc2.expectClose(4008)
+	wc.expectClose(4008) // w's registered connection is not on version 4 either
+	pc.send(map[string]any{"type": "usage", "id": "v"})
+	if u := pc.json(); len(u["members"].([]any)) != 1 {
+		t.Fatalf("relay did not adopt version 4: %v", u)
 	}
 }

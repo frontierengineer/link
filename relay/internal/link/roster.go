@@ -36,6 +36,7 @@ type Roster struct {
 	IssuedAt int64
 	Primary  ed25519.PublicKey
 	Members  []Member
+	Raw      json.RawMessage // as received, to hand to a member that holds an older one
 }
 
 // Member returns the entry for id, or nil.
@@ -74,7 +75,7 @@ func ParseRoster(raw []byte) (*Roster, error) {
 	if !ok {
 		return nil, errors.New("roster: not an object")
 	}
-	r := &Roster{}
+	r := &Roster{Raw: json.RawMessage(bytes.Clone(raw))}
 
 	netStr, ok := obj["network"].(string)
 	if !ok {

@@ -121,7 +121,7 @@ export class Primary extends Member<PrimaryEvents> {
     this.codes.delete(codeId);
   }
 
-  /** Removes a member and publishes the roster. Resolves with the new roster. */
+  /** Removes a member and publishes the roster. Returns the new roster. */
   revoke(nodeId: string): Roster {
     if (nodeId === this.id) throw new InvalidError('the primary cannot revoke itself');
     if (!findMember(this.currentRoster, nodeId)) throw new InvalidError(`${nodeId} is not on the roster`);

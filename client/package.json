@@ -3,6 +3,11 @@
   "version": "1.0.0-alpha.0",
   "description": "Client for Link, a private end-to-end encrypted network for one install: rosters, SPAKE2 pairing and Noise IK sessions over a content-blind relay.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/frontierengineer/link.git",
+    "directory": "client"
+  },
   "type": "module",
   "exports": {
     ".": {
@@ -17,7 +22,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test \"test/**/*.test.ts\"",
-    "vectors": "tsx scripts/vectors.ts"
+    "vectors": "tsx scripts/vectors.ts",
+    "prepack": "npm run build"
   },
   "dependencies": {
     "@noble/ciphers": "^2.4.0",
@@ -28,5 +34,8 @@
     "@types/node": "^22.20.4",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

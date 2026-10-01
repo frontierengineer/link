@@ -932,6 +932,13 @@
       "peer": "dbc38fcadfccbe069645dfe24a247b82",
       "body": "0474221d0643f8a407b14d4b55dff5fc5c161a888be7f0dd4c601c6268f8f90e2c5f86538af25769ef665c194b15f1e5cb7ac41bbe0ae5eb1cccc522de6fcbc870",
       "frame": "0106dbc38fcadfccbe069645dfe24a247b820474221d0643f8a407b14d4b55dff5fc5c161a888be7f0dd4c601c6268f8f90e2c5f86538af25769ef665c194b15f1e5cb7ac41bbe0ae5eb1cccc522de6fcbc870"
+    },
+    {
+      "name": "reset",
+      "type": 7,
+      "peer": "dbc38fcadfccbe069645dfe24a247b82",
+      "body": "0badcafe",
+      "frame": "0107dbc38fcadfccbe069645dfe24a247b820badcafe"
     }
   ],
   "sessionMessages": [

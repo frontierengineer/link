@@ -40,7 +40,7 @@ test('primary, pairing a worker and a surface, sessions both ways', async () => 
 });
 
 test('large messages fragment and reassemble, up to 64 MiB, with credit flow control', async () => {
-  const net = await startNetwork({ member: { creditWindow: 256 * 1024 } });
+  const net = await startNetwork();
   try {
     const worker = await net.add('worker');
     const surface = await net.add('surface');
@@ -73,13 +73,13 @@ test('large messages fragment and reassemble, up to 64 MiB, with credit flow con
 test('a sender waits for credit while the receiver does not consume', async () => {
   // Fragments of a message in progress are credited at once only while the
   // application has nothing waiting; complete messages are credited when taken.
-  const window = 256 * 1024;
-  const net = await startNetwork({ member: { creditWindow: window } });
+  // Every session starts with 1 MiB of credit each way.
+  const net = await startNetwork();
   try {
     const worker = await net.add('worker');
     const surface = await net.add('surface');
     const reader = surface.messages;
-    const msgs = [1, 2, 3].map((n) => new Uint8Array(200 * 1024).fill(n));
+    const msgs = [1, 2, 3].map((n) => new Uint8Array(800 * 1024).fill(n));
     await worker.send(surface.id, msgs[0]!);
     await worker.send(surface.id, msgs[1]!);
     let cDone = false;
@@ -287,7 +287,7 @@ test('a peer that goes away mid-session: its sessions end and the next send fail
   }
 });
 
-test('a peer that lost its session state is re-keyed by the next frame it cannot place', async () => {
+test('a peer that lost its session state answers reset; the sender drops the session and handshakes again', async () => {
   const net = await startNetwork();
   try {
     const worker = await net.add('worker');
@@ -296,18 +296,79 @@ test('a peer that lost its session state is re-keyed by the next frame it cannot
     await worker.send(surface.id, bytesOf('1'));
     await sIn.next();
     const sessions = (worker as unknown as { sessions: { sessionInfo(p: string): { localIndex: number; current: boolean }[] } }).sessions;
-    const before = sessions.sessionInfo(surface.id).find((s) => s.current)!.localIndex;
+    const before = sessions.sessionInfo(surface.id)[0]!.localIndex;
     // The surface's connection drops; it forgets its sessions and reconnects.
     net.relay.dropNode(net.primary.id, surface.id);
     await until(() => surface.state === 'disconnected', 'surface disconnected');
     await until(() => surface.state === 'connected', 'surface reconnected');
-    // A frame on the stale session is lost, and makes the surface open a new session.
+    // A frame on the stale session is lost and answered with reset.
     await worker.send(surface.id, bytesOf('lost'));
-    await until(() => sessions.sessionInfo(surface.id).some((s) => s.current && s.localIndex !== before), 'a new session');
+    await until(() => net.relay.frameLog.some((f) => f.from === surface.id && f.to === worker.id && f.type === 7), 'a reset frame');
+    await until(() => sessions.sessionInfo(surface.id).length === 0, 'the worker to drop the session');
     await worker.send(surface.id, bytesOf('2'));
-    const got = await sIn.next();
-    assert.equal(textOf(got[0]!.bytes), '2');
+    assert.equal(textOf((await sIn.next())[0]!.bytes), '2');
+    assert.notEqual(sessions.sessionInfo(surface.id)[0]!.localIndex, before);
     assert.ok(!sIn.messages.some((m) => textOf(m.bytes) === 'lost'));
+  } finally {
+    await net.close();
+  }
+});
+
+test('a responder expires a session older than the rekey interval plus 30 s and answers reset', async () => {
+  const net = await startNetwork();
+  try {
+    // The initiator would rekey only after an hour; the responder's lifetime is 100 + 50 ms.
+    const worker = await net.add('worker', { timing: { ...FAST, rekeyIntervalMs: 3_600_000 } });
+    const surface = await net.add('surface', { timing: { ...FAST, rekeyIntervalMs: 100, retireGraceMs: 50 } });
+    const sIn = inbox(surface);
+    await worker.send(surface.id, bytesOf('fresh'));
+    await sIn.next();
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.send(surface.id, bytesOf('expired'));
+    await until(() => net.relay.frameLog.some((f) => f.from === surface.id && f.type === 7), 'a reset frame');
+    await new Promise((r) => setTimeout(r, 50));
+    await worker.send(surface.id, bytesOf('renewed'));
+    assert.equal(textOf((await sIn.next())[0]!.bytes), 'renewed');
+    const inits = net.relay.frameLog.filter((f) => f.from === worker.id && f.to === surface.id && f.type === 1);
+    assert.equal(inits.length, 2);
+  } finally {
+    await net.close();
+  }
+});
+
+test('extra credit: a larger creditWindow is granted on top of the initial 1 MiB', async () => {
+  const net = await startNetwork();
+  try {
+    const worker = await net.add('worker');
+    const surface = await net.add('surface', { creditWindow: 4 * 1024 * 1024 });
+    const sIn = inbox(surface);
+    await worker.send(surface.id, bytesOf('x'));
+    await sIn.next();
+    const sessions = (worker as unknown as { sessions: { sessionInfo(p: string): { sendCredit: number }[] } }).sessions;
+    // 1 MiB initial + 3 MiB extra, less nothing outstanding (the 1 byte came back on consumption).
+    await until(() => sessions.sessionInfo(surface.id)[0]!.sendCredit === 4 * 1024 * 1024, 'credit of 4 MiB');
+    const wSessions = (surface as unknown as { sessions: { sessionInfo(p: string): { sendCredit: number }[] } }).sessions;
+    assert.equal(wSessions.sessionInfo(worker.id)[0]!.sendCredit, 1024 * 1024);
+    assert.throws(() => new Member({ identity: createIdentity(), roster: net.primary.roster, creditWindow: 1000 }), { code: 'invalid' });
+  } finally {
+    await net.close();
+  }
+});
+
+test('4005: a second copy of an identity replaces the first, which stops for good', async () => {
+  const net = await startNetwork();
+  try {
+    const worker = await net.add('worker');
+    const states: string[] = [];
+    worker.on('state', (s) => states.push(s));
+    const copy = await Member.connect({ identity: worker.identity, roster: worker.roster, timing: FAST });
+    await until(() => worker.state === 'replaced', 'the first copy replaced');
+    await assert.rejects(worker.send(net.primary.id, bytesOf('x')), { code: 'replaced' });
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(worker.state, 'replaced');
+    assert.equal(copy.state, 'connected');
+    assert.deepEqual(states, ['replaced']);
+    copy.close();
   } finally {
     await net.close();
   }

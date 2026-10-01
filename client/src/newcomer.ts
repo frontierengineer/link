@@ -86,6 +86,8 @@ export function pair(opts: PairOptions): Promise<PairResult> {
           }
           stage = 'p2';
           sendPair(exchange.p1());
+        } else if (msg.type === 'pairEnd' && stage !== 'hello') {
+          fail(new PairingError(stage === 'p4' ? 'the primary rejected the code' : 'the primary ended pairing before it finished'));
         } else if (msg.type === 'error') {
           if (msg.code === 'unreachable') fail(new UnreachableError(target.network));
           else fail(new PairingError(`relay answered ${String(msg.code)}`));

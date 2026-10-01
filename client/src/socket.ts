@@ -17,7 +17,7 @@ export interface WebSocketLike {
 
 export type WebSocketConstructor = new (url: string) => WebSocketLike;
 
-export const MAX_CONTROL_BYTES = 65536;
+export const MAX_CONTROL_BYTES = 1048576;
 
 export function defaultWebSocket(): WebSocketConstructor {
   const ws = (globalThis as { WebSocket?: unknown }).WebSocket;
@@ -66,7 +66,7 @@ export class Channel {
   sendControl(msg: ControlMessage): boolean {
     if (!this.isOpen) return false;
     const text = JSON.stringify(msg);
-    if (new TextEncoder().encode(text).length > MAX_CONTROL_BYTES) throw new Error('control message exceeds 64 KiB');
+    if (new TextEncoder().encode(text).length > MAX_CONTROL_BYTES) throw new Error('control message exceeds 1 MiB');
     this.ws.send(text);
     return true;
   }

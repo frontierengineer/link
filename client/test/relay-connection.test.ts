@@ -162,10 +162,20 @@ test('4009 emits moved, asks for the new location, and dials it', async () => {
   rc.close();
 });
 
-test('other close codes (4005, 4007, 1000) keep retrying', async () => {
+test('4005 is terminal: state replaced, no reconnect', async () => {
+  const { rc, states } = connection();
+  rc.start();
+  ScriptedSocket.all[0]!.serverClose(4005);
+  await tick(80);
+  assert.equal(ScriptedSocket.all.length, 1);
+  assert.deepEqual(states, ['connecting', 'replaced']);
+  assert.equal(rc.terminal, true);
+});
+
+test('other close codes (1001, 4007, 1000) keep retrying', async () => {
   const { rc } = connection();
   rc.start();
-  for (const [i, code] of [4005, 4007, 1000].entries()) {
+  for (const [i, code] of [1001, 4007, 1000].entries()) {
     ScriptedSocket.all[i]!.serverClose(code);
     await tick(110);
   }

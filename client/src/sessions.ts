@@ -2,21 +2,13 @@
 // transport with receiver indices, rekeying, idle expiry, and the session
 // message layer (fragmentation and credit flow control).
 //
-// Choices the spec leaves open, made here:
-// - Credit and reassembly belong to one Noise session. A message's fragments
-//   all travel on the session it started on; a rekey switches sessions only at
-//   a message boundary, and a retired session lives on (beyond the 30 s grace)
-//   while a message is still crossing it.
-// - The initial credit a sender holds is its own `creditWindow` setting, so
-//   members of one network should share the value; a receiver tolerates a
-//   sender that assumes a larger window.
-// - Fragments are at most 65517 bytes, so every transport message fits Noise's
-//   65535-byte limit. Larger ciphertexts from other implementations are read.
-// - A data frame for an unknown receiver index means the peer holds a session
-//   this side lost; this side then opens a new session to the peer, which the
-//   peer adopts for its next message.
+// Credit and reassembly belong to one Noise session, and a message is never
+// split across two sessions: a rekey switches at a message boundary, and a
+// retired session lives past its 30 s grace while a message still uses it.
+// Every session starts with 1 MiB of credit each way; a larger `creditWindow`
+// is granted as extra credit as soon as the session is up.
 
-import { EMPTY, readU64be, u64be, utf8, fromB64uLen, randomBytes } from './bytes.js';
+import { EMPTY, readU32be, readU64be, u32be, u64be, utf8, fromB64uLen, randomBytes } from './bytes.js';
 import { ClosedError, InvalidError, LinkError, RefusedError, TimeoutError, UnreachableError } from './errors.js';
 import {
   dataBody,
@@ -38,7 +30,9 @@ import { findMember, type Roster } from './roster.js';
 
 export const MAX_MESSAGE = 64 * 1024 * 1024;
 export const MAX_FRAGMENT = 65535 - 16 - 2;
-export const DEFAULT_CREDIT_WINDOW = 1024 * 1024;
+/** Credit every session starts with, in each direction (section 7.3). */
+export const INITIAL_CREDIT = 1024 * 1024;
+export const DEFAULT_CREDIT_WINDOW = INITIAL_CREDIT;
 
 export interface SessionTiming {
   /** Handshake timeout per message (10 s). */
@@ -47,7 +41,8 @@ export interface SessionTiming {
   rekeyIntervalMs: number;
   /** ...or after this many messages in either direction (2^32). */
   rekeyMessages: number;
-  /** Previous session's keys are kept this long after a rekey (30 s). */
+  /** Previous session's keys are kept this long after a rekey (30 s); a responder also
+   * treats a session older than rekeyIntervalMs + retireGraceMs as expired. */
   retireGraceMs: number;
   /** A session with no frame in either direction this long is forgotten (10 min). */
   idleMs: number;
@@ -69,6 +64,7 @@ export interface SessionHost {
   identity: Identity;
   roster(): Roster;
   now(): number;
+  /** The receive window this side grants; at least INITIAL_CREDIT. */
   creditWindow: number;
   timing: SessionTiming;
   /** Hands a frame to the relay; false when not connected. */
@@ -115,11 +111,10 @@ class Session {
     readonly send: CipherState,
     readonly recv: CipherState,
     now: number,
-    window: number,
   ) {
     this.createdAt = now;
     this.lastActivity = now;
-    this.sendCredit = window;
+    this.sendCredit = INITIAL_CREDIT;
   }
 }
 
@@ -137,8 +132,6 @@ interface PeerState {
   pending: PendingInit | undefined;
   /** Serialises outbound messages to this peer. */
   chain: Promise<void>;
-  /** Last time this side opened a session to recover from an unknown index. */
-  lastRecovery: number;
 }
 
 export class SessionManager {
@@ -203,7 +196,7 @@ export class SessionManager {
   }
 
   /** For tests and diagnostics: live sessions with a peer. */
-  sessionInfo(peer: string): { localIndex: number; remoteIndex: number; initiator: boolean; current: boolean; sent: number; received: number }[] {
+  sessionInfo(peer: string): { localIndex: number; remoteIndex: number; initiator: boolean; current: boolean; sent: number; received: number; sendCredit: number }[] {
     const ps = this.peers.get(peer);
     if (!ps) return [];
     return [...ps.sessions].map((s) => ({
@@ -213,6 +206,7 @@ export class SessionManager {
       current: ps.current === s,
       sent: s.sent,
       received: s.received,
+      sendCredit: s.sendCredit,
     }));
   }
 
@@ -232,6 +226,8 @@ export class SessionManager {
           return this.onUnreachable(from);
         case FrameType.Refused:
           return this.onRefused(from, f.body[0] ?? 0);
+        case FrameType.Reset:
+          return this.onReset(from, readU32be(f.body, 0));
         default:
           return;
       }
@@ -269,7 +265,7 @@ export class SessionManager {
     const { message, transport } = hs.writeMessage(u64be(roster.version));
     if (!transport) return;
     if (!this.h.sendFrame(FrameType.HandshakeResp, from, handshakeRespBody(localIndex, senderIndex, message))) return;
-    const s = new Session(from, localIndex, senderIndex, false, transport.send, transport.recv, this.h.now(), this.h.creditWindow);
+    const s = new Session(from, localIndex, senderIndex, false, transport.send, transport.recv, this.h.now());
     this.adopt(s);
     this.h.peerVersion(from, version);
   }
@@ -296,7 +292,7 @@ export class SessionManager {
     }
     clearTimeout(p.timer);
     ps.pending = undefined;
-    const s = new Session(from, p.localIndex, senderIndex, true, transport.send, transport.recv, this.h.now(), this.h.creditWindow);
+    const s = new Session(from, p.localIndex, senderIndex, true, transport.send, transport.recv, this.h.now());
     this.byIndex.set(p.localIndex, s);
     this.adopt(s);
     for (const w of p.waiters) w.resolve(s);
@@ -306,8 +302,11 @@ export class SessionManager {
   private onData(from: string, body: Uint8Array): void {
     const { receiverIndex, ciphertext } = parseData(body);
     const s = this.byIndex.get(receiverIndex);
-    if (!(s instanceof Session) || s.peer !== from || s.ended) {
-      this.recover(from);
+    if (!(s instanceof Session) || s.peer !== from || s.ended || this.expired(s)) {
+      // Section 7.2: a receiver index this side does not hold (or a responder
+      // session past its lifetime) is answered with reset.
+      if (s instanceof Session && s.peer === from) this.endSession(s, new ClosedError(`session with ${from} expired`));
+      this.h.sendFrame(FrameType.Reset, from, u32be(receiverIndex));
       return;
     }
     let plaintext: Uint8Array;
@@ -394,6 +393,15 @@ export class SessionManager {
     for (const s of [...ps.sessions]) this.endSession(s, err);
   }
 
+  /** The peer holds no session for `index` (our remote index): drop ours; the next send handshakes. */
+  private onReset(peer: string, index: number): void {
+    const ps = this.peers.get(peer);
+    if (!ps) return;
+    for (const s of [...ps.sessions]) {
+      if (s.remoteIndex === index) this.endSession(s, new ClosedError(`${peer} reset the session`));
+    }
+  }
+
   private onRefused(peer: string, reason: number): void {
     const ps = this.peers.get(peer);
     if (!ps) return;
@@ -407,7 +415,7 @@ export class SessionManager {
   private peer(id: string): PeerState {
     let ps = this.peers.get(id);
     if (!ps) {
-      ps = { current: undefined, sessions: new Set(), pending: undefined, chain: Promise.resolve(), lastRecovery: 0 };
+      ps = { current: undefined, sessions: new Set(), pending: undefined, chain: Promise.resolve() };
       this.peers.set(id, ps);
     }
     return ps;
@@ -426,6 +434,12 @@ export class SessionManager {
     const ps = this.peer(s.peer);
     this.byIndex.set(s.localIndex, s);
     ps.sessions.add(s);
+    // A window beyond the initial 1 MiB is granted as extra credit at once.
+    const extra = this.h.creditWindow - INITIAL_CREDIT;
+    if (extra > 0) {
+      s.owed += extra;
+      this.flushCredit(s);
+    }
     const prev = ps.current;
     ps.current = s;
     if (prev && prev !== s) {
@@ -437,6 +451,7 @@ export class SessionManager {
   private async ensureSession(peer: string): Promise<Session> {
     const ps = this.peer(peer);
     const cur = ps.current;
+    if (cur && this.expired(cur)) this.endSession(cur, new ClosedError(`session with ${peer} expired`));
     if (cur && !cur.ended) {
       this.maybeRekey(cur);
       return cur;
@@ -502,13 +517,10 @@ export class SessionManager {
     for (const w of s.creditWaiters.splice(0)) w.reject(err);
   }
 
-  private recover(peer: string): void {
-    const ps = this.peer(peer);
-    const now = this.h.now();
-    if (ps.pending || now - ps.lastRecovery < this.h.timing.handshakeTimeoutMs) return;
-    if (!findMember(this.h.roster(), peer)) return;
-    ps.lastRecovery = now;
-    this.initiate(peer).catch(() => undefined);
+  /** A responder session older than the rekey interval plus the grace has expired. */
+  private expired(s: Session): boolean {
+    const t = this.h.timing;
+    return !s.initiator && this.h.now() - s.createdAt > t.rekeyIntervalMs + t.retireGraceMs;
   }
 
   private maybeRekey(s: Session): void {
@@ -527,6 +539,8 @@ export class SessionManager {
         const quiet = now - s.lastActivity;
         if (quiet >= t.idleMs) {
           this.endSession(s, new ClosedError(`session with ${s.peer} went idle`));
+        } else if (this.expired(s) && s.activeSends === 0 && s.partialLen === 0 && s.held === 0) {
+          this.endSession(s, new ClosedError(`session with ${s.peer} expired`));
         } else if (s.retired && quiet >= t.retireGraceMs && s.activeSends === 0 && s.partialLen === 0 && s.held === 0) {
           this.endSession(s, new ClosedError(`session with ${s.peer} was replaced`));
         } else if (s.sent + s.received > 0) {

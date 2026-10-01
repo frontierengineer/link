@@ -15,7 +15,7 @@ import {
 } from '../../src/index.js';
 import { TestRelay, type RelayOptions } from './relay.js';
 
-export const FAST: Partial<Timing> = { backoffInitialMs: 20, backoffMaxMs: 200 };
+export const FAST: Partial<Timing> = { backoffInitialMs: 20, backoffMaxMs: 200, requestTimeoutMs: 2000 };
 
 export interface TestNetwork {
   relay: TestRelay;

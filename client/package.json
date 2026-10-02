@@ -1,6 +1,6 @@
 {
   "name": "@frontierengineer/link-client",
-  "version": "1.0.0-alpha.0",
+  "version": "1.0.0-alpha.1",
   "description": "Client for Link, a private end-to-end encrypted network for one install: rosters, SPAKE2 pairing and Noise IK sessions over a content-blind relay.",
   "license": "MIT",
   "repository": {

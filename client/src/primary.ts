@@ -4,7 +4,7 @@
 // members, and reads the relay's usage figures (section 4.3).
 
 import { b64u, fromB64u, fromB64uLen, randomBytes } from './bytes.js';
-import { buildPairingLink, formatCode, generateCode, generateCodeId } from './code.js';
+import { buildPairingLink, formatCode, generateCode, generateCodeId, normalizeCode } from './code.js';
 import { ClosedError, InvalidError, LinkError, RosterFullError, TimeoutError } from './errors.js';
 import { encodeFrame, FrameType } from './frames.js';
 import { nodeIdFromEd25519 } from './identity.js';
@@ -108,14 +108,26 @@ export class Primary extends Member<PrimaryEvents> {
     return p;
   }
 
-  /** Opens a code that admits one node of `kind` for 15 minutes. */
-  openPairingCode(kind: PairingKind, opts: { lifetimeMs?: number } = {}): PairingCode {
+  /**
+   * Opens a code that admits one node of `kind` for 15 minutes. The code is random unless
+   * `code` gives one (any spelling `normalizeCode` accepts): a chosen code is easier to say
+   * and easier to guess, and like every code it burns after five wrong confirmations.
+   */
+  openPairingCode(kind: PairingKind, opts: { lifetimeMs?: number; code?: string } = {}): PairingCode {
     if (!PAIRING_KINDS.includes(kind)) throw new InvalidError(`kind must be one of ${PAIRING_KINDS.join(', ')}`);
+    let chosen: string | undefined;
+    if (opts.code !== undefined) {
+      try {
+        chosen = normalizeCode(opts.code);
+      } catch (e) {
+        throw new InvalidError((e as Error).message);
+      }
+    }
     // Every entry has the same shape, so a placeholder of this kind measures the next roster.
     const room = this.sizeWith([...this.currentRoster.members, placeholderMember(kind)]);
     if (room > MAX_ROSTER_BYTES) throw new RosterFullError(room);
     this.pruneCodes();
-    const code = generateCode();
+    const code = chosen ?? generateCode();
     const codeId = b64u(generateCodeId());
     const expiresAt = this.now() + (opts.lifetimeMs ?? CODE_LIFETIME_MS);
     this.codes.set(codeId, { code, codeId, kind, expiresAt, failed: 0, inFlight: 0, claimed: false, burned: false });

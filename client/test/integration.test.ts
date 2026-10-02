@@ -454,6 +454,31 @@ test('pairing: wrong codes burn after five, expired and unknown codes fail, abse
   }
 });
 
+test('pairing: a chosen code pairs in any spelling, burns like any code, and must be a valid code', async () => {
+  const net = await startNetwork();
+  try {
+    // "falcon42": O and L read as 0 and 1 on both sides, so the spoken word works as typed.
+    const chosen = net.primary.openPairingCode('surface', { code: 'falcon42' });
+    assert.equal(chosen.code, 'FA1C-0N42');
+    const target = { network: net.primary.id, codeId: chosen.codeId, relay: net.relay.url };
+    const ok = await pair({ link: { ...target, code: 'FALCON-42' }, identity: createIdentity() });
+    assert.equal(ok.roster.version, 2);
+
+    const again = net.primary.openPairingCode('surface', { code: 'falcon42' });
+    const wrong = { network: net.primary.id, codeId: again.codeId, relay: net.relay.url, code: 'falcon43' };
+    for (let i = 0; i < 5; i++) {
+      await assert.rejects(pair({ link: wrong, identity: createIdentity() }), { code: 'pairing' });
+    }
+    await assert.rejects(pair({ link: again.link, identity: createIdentity() }), { code: 'pairing' });
+
+    for (const bad of ['short', 'toolongcode', 'UUUUUUUU', '']) {
+      assert.throws(() => net.primary.openPairingCode('surface', { code: bad }), { code: 'invalid' });
+    }
+  } finally {
+    await net.close();
+  }
+});
+
 test('slots: a failed confirmation keeps its slot, an attempt in flight holds one, a dropped attempt refunds it', async () => {
   const net = await startNetwork();
   try {

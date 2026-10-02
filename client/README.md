@@ -74,8 +74,9 @@ A member reconnects after 500 ms, doubling to 10 s, forever, except after close 
 `revoked`) or 4005 (`replaced`: another copy of the identity connected); both are terminal. A member that registers with an older roster than the relay holds
 receives the newer one in `registered` and accepts it (a `roster` event) before it is `connected`.
 
-**`Primary`** extends `Member`: `Primary.connect(options)`, `openPairingCode(kind, { lifetimeMs? })`
-returning `{ code, codeId, kind, link, expiresAt }`, `cancelPairingCode(codeId)`,
+**`Primary`** extends `Member`: `Primary.connect(options)`, `openPairingCode(kind, { lifetimeMs?, code? })`
+returning `{ code, codeId, kind, link, expiresAt }` (`code` chooses the code instead of a random one;
+it must still be 8 Crockford characters, and a word is easier to guess than a random code), `cancelPairingCode(codeId)`,
 `revoke(nodeId)` returning the new roster, `usage()`. Extra events: `usageAlert`, `paired`,
 `pairingFailed`. When no further member fits under the roster limit, `openPairingCode` throws
 `RosterFullError` (code `roster-full`), and a code opened earlier fails its pairing with

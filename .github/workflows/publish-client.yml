@@ -1,7 +1,7 @@
 name: Publish @frontierengineer/link-client
 
 # TRIGGER: push a tag `client-v<version>` that matches client/package.json "version"
-# (e.g. client-v1.0.0-alpha.0), or run this workflow manually.
+# (e.g. client-v1.0.0-alpha.1), or run this workflow manually.
 #
 # AUTH: OIDC Trusted Publishing — NO token, nothing to rotate. GitHub mints a
 # short-lived credential per run and npm verifies it came from this repo + workflow.

@@ -4,7 +4,7 @@ name: Publish @frontierengineer/link-server
 # darwin-arm64 and win32-x64, and a `link-relay` launcher that runs the right one.
 #
 # TRIGGER: push a tag `server-v<version>` that matches relay/npm/package.json "version"
-# (e.g. server-v1.0.0-alpha.0), or run this workflow manually.
+# (e.g. server-v1.0.0-alpha.1), or run this workflow manually.
 #
 # AUTH: OIDC Trusted Publishing — NO token, nothing to rotate. GitHub mints a
 # short-lived credential per run and npm verifies it came from this repo + workflow.

@@ -1,5 +1,5 @@
 // The relay's limits against the real client: shaping with LINK_RATE_BPS, liveness pings
-// while a sender is held back, the 65000-byte roster limit, the 1 MiB control message
+// while a sender is held back, the 65000-byte roster limit, the 128 KiB control message
 // limit, and the relay's answers to control messages a member may not send.
 
 import { before, test } from 'node:test';
@@ -128,7 +128,7 @@ test('a roster at the 65000-byte limit travels in register, in registered and in
   }
 });
 
-test('1 MiB control messages: exactly 1 MiB is read, one byte more closes 4000', async () => {
+test('128 KiB control messages: exactly 131072 bytes are read, one byte more closes 4000', async () => {
   const relay = await startRelay();
   try {
     const network = createIdentity().id;
@@ -139,8 +139,8 @@ test('1 MiB control messages: exactly 1 MiB is read, one byte more closes 4000',
     };
     const exact = raw(relay.url);
     assert.equal((await exact.json()).type, 'hello');
-    const ok = pad(1048576);
-    assert.equal(Buffer.byteLength(ok), 1048576);
+    const ok = pad(131072);
+    assert.equal(Buffer.byteLength(ok), 131072);
     exact.ws.send(ok);
     // Read and understood: there is no primary to pair with.
     assert.deepEqual(await exact.json(), { type: 'error', code: 'unreachable', message: "the network's primary is not connected" });
@@ -148,7 +148,7 @@ test('1 MiB control messages: exactly 1 MiB is read, one byte more closes 4000',
 
     const over = raw(relay.url);
     assert.equal((await over.json()).type, 'hello');
-    over.ws.send(pad(1048577));
+    over.ws.send(pad(131073));
     assert.equal(await over.closed, 4000);
   } finally {
     assert.equal(await relay.stop(), 0);

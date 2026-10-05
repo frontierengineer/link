@@ -106,7 +106,7 @@ export const bytesOf = (s: string) => new TextEncoder().encode(s);
 export const textOf = (b: Uint8Array) => new TextDecoder().decode(b);
 
 /** What the client keeps private, read for assertions only. */
-export type SessionInfo = { localIndex: number; remoteIndex: number; initiator: boolean; current: boolean; sent: number; received: number; sendCredit: number };
+export type SessionInfo = { localIndex: number; remoteIndex: number; initiator: boolean; current: boolean; sent: number; received: number; sendCredit: number; inflight: number };
 export function sessionsOf(m: Member): { sessionInfo(peer: string): SessionInfo[] } {
   return (m as unknown as { sessions: { sessionInfo(peer: string): SessionInfo[] } }).sessions;
 }

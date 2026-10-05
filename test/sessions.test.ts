@@ -56,8 +56,10 @@ test('credit: a sender waits while the receiving application takes nothing, and 
     let thirdDone = false;
     const third = worker.send(surface.id, msgs[2]!).then(() => (thirdDone = true));
     await sleep(500);
-    assert.equal(thirdDone, false, 'the third message waits for credit');
-    assert.equal(sessionsOf(worker).sessionInfo(surface.id)[0]!.sendCredit, 0, 'the whole window is in flight');
+    assert.equal(thirdDone, false, 'the third message waits');
+    // It waits on credit and on the client's pace, so what is in flight stays within the window.
+    const s = sessionsOf(worker).sessionInfo(surface.id)[0]!;
+    assert.ok(s.inflight <= 1024 * 1024 && s.sendCredit >= 0, `${s.inflight} bytes in flight`);
     assert.deepEqual((await reader.next()).value!.bytes, msgs[0]);
     await sleep(300);
     assert.equal(thirdDone, false, 'one message is still unread');

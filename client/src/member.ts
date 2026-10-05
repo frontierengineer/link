@@ -172,6 +172,11 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     this.relay.on('registered', (msg) => {
       // Section 4.1: the relay returns its newer roster when this member presented an older one.
       if (msg.roster !== undefined) this.offerRoster(msg.roster);
+      // A relay that keeps only a compact record of a newer roster says so without sending it;
+      // the primary, or the first up-to-date peer met (onPeerVersion), hands it over.
+      else if (typeof msg.rosterVersion === 'number' && msg.rosterVersion > this.currentRoster.version) {
+        queueMicrotask(() => this.askPrimary());
+      }
     });
     this.relay.on('control', (msg) => this.onControl(msg));
     this.relay.on('binary', (b) => this.onBinary(b));
@@ -575,10 +580,27 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     if (!findMember(r, this.id)) this.relay.revoke();
   }
 
-  private onPeerVersion(_from: string, version: number): void {
-    if (version > this.currentRoster.version && this.id !== this.network) {
-      this.sessions.sendControl(this.network, { type: 'roster-request' }).catch(() => undefined);
+  /**
+   * Rosters spread member to member (section 7.1). A peer holding a newer roster is asked for
+   * it: any member answers with the newest it holds, and a roster is taken only if the pinned
+   * primary signed it, so the peer need not be trusted. A peer that is behind, and still on this
+   * member's roster, is handed this one. So a change, a revocation above all, reaches every
+   * member that meets one which has it: no need for the primary to be online, nor for the relay
+   * to remember.
+   */
+  private onPeerVersion(from: string, version: number): void {
+    const mine = this.currentRoster.version;
+    if (version > mine) {
+      // The primary is the fallback, for a peer this member cannot open a session to.
+      this.sessions.sendControl(from, { type: 'roster-request' }).catch(() => this.askPrimary());
+    } else if (version < mine && from !== this.id && findMember(this.currentRoster, from)) {
+      this.sessions.sendControl(from, { type: 'roster', json: canonicalize(this.currentRoster) }).catch(() => undefined);
     }
+  }
+
+  private askPrimary(): void {
+    if (this.id === this.network) return;
+    this.sessions.sendControl(this.network, { type: 'roster-request' }).catch(() => undefined);
   }
 
   private waitForRoster(timeoutMs: number): Promise<void> {

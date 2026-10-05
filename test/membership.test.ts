@@ -149,7 +149,7 @@ test('a revoked member that reaches a relay which forgot the network is closed 4
   }
 });
 
-test('usage: the primary reads the numbers, and they move with traffic', async () => {
+test('usage: the primary reads the network totals, and each member counts its own traffic', async () => {
   const net = await startNet();
   try {
     const worker = await net.add('worker');
@@ -160,46 +160,50 @@ test('usage: the primary reads the numbers, and they move with traffic', async (
     assert.deepEqual(before.network.limits, { rateBps: 0, quotaBytesHour: 0, trickleBps: 0 });
     assert.equal(before.network.quotaUsed, 0);
     assert.equal(before.network.slowed, false);
-    assert.equal(before.members.length, 4);
-    assert.deepEqual(
-      before.members.map((m) => m.connected).sort(),
-      [false, true, true, true],
-    );
-    const wBefore = before.members.find((m) => m.id === worker.id)!;
+    // Totals only: the relay keeps no per-member figures.
+    assert.deepEqual(Object.keys(before), ['network']);
+    assert.deepEqual(Object.keys(before.network).sort(), ['bytesHour', 'connections', 'limits', 'quotaUsed', 'slowed']);
 
+    worker.resetTraffic();
+    surface.resetTraffic();
     const sIn = inbox(surface);
     const payload = new Uint8Array(300_000).fill(7);
     await worker.send(surface.id, payload);
     await sIn.next();
     const after = await net.primary.usage();
-    const wAfter = after.members.find((m) => m.id === worker.id)!;
-    assert.ok(wAfter.bytesHour - wBefore.bytesHour >= payload.length, `worker counted ${wAfter.bytesHour - wBefore.bytesHour}`);
-    assert.ok(wAfter.bytesDay >= wAfter.bytesHour);
     assert.ok(after.network.bytesHour - before.network.bytesHour >= payload.length);
-    // The surface's credits went back the other way.
-    assert.ok(after.members.find((m) => m.id === surface.id)!.bytesHour > 0);
+    // What the relay no longer counts per member, the members count themselves.
+    const sent = worker.traffic().peers[surface.id]!.sent;
+    const got = surface.traffic().peers[worker.id]!.received;
+    assert.equal(sent.messages, 1);
+    assert.equal(sent.bytes, payload.length);
+    assert.deepEqual(got.messages, 1);
+    assert.equal(got.bytes, payload.length);
+    assert.equal(got.frames, sent.frames);
+    assert.equal(got.frameBytes, sent.frameBytes);
+    assert.ok(sent.frameBytes > payload.length && sent.frameBytes < payload.length * 1.01, `${sent.frameBytes} frame bytes`);
   } finally {
     await net.close();
   }
 });
 
-test('quota: usageAlert reaches the primary as the quota is spent, then the trickle rate slows traffic', async () => {
+test('quota: the primary asks and learns the network is slowed; the trickle rate slows traffic; nothing is pushed', async () => {
   const quota = 1_000_000;
   const trickle = 200_000;
   const net = await startNet({ env: { LINK_QUOTA_BYTES_HOUR: String(quota), LINK_TRICKLE_BPS: String(trickle) } });
   try {
     const worker = await net.add('worker');
     const surface = await net.add('surface');
-    const alerts: { quotaUsed: number; slowed: boolean }[] = [];
-    net.primary.on('usageAlert', (a) => alerts.push(a));
+    const pushed: string[] = [];
+    (net.primary as unknown as { relay: { on(e: string, f: (m: { type: string }) => void): void } }).relay.on('control', (m) => {
+      if (m.type !== 'usage' && m.type !== 'error') pushed.push(m.type);
+    });
     const sIn = inbox(surface);
     await worker.send(surface.id, new Uint8Array(1_100_000));
     await sIn.next(1, 20_000);
-    await until(() => alerts.some((a) => a.slowed), 'an alert that the network is slowed', 5000);
-    assert.ok(alerts.every((a, i) => i === 0 || a.quotaUsed >= alerts[i - 1]!.quotaUsed));
-    assert.ok(alerts.at(-1)!.quotaUsed >= 1);
     const u = await net.primary.usage();
     assert.equal(u.network.slowed, true);
+    assert.ok(u.network.quotaUsed >= 1, `quotaUsed ${u.network.quotaUsed}`);
     assert.deepEqual(u.network.limits, { rateBps: 0, quotaBytesHour: quota, trickleBps: trickle });
 
     // At the trickle rate (its bucket starts with one second of tokens), 600 kB take over 1.5 s.
@@ -208,6 +212,7 @@ test('quota: usageAlert reaches the primary as the quota is spent, then the tric
     await sIn.next(1, 20_000);
     const took = Date.now() - started;
     assert.ok(took >= 1500, `600 kB at ${trickle} B/s arrived in ${took} ms`);
+    assert.deepEqual(pushed, [], 'the relay pushed nothing to the primary');
   } finally {
     await net.close();
   }

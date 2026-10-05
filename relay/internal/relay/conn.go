@@ -70,7 +70,7 @@ type conn struct {
 	nc        net.Conn
 	rc        syscall.RawConn // non-blocking reads and writes; nil when the relay terminates TLS
 	key       uint64          // the connection's id in the server's table and the poller
-	ip        string          // the limiter key (section 9), until registered
+	ip        string          // the limiter key (section 9); an idle network's owner
 	ipc       *ipCount        // its address's connection count (section 9)
 	ipPending bool            // counted there as not registered
 	origin    string          // used once, to check the registration signature

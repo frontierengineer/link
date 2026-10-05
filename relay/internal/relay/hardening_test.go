@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"net/http"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -526,52 +527,133 @@ func TestIPConnectionsLimit(t *testing.T) {
 	}
 }
 
-// The rosters of networks nobody is connected to are held within LINK_IDLE_ROSTERS_BYTES,
-// the longest idle forgotten first; a network in use is never forgotten, and a forgotten one
-// comes back with its next member.
-func TestIdleRostersBounded(t *testing.T) {
-	a, b, c, d := keys(t, 1), keys(t, 2), keys(t, 3), keys(t, 4)
-	ra, rb, rc, rd := roster(t, 1, a), roster(t, 1, b), roster(t, 1, c), roster(t, 1, d)
-	h := start(t, func(cfg *Config) { cfg.IdleRostersBytes = int64(len(rb) + len(rc)) })
-	dc := h.register(d, d, rd) // stays connected throughout
-	idle := func(k *link.Keys) bool {
-		n := h.s.networkOf(k.ID)
+// registerFrom registers k as h.register does, as if from ip behind one trusted proxy.
+func (h *harness) registerFrom(ip string, k, network *link.Keys, rosterJSON []byte) *client {
+	h.t.Helper()
+	ws, _, err := websocket.DefaultDialer.Dial("ws://"+h.addr+"/v1", http.Header{"X-Forwarded-For": {ip}})
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	h.t.Cleanup(func() { ws.Close() })
+	c := &client{t: h.t, ws: ws}
+	hello := c.json()
+	c.challenge, _ = link.B64u.DecodeString(hello["challenge"].(string))
+	c.send(h.registerMsg(c, k, network.ID.String(), rosterJSON))
+	if m := c.json(); m["type"] != "registered" {
+		h.t.Fatalf("expected registered, got %v", m)
+	}
+	return c
+}
+
+// held reports what the relay keeps for a network: nothing, a compact record, or the roster.
+func (s *Server) held(id link.ID) string {
+	n := s.networkOf(id)
+	if n == nil {
+		return "forgotten"
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.roster.Raw == nil {
+		return "compact"
+	}
+	return "full"
+}
+
+// goIdle disconnects c and waits until the relay counts its network as idle.
+func goIdle(t *testing.T, h *harness, c *client, network link.ID) {
+	c.ws.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		n := h.s.networkOf(network)
 		if n == nil {
-			return false
+			return
 		}
 		n.mu.Lock()
-		defer n.mu.Unlock()
-		return n.idleAt != nil
-	}
-	for _, x := range []struct {
-		k *link.Keys
-		r []byte
-	}{{a, ra}, {b, rb}, {c, rc}} {
-		cl := h.register(x.k, x.k, x.r)
-		cl.ws.Close()
-		for !idle(x.k) && h.s.networkOf(x.k.ID) != nil {
-			time.Sleep(5 * time.Millisecond)
+		idle := len(n.members) == 0
+		n.mu.Unlock()
+		if idle {
+			return
 		}
+		if time.Now().After(deadline) {
+			t.Fatal("never idle")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if h.s.networkOf(a.ID) != nil || !idle(b) || !idle(c) {
-		t.Fatalf("held: a %v, b %v, c %v", h.s.networkOf(a.ID) != nil, idle(b), idle(c))
+}
+
+// Over LINK_IDLE_ROSTERS_BYTES, room is made at the address holding the most idle rosters:
+// its longest idle is cut to a compact record first, a record is forgotten only after all of
+// that address's full rosters are cut, and another address's network is not touched.
+func TestIdleRostersFairShare(t *testing.T) {
+	ks := []*link.Keys{keys(t, 1), keys(t, 2), keys(t, 3), keys(t, 4), keys(t, 5)}
+	var rs [][]byte
+	for _, k := range ks {
+		rs = append(rs, roster(t, 1, k))
 	}
-	if h.s.networkOf(d.ID) == nil || idle(d) {
-		t.Fatal("the network in use was touched")
+	parsed, _ := link.ParseRoster(rs[0])
+	full, small := rosterCost(parsed), rosterCost(compactRoster(parsed))
+	h := start(t, func(c *Config) {
+		c.TrustProxy = 1
+		c.IdleRostersBytes = 3 * full
+	})
+	// The attacker's address holds networks 0 to 3, the other address network 4.
+	goIdle(t, h, h.registerFrom("198.51.100.7", ks[4], ks[4], rs[4]), ks[4].ID)
+	for i := range 4 {
+		goIdle(t, h, h.registerFrom("203.0.113.9", ks[i], ks[i], rs[i]), ks[i].ID)
+	}
+	// Five full rosters against room for three: each cut frees a roster less its record, so the
+	// attacker's three longest idle are cut, and only the attacker's.
+	got := func() []string {
+		var out []string
+		for _, k := range ks {
+			out = append(out, h.s.held(k.ID))
+		}
+		return out
+	}
+	if want := []string{"compact", "compact", "compact", "full", "full"}; !slices.Equal(got(), want) {
+		t.Fatalf("held %v, want %v", got(), want)
+	}
+	// Two more from the attacker: all its full rosters are cut before any record goes, then
+	// its records go, longest idle first; the other address's roster stays whole throughout.
+	for _, i := range []byte{6, 7} {
+		k := keys(t, i)
+		goIdle(t, h, h.registerFrom("203.0.113.9", k, k, roster(t, 1, k)), k.ID)
+	}
+	if g := got(); g[4] != "full" || slices.Contains(g[:4], "full") {
+		t.Fatalf("held %v", g)
 	}
 	h.s.idle.mu.Lock()
-	held := h.s.idle.bytes
+	bytes := h.s.idle.bytes
 	h.s.idle.mu.Unlock()
-	if held != int64(len(rb)+len(rc)) {
-		t.Fatalf("idle bytes %d", held)
+	if bytes > 3*full {
+		t.Fatalf("idle rosters hold %d bytes, over %d", bytes, 3*full)
 	}
-	// a comes back with its next registration; b, now the longest idle, makes room.
-	h.register(a, a, ra)
-	if h.s.networkOf(a.ID) == nil || idle(a) || !idle(b) || !idle(c) {
-		t.Fatal("a did not come back as it was")
+	t.Logf("full roster %d bytes, compact %d; held %v", full, small, got())
+}
+
+// A compact record still refuses a revoked member and admits a listed one; the primary
+// presenting the version it was cut from brings the roster back whole.
+func TestCompactRecordKeepsRevocation(t *testing.T) {
+	p, w, x := keys(t, 1), keys(t, 2), keys(t, 3)
+	r1, r2 := roster(t, 1, p, w, x), roster(t, 2, p, w) // version 2 revokes x
+	parsed, _ := link.ParseRoster(r2)
+	h := start(t, func(c *Config) { c.IdleRostersBytes = rosterCost(compactRoster(parsed)) })
+	goIdle(t, h, h.register(p, p, r2), p.ID)
+	if got := h.s.held(p.ID); got != "compact" {
+		t.Fatalf("held %s", got)
 	}
-	dc.sendBinary(frame(typeData, d.ID, []byte("still here")))
-	if f := dc.frame(); string(f[18:]) != "still here" {
-		t.Fatalf("got %q", f)
+	// x presents version 1, which lists it: the record of version 2 does not.
+	c := h.dial()
+	c.send(h.registerMsg(c, x, p.ID.String(), r1))
+	c.expectClose(4008)
+	// w presents version 1 too: listed, admitted, told version 2 exists.
+	c = h.dial()
+	c.send(h.registerMsg(c, w, p.ID.String(), r1))
+	if m := c.json(); m["type"] != "registered" || m["rosterVersion"] != float64(2) || m["roster"] != nil {
+		t.Fatalf("got %v", m)
+	}
+	h.register(p, p, r2)
+	if got := h.s.held(p.ID); got != "full" {
+		t.Fatalf("held %s after the primary came back", got)
 	}
 }

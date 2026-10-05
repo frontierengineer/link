@@ -30,7 +30,7 @@ The environment variables of section 9. Unset, every limit is off (a self-hosted
 | `LINK_IP_PENDING` | off | connections per IP address not registered yet; over it the upgrade is answered 429 |
 | `LINK_IP_CONNECTIONS` | off | connections per IP address in all; over it the upgrade is answered 429 |
 | `LINK_NETWORK_TTL` | `168h` | forget a network's roster after this long with nobody connected (Go duration or seconds) |
-| `LINK_IDLE_ROSTERS_BYTES` | off | rosters kept for networks nobody is connected to; beyond it the longest idle are forgotten first |
+| `LINK_IDLE_ROSTERS_BYTES` | off | memory for the rosters of networks nobody is connected to; beyond it, the address holding the most has its longest idle cut to a compact record (still refusing revoked members), then forgotten |
 | `LINK_PARK_IDLE` | `true` | on Linux, an idle connection holds no goroutine (its socket waits in epoll); `false` keeps a reader goroutine per connection. Not used with `LINK_TLS_CERT` |
 
 Three timings are fixed by the spec and settable only so tests can shorten them (Go duration

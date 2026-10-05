@@ -2,14 +2,16 @@ package relay
 
 import (
 	"bytes"
+	"container/list"
 	"crypto/ed25519"
 	"encoding/json"
 	"strconv"
+	"sync"
 	"time"
 
-	"github.com/frontierengineer/link/relay/internal/link"
+	"github.com/gobwas/ws"
 
-	"sync"
+	"github.com/frontierengineer/link/relay/internal/link"
 )
 
 // Routed frame layout (section 6).
@@ -23,32 +25,42 @@ const (
 	typeRefused     = 0x05
 	typePair        = 0x06
 	typeReset       = 0x07
+	typeControl     = 0x08 // as data; delivered as data
 )
 
 const maxClockSkewMs = 300000
 
+// Budgets per network (sections 4.3 and 9).
+const (
+	ctlRate    = 4096      // bytes per second of control read ahead of shaping
+	ctlBurst   = 128 << 10 // and its burst
+	usageEvery = 10 * time.Second
+	usageBurst = 3
+)
+
 // network is what the relay holds for one network: its newest valid roster, its connected
-// members, and its usage and shaping state.
+// members, and three small counters of its own (section 9).
 type network struct {
 	id link.ID
 
-	mu          sync.Mutex
-	roster      *link.Roster
-	members     map[link.ID]*conn
-	emptySince  time.Time
-	usage       *usage             // made on the network's first relayed byte
-	memberUsage map[link.ID]*usage // made on a member's first relayed byte
-	bucket      bucket
-	alertBand   int
-	alertSlowed bool
-	lastAlert   time.Time
-	alertTimer  *time.Timer
+	mu         sync.Mutex
+	roster     *link.Roster
+	members    map[link.ID]*conn
+	emptySince int64         // s.mono()
+	idleAt     *list.Element // in Server.idle while nobody is connected
+	idleSize   int64
+	hour       hourWindow // bytes charged over the last hour
+	rateTAT    int64      // the rate bucket, as a theoretical arrival time
+	ctlTAT     int64      // the control budget
+	usageTAT   int64      // the usage-ask budget
 }
 
-type helloMsg struct {
-	Type      string `json:"type"`
-	Version   int    `json:"version"`
-	Challenge string `json:"challenge"`
+// allowControl spends size bytes of the network's control budget, if it has them.
+func (n *network) allowControl(s *Server, size int) bool {
+	now := s.mono()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return allow(&n.ctlTAT, now, int64(size)*int64(time.Second)/ctlRate, ctlBurst*int64(time.Second)/ctlRate)
 }
 
 type registeredMsg struct {
@@ -58,7 +70,9 @@ type registeredMsg struct {
 	Roster        json.RawMessage `json:"roster,omitempty"` // the relay's, when newer than the node's
 }
 
-func (c *conn) handleText(data []byte) bool {
+// handleText handles a control message of wire bytes.
+func (c *conn) handleText(data []byte, wire int) bool {
+	c.charge(wire)
 	var env struct {
 		Type string `json:"type"`
 		ID   any    `json:"id"`
@@ -175,30 +189,31 @@ func (c *conn) admit(r *link.Roster, id link.ID, pub ed25519.PublicKey, now time
 		m := rr.Member(id)
 		return m != nil && bytes.Equal(m.Ed25519, pub)
 	}
-	s.mu.Lock()
-	n := s.networks[r.Network]
+	sh := s.netShard(r.Network)
+	sh.mu.Lock()
+	n := sh.m[r.Network]
 	if n == nil {
 		if !isMember(r) {
-			s.mu.Unlock()
+			sh.mu.Unlock()
 			c.closeWith(closeNotMember, "not a member", false)
 			return false
 		}
 		if !s.ipNetworks.allow(c.ip, now) {
-			s.mu.Unlock()
+			sh.mu.Unlock()
 			c.sendError("rate_limited", "too many new networks from this address", "")
 			c.closeWith(closeRateLimited, "rate limited", true)
 			return false
 		}
 		n = &network{id: r.Network, roster: r, members: map[link.ID]*conn{}}
-		s.networks[r.Network] = n
+		sh.m[r.Network] = n
 	}
 	n.mu.Lock()
-	s.mu.Unlock()
+	sh.mu.Unlock()
 	var evict []*conn
 	var newer json.RawMessage
 	switch {
 	case r.Version > n.roster.Version:
-		evict = n.adoptLocked(r)
+		evict = n.adoptLocked(r, s.mono())
 	case r.Version < n.roster.Version:
 		newer = n.roster.Raw
 	}
@@ -211,7 +226,12 @@ func (c *conn) admit(r *link.Roster, id link.ID, pub ed25519.PublicKey, now time
 		c.primary = id == n.id
 		// Queued before the connection is visible to senders, so it is the first thing sent.
 		c.sendJSON(registeredMsg{Type: "registered", Node: id.String(), RosterVersion: n.roster.Version, Roster: newer})
+		if c.ipPending {
+			s.ipConns.registered(c.ipc)
+			c.ipPending = false
+		}
 	}
+	s.syncIdleLocked(n)
 	n.mu.Unlock()
 	for _, e := range evict {
 		e.closeWith(closeNotMember, "not a member", false)
@@ -222,7 +242,7 @@ func (c *conn) admit(r *link.Roster, id link.ID, pub ed25519.PublicKey, now time
 	}
 
 	c.nc.SetReadDeadline(time.Time{})
-	c.origin = ""
+	c.origin, c.ip = "", ""
 	if old != nil && old != c {
 		old.closeWith(closeReplaced, "replaced by a newer connection", false)
 	}
@@ -230,7 +250,7 @@ func (c *conn) admit(r *link.Roster, id link.ID, pub ed25519.PublicKey, now time
 }
 
 // adoptLocked installs a newer roster and returns the connections of nodes it dropped.
-func (n *network) adoptLocked(r *link.Roster) []*conn {
+func (n *network) adoptLocked(r *link.Roster, now int64) []*conn {
 	n.roster = r
 	var evict []*conn
 	for id, mc := range n.members {
@@ -239,13 +259,8 @@ func (n *network) adoptLocked(r *link.Roster) []*conn {
 			evict = append(evict, mc)
 		}
 	}
-	for id := range n.memberUsage {
-		if r.Member(id) == nil {
-			delete(n.memberUsage, id)
-		}
-	}
 	if len(n.members) == 0 {
-		n.emptySince = time.Now()
+		n.emptySince = now
 	}
 	return evict
 }
@@ -282,14 +297,17 @@ func (c *conn) pushRoster(data []byte) {
 		}
 		return
 	}
-	evict := n.adoptLocked(r)
+	evict := n.adoptLocked(r, c.s.mono())
+	c.s.syncIdleLocked(n)
 	n.mu.Unlock()
 	for _, e := range evict {
 		e.closeWith(closeNotMember, "not a member", false)
 	}
 }
 
-func (c *conn) handleBinary(f []byte) bool {
+// handleBinary handles a routed frame of wire bytes; p has headroom in front of it.
+func (c *conn) handleBinary(p []byte, wire int) bool {
+	f := p[headroom:]
 	if len(f) < frameHeader || f[0] != frameVersion {
 		c.closeWith(closeBadRequest, "malformed frame", false)
 		return false
@@ -302,21 +320,23 @@ func (c *conn) handleBinary(f []byte) bool {
 			c.closeWith(closeBadRequest, "only pair frames on the channel while pairing", false)
 			return false
 		}
-		if dst := c.channel.primary; dst.sendBinary(f) {
+		if dst := c.channel.primary; dst.sendBinary(p) {
 			c.waitQueue(dst)
 		}
 		return true
 	case stateRegistered:
 		switch f[1] {
-		case typeInit, typeResp, typeData, typeRefused, typeReset:
-			c.route(f, peer)
+		case typeInit, typeResp, typeData, typeRefused, typeReset, typeControl:
+			c.route(p, peer, wire)
 			return true
 		case typePair:
+			// The primary's side of pairing is its network's traffic like any other.
+			c.charge(wire)
 			c.s.chmu.Lock()
 			ch := c.s.channels[peer]
 			c.s.chmu.Unlock()
-			if ch == nil || ch.primary != c || !ch.newcomer.sendBinary(f) {
-				c.sendBinary(unreachable(peer))
+			if ch == nil || ch.primary != c || !ch.newcomer.sendBinary(p) {
+				c.reply(ws.OpBinary, unreachable(peer))
 				return true
 			}
 			c.waitQueue(ch.newcomer)
@@ -327,116 +347,55 @@ func (c *conn) handleBinary(f []byte) bool {
 	return false
 }
 
+// unreachable is the relay's answer for a peer that is not connected, headroom in front.
 func unreachable(peer link.ID) []byte {
-	f := make([]byte, frameHeader)
+	p := make([]byte, headroom+frameHeader)
+	f := p[headroom:]
 	f[0], f[1] = frameVersion, typeUnreachable
 	copy(f[2:], peer[:])
-	return f
+	return p
 }
 
-// route forwards a frame to a connected member of the sender's network, with the peer field
-// rewritten to the sender, then holds the sender back for shaping and back-pressure.
-func (c *conn) route(f []byte, peer link.ID) {
-	n, now := c.network, time.Now()
+// route charges a frame to the sender's network, whether or not it can be delivered, and
+// forwards it to a connected member of that network with the peer field rewritten to the
+// sender (and control delivered as data), then holds the sender back for back-pressure.
+func (c *conn) route(p []byte, peer link.ID, wire int) {
+	f := p[headroom:]
+	n, now := c.network, c.s.mono()
 	n.mu.Lock()
 	dst := n.members[peer]
-	var wait time.Duration
-	if dst != nil {
-		wait = c.s.accountLocked(n, c.id, len(f), now)
-	}
+	wait := c.s.chargeLocked(n, wire, now)
 	n.mu.Unlock()
+	c.holdFor(now, wait)
 	copy(f[2:frameHeader], c.id[:])
-	if dst == nil || !dst.sendBinary(f) {
-		c.sendBinary(unreachable(peer))
+	if f[1] == typeControl {
+		f[1] = typeData
+	}
+	if dst == nil || !dst.sendBinary(p) {
+		c.reply(ws.OpBinary, unreachable(peer))
 		return
 	}
 	c.waitQueue(dst)
-	c.sleep(wait)
 }
 
-// accountLocked counts a relayed frame and returns how long its sender must wait for the
-// network's bucket: LINK_RATE_BPS, or LINK_TRICKLE_BPS once the hourly quota is spent.
-func (s *Server) accountLocked(n *network, from link.ID, size int, now time.Time) time.Duration {
-	if n.usage == nil {
-		n.usage = &usage{}
-	}
-	n.usage.add(size, now)
-	mu := n.memberUsage[from]
-	if mu == nil {
-		if n.memberUsage == nil {
-			n.memberUsage = map[link.ID]*usage{}
-		}
-		mu = &usage{}
-		n.memberUsage[from] = mu
-	}
-	mu.add(size, now)
+// chargeLocked counts size bytes against the network and returns how long its senders must
+// wait for its bucket: LINK_RATE_BPS, or LINK_TRICKLE_BPS once the hourly quota is spent.
+func (s *Server) chargeLocked(n *network, size int, now int64) time.Duration {
+	n.hour.add(uint64(size), now)
 	rate := s.cfg.RateBps
 	if _, slowed := s.quotaLocked(n, now); slowed {
 		rate = s.cfg.TrickleBps
 	}
-	wait := n.bucket.take(size, rate, now)
-	s.alertLocked(n, now)
-	return wait
+	return spend(&n.rateTAT, now, size, rate)
 }
 
-func (s *Server) quotaLocked(n *network, now time.Time) (used float64, slowed bool) {
+func (s *Server) quotaLocked(n *network, now int64) (used float64, slowed bool) {
 	q := s.cfg.QuotaBytesHour
 	if q <= 0 {
 		return 0, false
 	}
-	hour, _ := n.usage.totals(now)
-	used = float64(hour) / float64(q)
+	used = float64(n.hour.total(now)) / float64(q)
 	return used, used >= 1 && s.cfg.TrickleBps > 0
-}
-
-func alertBand(used float64) int {
-	switch {
-	case used >= 1:
-		return 4
-	case used >= 0.95:
-		return 3
-	case used >= 0.8:
-		return 2
-	case used >= 0.5:
-		return 1
-	}
-	return 0
-}
-
-type usageAlertMsg struct {
-	Type      string  `json:"type"`
-	QuotaUsed float64 `json:"quotaUsed"`
-	Slowed    bool    `json:"slowed"`
-}
-
-// alertLocked pushes usageAlert to the primary when quotaUsed has crossed 0.5, 0.8, 0.95 or
-// 1, or slowed has changed, since the last alert; at most once a second.
-func (s *Server) alertLocked(n *network, now time.Time) {
-	if s.cfg.QuotaBytesHour <= 0 {
-		return
-	}
-	used, slowed := s.quotaLocked(n, now)
-	band := alertBand(used)
-	if band == n.alertBand && slowed == n.alertSlowed {
-		return
-	}
-	p := n.members[n.id]
-	if p == nil {
-		return
-	}
-	if wait := n.lastAlert.Add(time.Second).Sub(now); wait > 0 {
-		if n.alertTimer == nil {
-			n.alertTimer = time.AfterFunc(wait, func() {
-				n.mu.Lock()
-				n.alertTimer = nil
-				s.alertLocked(n, time.Now())
-				n.mu.Unlock()
-			})
-		}
-		return
-	}
-	n.alertBand, n.alertSlowed, n.lastAlert = band, slowed, now
-	p.sendJSON(usageAlertMsg{Type: "usageAlert", QuotaUsed: used, Slowed: slowed})
 }
 
 type usageLimits struct {
@@ -447,28 +406,20 @@ type usageLimits struct {
 
 type usageNetwork struct {
 	BytesHour   uint64      `json:"bytesHour"`
-	BytesDay    uint64      `json:"bytesDay"`
 	Connections int         `json:"connections"`
 	Limits      usageLimits `json:"limits"`
 	QuotaUsed   float64     `json:"quotaUsed"`
 	Slowed      bool        `json:"slowed"`
 }
 
-type usageMember struct {
-	ID        string `json:"id"`
-	BytesHour uint64 `json:"bytesHour"`
-	BytesDay  uint64 `json:"bytesDay"`
-	Connected bool   `json:"connected"`
-}
-
 type usageMsg struct {
-	Type    string        `json:"type"`
-	ID      string        `json:"id"`
-	Network usageNetwork  `json:"network"`
-	Members []usageMember `json:"members"`
+	Type    string       `json:"type"`
+	ID      string       `json:"id"`
+	Network usageNetwork `json:"network"`
 }
 
-// usageRequest is section 4.3.
+// usageRequest is section 4.3: the primary's, within the network's ask budget, answered with
+// the network's totals.
 func (c *conn) usageRequest(data []byte) {
 	var m struct {
 		ID *string `json:"id"`
@@ -481,20 +432,19 @@ func (c *conn) usageRequest(data []byte) {
 		c.sendError("forbidden", "only the primary may ask for usage", *m.ID)
 		return
 	}
-	s, n, now := c.s, c.network, time.Now()
+	s, n, now := c.s, c.network, c.s.mono()
 	n.mu.Lock()
-	hour, day := n.usage.totals(now)
+	if !allow(&n.usageTAT, now, int64(usageEvery), usageBurst*int64(usageEvery)) {
+		n.mu.Unlock()
+		c.sendError("rate_limited", "usage asked too often", *m.ID)
+		return
+	}
 	used, slowed := s.quotaLocked(n, now)
 	resp := usageMsg{Type: "usage", ID: *m.ID, Network: usageNetwork{
-		BytesHour: hour, BytesDay: day, Connections: len(n.members),
+		BytesHour: n.hour.total(now), Connections: len(n.members),
 		Limits:    usageLimits{RateBps: s.cfg.RateBps, QuotaBytesHour: s.cfg.QuotaBytesHour, TrickleBps: s.cfg.TrickleBps},
 		QuotaUsed: used, Slowed: slowed,
-	}, Members: []usageMember{}}
-	for _, mem := range n.roster.Members {
-		h, d := n.memberUsage[mem.ID].totals(now)
-		_, connected := n.members[mem.ID]
-		resp.Members = append(resp.Members, usageMember{ID: mem.ID.String(), BytesHour: h, BytesDay: d, Connected: connected})
-	}
+	}}
 	n.mu.Unlock()
-	c.sendJSON(resp)
+	c.reply(ws.OpText, marshal(resp))
 }

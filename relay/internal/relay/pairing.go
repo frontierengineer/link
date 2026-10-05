@@ -47,9 +47,7 @@ func (c *conn) pair(data []byte) bool {
 		c.closeWith(closeRateLimited, "rate limited", true)
 		return false
 	}
-	s.mu.Lock()
-	n := s.networks[netID]
-	s.mu.Unlock()
+	n := s.networkOf(netID)
 	var p *conn
 	if n != nil {
 		n.mu.Lock()

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"reflect"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -47,113 +49,54 @@ func TestShapingSlowsANetwork(t *testing.T) {
 	t.Logf("shaped %v, unshaped %v", shaped, free)
 }
 
-func TestQuotaTrickleUsageAndAlerts(t *testing.T) {
+func TestQuotaTrickleAndUsage(t *testing.T) {
 	h := start(t, func(c *Config) {
 		c.QuotaBytesHour = 100_000
 		c.TrickleBps = 50_000
+		c.PingInterval = time.Hour // no pongs in the count
 	})
 	p, w, absent := keys(t, 1), keys(t, 2), keys(t, 3)
 	r := roster(t, 1, p, w, absent)
 	pc, wc := h.register(p, p, r), h.register(w, p, r)
 
-	var alerts []map[string]any
-	readFrames := func(n int) {
-		for n > 0 {
-			typ, b, err := pc.next(10 * time.Second)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if typ == websocket.BinaryMessage {
-				n--
-				continue
-			}
-			m := pc.json2(b)
-			if m["type"] != "usageAlert" {
-				t.Fatalf("got %v", m)
-			}
-			alerts = append(alerts, m)
-		}
-	}
 	// The quota: 100 kB goes at full speed.
+	const size = 10_000
 	began := time.Now()
 	for range 10 {
-		wc.sendBinary(frame(typeData, p.ID, make([]byte, 10_000-18)))
+		wc.sendBinary(frame(typeData, p.ID, make([]byte, size-18)))
 	}
-	readFrames(10)
+	for range 10 {
+		pc.frame()
+	}
 	if el := time.Since(began); el > 700*time.Millisecond {
 		t.Fatalf("within quota took %v", el)
 	}
 	// Then the trickle: 100 kB at 50 kB/s with one second of burst, at least a second.
 	began = time.Now()
 	for range 10 {
-		wc.sendBinary(frame(typeData, p.ID, make([]byte, 10_000-18)))
+		wc.sendBinary(frame(typeData, p.ID, make([]byte, size-18)))
 	}
-	readFrames(10)
+	for range 10 {
+		pc.frame()
+	}
 	if el := time.Since(began); el < 800*time.Millisecond {
 		t.Fatalf("over quota took only %v", el)
 	}
 
-	pc.send(map[string]any{"type": "usage", "id": "u1"})
-	var u map[string]any
-	for u == nil {
-		m := pc.json()
-		switch m["type"] {
-		case "usage":
-			u = m
-		case "usageAlert":
-			alerts = append(alerts, m)
-		default:
-			t.Fatalf("got %v", m)
-		}
+	ask := `{"type":"usage","id":"u1"}`
+	pc.ws.WriteMessage(websocket.TextMessage, []byte(ask))
+	u := pc.json()
+	// Exactly what crossed: every frame at its size on the wire, and the ask itself.
+	charged := 20*wire(size) + wire(len(ask))
+	want := map[string]any{"type": "usage", "id": "u1", "network": map[string]any{
+		"bytesHour": float64(charged), "connections": float64(2), "quotaUsed": float64(charged) / 100_000, "slowed": true,
+		"limits": map[string]any{"rateBps": float64(0), "quotaBytesHour": float64(100_000), "trickleBps": float64(50_000)},
+	}}
+	if !reflect.DeepEqual(u, want) {
+		t.Fatalf("usage:\n got %v\nwant %v", u, want)
 	}
-	nw := u["network"].(map[string]any)
-	if u["id"] != "u1" || nw["bytesHour"] != float64(200_000) || nw["bytesDay"] != float64(200_000) ||
-		nw["connections"] != float64(2) || nw["quotaUsed"] != float64(2) || nw["slowed"] != true {
-		t.Fatalf("usage: %v", u)
-	}
-	lim := nw["limits"].(map[string]any)
-	if lim["rateBps"] != float64(0) || lim["quotaBytesHour"] != float64(100_000) || lim["trickleBps"] != float64(50_000) {
-		t.Fatalf("limits: %v", lim)
-	}
-	members := u["members"].([]any)
-	if len(members) != 3 {
-		t.Fatalf("members: %v", members)
-	}
-	for _, mv := range members {
-		m := mv.(map[string]any)
-		switch m["id"] {
-		case w.ID.String():
-			if m["bytesHour"] != float64(200_000) || m["bytesDay"] != float64(200_000) || m["connected"] != true {
-				t.Fatalf("w: %v", m)
-			}
-		case p.ID.String():
-			if m["bytesHour"] != float64(0) || m["connected"] != true {
-				t.Fatalf("p: %v", m)
-			}
-		case absent.ID.String():
-			if m["connected"] != false {
-				t.Fatalf("absent: %v", m)
-			}
-		default:
-			t.Fatalf("unknown member %v", m)
-		}
-	}
-	// The alerts: at most one a second, the last saying the network is slowed. Wait for the
-	// one the once-a-second rule held back.
-	deadline := time.Now().Add(3 * time.Second)
-	for len(alerts) == 0 || alerts[len(alerts)-1]["slowed"] != true {
-		if time.Now().After(deadline) {
-			t.Fatalf("alerts: %v", alerts)
-		}
-		m := pc.json()
-		if m["type"] == "usageAlert" {
-			alerts = append(alerts, m)
-		}
-	}
-	if alerts[0]["quotaUsed"].(float64) < 0.5 {
-		t.Fatalf("first alert %v", alerts[0])
-	}
-	t.Logf("alerts: %v", alerts)
+	// Nothing is pushed: no alert came, and none comes.
+	pc.quiet(300 * time.Millisecond)
 
 	// Usage is the primary's only.
 	wc.send(map[string]any{"type": "usage", "id": "u2"})
@@ -171,10 +114,11 @@ func (c *client) json2(b []byte) map[string]any {
 	return m
 }
 
-func TestUsageWithoutLimits(t *testing.T) {
-	h := start(t, nil)
-	p, w := keys(t, 1), keys(t, 2)
-	r := roster(t, 1, p, w)
+// Everything a member sends is charged, delivered or not, and so is every answer it is sent.
+func TestUsageCountsEverything(t *testing.T) {
+	h := start(t, func(c *Config) { c.PingInterval = time.Hour })
+	p, w, absent := keys(t, 1), keys(t, 2), keys(t, 3)
+	r := roster(t, 1, p, w, absent)
 	pc, wc := h.register(p, p, r), h.register(w, p, r)
 	for range 3 {
 		wc.sendBinary(frame(typeData, p.ID, make([]byte, 100)))
@@ -182,35 +126,71 @@ func TestUsageWithoutLimits(t *testing.T) {
 	}
 	pc.sendBinary(frame(typeData, w.ID, make([]byte, 2)))
 	wc.frame()
-	pc.send(map[string]any{"type": "usage", "id": "x"})
-	u := pc.json()
-	nw := u["network"].(map[string]any)
-	if nw["bytesHour"] != float64(3*118+20) || nw["quotaUsed"] != float64(0) || nw["slowed"] != false {
-		t.Fatalf("usage %v", u)
+	// To a member that is not connected: the frame, and the unreachable answer.
+	pc.sendBinary(frame(typeData, absent.ID, make([]byte, 50)))
+	if f := pc.frame(); f[1] != typeUnreachable {
+		t.Fatalf("got %x", f)
 	}
-	for _, mv := range u["members"].([]any) {
-		m := mv.(map[string]any)
-		want := float64(3 * 118)
-		if m["id"] == p.ID.String() {
-			want = 20
-		}
-		if m["bytesHour"] != want {
-			t.Fatalf("member %v", m)
-		}
+	// A control message the relay does not know, and its error.
+	dance := `{"type":"dance"}`
+	pc.ws.WriteMessage(websocket.TextMessage, []byte(dance))
+	_, answer, _ := pc.next(5 * time.Second)
+	// A ping, and its pong.
+	pc.ws.WriteControl(websocket.PingMessage, []byte("hi"), time.Now().Add(time.Second))
+	// (gorilla consumes the pong while reading the usage answer.)
+	ask := `{"type":"usage","id":"x"}`
+	pc.ws.WriteMessage(websocket.TextMessage, []byte(ask))
+	_, answered, _ := pc.next(5 * time.Second)
+	u := pc.json2(answered)
+	want := 3*wire(118) + wire(20) + wire(68) + wireSize(18) + wire(len(dance)) + wireSize(len(answer)) +
+		wire(2) + wireSize(2) + wire(len(ask))
+	if got := u["network"].(map[string]any)["bytesHour"]; got != float64(want) {
+		t.Fatalf("bytesHour %v, want %d", got, want)
+	}
+	// The answer to that ask counts too.
+	pc.ws.WriteMessage(websocket.TextMessage, []byte(ask))
+	want += wireSize(len(answered)) + wire(len(ask))
+	if got := pc.json()["network"].(map[string]any)["bytesHour"]; got != float64(want) {
+		t.Fatalf("bytesHour %v, want %d", got, want)
 	}
 }
 
-// A recipient that does not read: its queue fills to LINK_QUEUE_BYTES and the relay stops
-// reading the sender, which then cannot write; nothing is dropped once it reads again.
+// Asks are limited per network: three at once, then refused with the request's id, not queued.
+func TestUsageAskBudget(t *testing.T) {
+	h := start(t, nil)
+	p := keys(t, 1)
+	pc := h.register(p, p, roster(t, 1, p))
+	for i := range usageBurst {
+		pc.send(map[string]any{"type": "usage", "id": strconv.Itoa(i)})
+		if m := pc.json(); m["type"] != "usage" || m["id"] != strconv.Itoa(i) {
+			t.Fatalf("ask %d: %v", i, m)
+		}
+	}
+	pc.send(map[string]any{"type": "usage", "id": "over"})
+	if m := pc.json(); m["type"] != "error" || m["code"] != "rate_limited" || m["id"] != "over" {
+		t.Fatalf("got %v", m)
+	}
+	// The budget is the network's: the primary reconnecting does not refill it.
+	pc2 := h.register(p, p, roster(t, 1, p))
+	pc2.send(map[string]any{"type": "usage", "id": "again"})
+	if m := pc2.json(); m["code"] != "rate_limited" {
+		t.Fatalf("got %v", m)
+	}
+}
+
+// A recipient that does not read: the relay stops reading its sender once the recipient's
+// queue passes LINK_QUEUE_BYTES; with the default 0, as soon as a frame is not taken by the
+// recipient's socket, so the relay holds at most one frame for it. Nothing is dropped once it
+// reads again.
 func TestBackPressurePausesTheSender(t *testing.T) {
 	const frames, size = 400, 64 << 10
-	run := func(queue int64) (stalledAt int64, h *harness, pc *client, sent *atomic.Int64) {
-		h = start(t, func(c *Config) { c.QueueBytes = queue })
+	for _, queue := range []int64{0, 256 << 10} {
+		h := start(t, func(c *Config) { c.QueueBytes = queue })
 		p, w := keys(t, 1), keys(t, 2)
 		r := roster(t, 1, p, w)
-		pc = h.register(p, p, r, smallBuffers)
+		pc := h.register(p, p, r, smallBuffers)
 		wc := h.register(w, p, r, smallBuffers)
-		sent = &atomic.Int64{}
+		var sent atomic.Int64
 		go func() {
 			for i := range frames {
 				body := make([]byte, size-18)
@@ -222,38 +202,32 @@ func TestBackPressurePausesTheSender(t *testing.T) {
 			}
 		}()
 		// Wait until the sender stops making progress (or finishes).
-		last, still := int64(-1), time.Now()
+		last, still, most := int64(-1), time.Now(), int64(0)
 		for time.Since(still) < time.Second && sent.Load() < frames {
 			if n := sent.Load(); n != last {
 				last, still = n, time.Now()
 			}
-			if q := h.s.queuedFor(p.ID, p.ID); queue > 0 && q > queue+size {
-				t.Fatalf("queue for the recipient reached %d bytes", q)
+			most = max(most, h.s.queuedFor(p.ID, p.ID))
+			time.Sleep(5 * time.Millisecond)
+		}
+		if most > queue+int64(wireSize(size)) {
+			t.Fatalf("queue %d: the recipient's queue reached %d bytes", queue, most)
+		}
+		stalled := sent.Load()
+		if stalled >= frames {
+			t.Fatalf("queue %d: the sender was never paused", queue)
+		}
+		t.Logf("queue %d: sender paused after %d of %d frames (%d MB in kernel buffers), relay queue peaked at %d", queue, stalled, frames, stalled*size>>20, most)
+		// Reading resumes the sender, and every frame arrives in order.
+		for i := range frames {
+			f := pc.frame()
+			if len(f) != size || binary.BigEndian.Uint32(f[18:]) != uint32(i) {
+				t.Fatalf("frame %d: %d bytes, index %d", i, len(f), binary.BigEndian.Uint32(f[18:]))
 			}
-			time.Sleep(10 * time.Millisecond)
 		}
-		return sent.Load(), h, pc, sent
-	}
-
-	// Without a threshold the relay keeps reading: the sender finishes though nobody reads.
-	if n, _, _, _ := run(0); n != frames {
-		t.Fatalf("without back-pressure the sender stalled at %d frames", n)
-	}
-
-	stalled, _, pc, sent := run(256 << 10)
-	if stalled >= frames {
-		t.Fatal("the sender was never paused")
-	}
-	t.Logf("sender paused after %d of %d frames (%d MB)", stalled, frames, stalled*size>>20)
-	// Reading resumes the sender, and every frame arrives in order.
-	for i := range frames {
-		f := pc.frame()
-		if len(f) != size || binary.BigEndian.Uint32(f[18:]) != uint32(i) {
-			t.Fatalf("frame %d: %d bytes, index %d", i, len(f), binary.BigEndian.Uint32(f[18:]))
+		if sent.Load() != frames {
+			t.Fatalf("sent %d", sent.Load())
 		}
-	}
-	if sent.Load() != frames {
-		t.Fatalf("sent %d", sent.Load())
 	}
 }
 
@@ -347,7 +321,9 @@ func TestPingClosesASilentPeer(t *testing.T) {
 	if code := silent.closeCode(3 * time.Second); code != websocket.CloseAbnormalClosure {
 		t.Fatalf("closed %d", code)
 	}
-	if el := time.Since(began); el < 300*time.Millisecond {
+	// Pinged at most an interval after registering, it is dropped once the next ping finds
+	// the first unanswered: one to two intervals in.
+	if el := time.Since(began); el < 190*time.Millisecond {
 		t.Fatalf("dropped after %v", el)
 	}
 	var ne net.Error
@@ -376,34 +352,35 @@ func TestShutdownClosesGoingAway(t *testing.T) {
 	}
 }
 
-// A peer that sends to absent members but never reads its unreachable answers is paused
-// once its own queue passes the threshold.
+// A peer that sends to absent members but never reads its unreachable answers stops being
+// read once its own answers queued in the relay pass 64 KiB.
 func TestBackPressureOnAnswersToTheSender(t *testing.T) {
-	h := start(t, func(c *Config) { c.QueueBytes = 64 << 10 })
+	h := start(t, nil)
 	p, w := keys(t, 1), keys(t, 2)
 	pc := h.register(p, p, roster(t, 1, p, w), smallBuffers)
-	var sent atomic.Int64
+	c := h.s.networkOf(p.ID).members[p.ID]
 	go func() {
 		f := frame(typeData, w.ID, nil)
-		for range 1_000_000 {
+		for range 10_000_000 {
 			if pc.ws.WriteMessage(websocket.BinaryMessage, f) != nil {
 				return
 			}
-			sent.Add(1)
 		}
 	}()
-	last, still := int64(-1), time.Now()
-	for time.Since(still) < time.Second {
-		if n := sent.Load(); n != last {
-			last, still = n, time.Now()
-		}
-		if q := h.s.queuedFor(p.ID, p.ID); q > 64<<10+18 {
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		c.wmu.Lock()
+		q, r := c.queued, c.replies
+		c.wmu.Unlock()
+		if q > int64(replySlack+wireSize(18)) {
 			t.Fatalf("own queue reached %d bytes", q)
 		}
-		time.Sleep(10 * time.Millisecond)
+		if r > replySlack && c.paused.Load() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("never paused: %d bytes of answers queued", r)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if last >= 1_000_000 {
-		t.Fatal("never paused")
-	}
-	t.Logf("paused after %d frames", last)
 }

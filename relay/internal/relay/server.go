@@ -7,8 +7,10 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,19 +23,26 @@ import (
 
 const shards = 64
 
+// connKeys numbers connections across every Server in the process, so a poller event that
+// strays to another server's set (a closed descriptor number reused) finds nothing there.
+var connKeys atomic.Uint64
+
 // Server is a relay. Create it with New, run it with Serve, stop it with Shutdown.
 type Server struct {
-	cfg Config
+	cfg   Config
+	epoch time.Time // mono's zero
 
-	mu       sync.Mutex // guards networks; taken before any network.mu
-	networks map[link.ID]*network
+	nets [shards]netShard
 
 	chmu     sync.Mutex // guards channels and every conn.pairs
 	channels map[link.ID]*channel
 
-	shard  [shards]connShard
-	nextID atomic.Uint64
-	conns  sync.WaitGroup
+	shard [shards]connShard
+	conns sync.WaitGroup
+
+	idle    idleRosters
+	ipConns *ipConns
+	poll    *poller // nil: every connection keeps a reader goroutine
 
 	ipRegister, ipPair, ipNetworks *ipLimiter
 
@@ -46,22 +55,38 @@ type Server struct {
 
 type connShard struct {
 	mu sync.Mutex
-	m  map[*conn]struct{}
+	m  map[uint64]*conn
+}
+
+// netShard holds the networks whose id starts with its index; its mu is taken before any
+// network.mu.
+type netShard struct {
+	mu sync.Mutex
+	m  map[link.ID]*network
 }
 
 // New makes a relay and starts its timers.
 func New(cfg Config) *Server {
 	s := &Server{
 		cfg:        cfg,
-		networks:   map[link.ID]*network{},
+		epoch:      time.Now(),
 		channels:   map[link.ID]*channel{},
 		ipRegister: newIPLimiter(cfg.IPRegisterPerMin, time.Minute),
 		ipPair:     newIPLimiter(cfg.IPPairPerMin, time.Minute),
 		ipNetworks: newIPLimiter(cfg.IPNetworksPerHour, time.Hour),
+		ipConns:    newIPConns(cfg.IPPending, cfg.IPConnections),
 		stop:       make(chan struct{}),
 	}
 	for i := range s.shard {
-		s.shard[i].m = map[*conn]struct{}{}
+		s.shard[i].m = map[uint64]*conn{}
+		s.nets[i].m = map[link.ID]*network{}
+	}
+	if cfg.ParkIdle && cfg.TLSCert == "" {
+		p, err := newPoller(s)
+		if err != nil && !errors.Is(err, errNoPoller) {
+			log.Printf("link-relay: idle connections keep a goroutine each: %v", err)
+		}
+		s.poll = p
 	}
 	go s.pingLoop()
 	go s.janitorLoop()
@@ -85,6 +110,8 @@ func (s *Server) Serve(ln net.Listener) error {
 	hs := &http.Server{
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes:    16 << 10, // an upgrade request is a few hundred bytes
+
 		// WebSockets need HTTP/1.1; never negotiate h2.
 		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
 	}
@@ -121,27 +148,62 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.eachConn(func(c *conn) { c.nc.Close() })
 		err = ctx.Err()
 	}
-	s.stopOnce.Do(func() { close(s.stop) })
+	s.stopOnce.Do(func() {
+		close(s.stop)
+		s.poll.close()
+	})
 	return err
 }
 
+// mono is the relay's monotonic clock, in nanoseconds since New.
+func (s *Server) mono() int64 { return int64(time.Since(s.epoch)) }
+
+// eachConn calls f for every connection, one shard at a time, outside the shard's lock.
 func (s *Server) eachConn(f func(*conn)) {
-	var all []*conn
+	var batch []*conn
 	for i := range s.shard {
-		sh := &s.shard[i]
-		sh.mu.Lock()
-		for c := range sh.m {
-			all = append(all, c)
+		batch = s.shardConns(i, batch)
+		for _, c := range batch {
+			f(c)
 		}
-		sh.mu.Unlock()
-	}
-	for _, c := range all {
-		f(c)
 	}
 }
 
-func (s *Server) shardOf(c *conn) *connShard {
-	return &s.shard[c.shardIx]
+// shardConns copies shard i's connections into batch, reusing it.
+func (s *Server) shardConns(i int, batch []*conn) []*conn {
+	clear(batch)
+	batch = batch[:0]
+	sh := &s.shard[i]
+	sh.mu.Lock()
+	for _, c := range sh.m {
+		batch = append(batch, c)
+	}
+	sh.mu.Unlock()
+	return batch
+}
+
+func (s *Server) shardOf(key uint64) *connShard {
+	return &s.shard[key%shards]
+}
+
+// lookup finds a connection by its key (for the poller).
+func (s *Server) lookup(key uint64) *conn {
+	sh := s.shardOf(key)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	return sh.m[key]
+}
+
+func (s *Server) netShard(id link.ID) *netShard {
+	return &s.nets[id[0]%shards]
+}
+
+// networkOf finds a network the relay holds.
+func (s *Server) networkOf(id link.ID) *network {
+	sh := s.netShard(id)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+	return sh.m[id]
 }
 
 func (s *Server) upgrade(w http.ResponseWriter, r *http.Request) {
@@ -151,25 +213,34 @@ func (s *Server) upgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	origin := s.originOf(r)
 	ip := s.clientIP(r)
-	nc, rw, _, err := ws.UpgradeHTTP(r, w)
-	if err != nil {
+	// Refused before the upgrade, so an address over its limits costs one HTTP answer.
+	ipc, ok := s.ipConns.acquire(ip)
+	if !ok {
+		http.Error(w, "too many connections from this address", http.StatusTooManyRequests)
 		return
 	}
-	c := &conn{s: s, nc: nc, r: nc, ip: ip, origin: origin, done: make(chan struct{})}
+	nc, rw, _, err := ws.UpgradeHTTP(r, w)
+	if err != nil {
+		s.ipConns.release(ipc, true)
+		return
+	}
+	c := &conn{s: s, nc: nc, ip: ip, ipc: ipc, ipPending: true, origin: origin, done: make(chan struct{})}
+	c.rc = rawConnOf(nc)
 	if rw != nil && rw.Reader.Buffered() > 0 {
 		early, _ := rw.Reader.Peek(rw.Reader.Buffered())
-		c.r = io.MultiReader(bytes.NewReader(bytes.Clone(early)), nc)
+		c.early = bytes.Clone(early)
 	}
 	rand.Read(c.challenge[:])
-	c.shardIx = uint8(s.nextID.Add(1) % shards)
-	sh := s.shardOf(c)
+	c.key = connKeys.Add(1)
+	sh := s.shardOf(c.key)
 	sh.mu.Lock()
 	if s.closing.Load() {
 		sh.mu.Unlock()
 		nc.Close()
+		s.ipConns.release(ipc, true)
 		return
 	}
-	sh.m[c] = struct{}{}
+	sh.m[c.key] = c
 	s.conns.Add(1)
 	sh.mu.Unlock()
 	// A fresh goroutine, so the HTTP server's per-connection state and buffers, which live
@@ -194,20 +265,44 @@ func (s *Server) originOf(r *http.Request) string {
 	return strings.Clone(host)
 }
 
+// clientIP is the key the per-IP limits count a request under (section 9): the peer's
+// address, or with LINK_TRUST_PROXY at n, the n-th X-Forwarded-For entry from the right,
+// which the outermost trusted proxy wrote; entries further left are the client's own words.
+// IPv6 addresses count by their /64, which one subscriber usually holds whole.
 func (s *Server) clientIP(r *http.Request) string {
-	if s.cfg.TrustProxy {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			first, _, _ := strings.Cut(xff, ",")
-			if ip := strings.TrimSpace(first); ip != "" {
-				return strings.Clone(ip)
+	if n := s.cfg.TrustProxy; n > 0 {
+		var hops []string
+		for _, h := range r.Header.Values("X-Forwarded-For") {
+			hops = append(hops, strings.Split(h, ",")...)
+		}
+		if len(hops) > 0 {
+			if a, ok := parseAddr(hops[max(0, len(hops)-n)]); ok {
+				return limiterKey(a)
 			}
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return strings.Clone(r.RemoteAddr)
+	if a, ok := parseAddr(r.RemoteAddr); ok {
+		return limiterKey(a)
 	}
-	return strings.Clone(host)
+	return strings.Clone(r.RemoteAddr)
+}
+
+// parseAddr reads an address, with or without a port.
+func parseAddr(v string) (netip.Addr, bool) {
+	v = strings.TrimSpace(v)
+	if ap, err := netip.ParseAddrPort(v); err == nil {
+		return ap.Addr(), true
+	}
+	a, err := netip.ParseAddr(v)
+	return a, err == nil
+}
+
+func limiterKey(a netip.Addr) string {
+	a = a.Unmap().WithZone("")
+	if a.Is4() {
+		return a.String()
+	}
+	return netip.PrefixFrom(a, 64).Masked().String()
 }
 
 func (s *Server) unregister(c *conn) {
@@ -216,11 +311,14 @@ func (s *Server) unregister(c *conn) {
 		if n.members[c.id] == c {
 			delete(n.members, c.id)
 			if len(n.members) == 0 {
-				n.emptySince = time.Now()
+				n.emptySince = s.mono()
 			}
 		}
+		s.syncIdleLocked(n)
 		n.mu.Unlock()
+		s.trimIdle()
 	}
+	s.ipConns.release(c.ipc, c.ipPending)
 	if ch := c.channel; ch != nil {
 		s.endChannel(ch, true, false) // the newcomer left
 	}
@@ -233,41 +331,43 @@ func (s *Server) unregister(c *conn) {
 	for _, ch := range owned {
 		s.endChannel(ch, false, true) // the primary left
 	}
-	sh := s.shardOf(c)
+	sh := s.shardOf(c.key)
 	sh.mu.Lock()
-	delete(sh.m, c)
+	delete(sh.m, c.key)
 	sh.mu.Unlock()
 }
 
-// pingLoop sends a WebSocket ping to every connection each interval and drops one that has
-// not answered the previous ping (section 9).
+// pingLoop pings every connection once each interval and drops one that has not answered
+// the previous ping (section 9). It visits one shard per tick, so the pings of a large relay
+// are spread over the interval rather than sent in one burst; a ping is written inline.
 func (s *Server) pingLoop() {
-	t := time.NewTicker(s.cfg.PingInterval)
+	t := time.NewTicker(max(time.Millisecond, s.cfg.PingInterval/shards))
 	defer t.Stop()
-	for {
+	var batch []*conn
+	for i := 0; ; i = (i + 1) % shards {
 		select {
 		case <-s.stop:
 			return
 		case <-t.C:
 		}
-		s.eachConn(func(c *conn) {
+		batch = s.shardConns(i, batch)
+		for _, c := range batch {
 			if c.paused.Load() {
-				return // its pong may be sitting unread behind frames we are holding back
+				continue // its pong may be sitting unread behind frames we are holding back
 			}
 			if c.awaitingPong.Swap(true) {
 				c.abort()
-				return
+				continue
 			}
-			c.enqueue(outFrame{op: ws.OpPing})
-		})
+			c.ping()
+		}
 	}
 }
 
-// janitorLoop forgets idle networks after LINK_NETWORK_TTL, forgets rate-limit state that
-// has refilled, and re-evaluates quota alerts as the rolling hour moves on.
+// janitorLoop forgets idle networks after LINK_NETWORK_TTL and forgets rate-limit state that
+// has refilled. It takes one network shard's lock at a time.
 func (s *Server) janitorLoop() {
-	every := min(time.Second, max(10*time.Millisecond, s.cfg.NetworkTTL/4))
-	t := time.NewTicker(every)
+	t := time.NewTicker(min(time.Minute, max(10*time.Millisecond, s.cfg.NetworkTTL/4)))
 	defer t.Stop()
 	lastSweep := time.Now()
 	for {
@@ -276,26 +376,26 @@ func (s *Server) janitorLoop() {
 			return
 		case <-t.C:
 		}
-		now := time.Now()
-		s.mu.Lock()
-		for id, n := range s.networks {
-			n.mu.Lock()
-			if len(n.members) == 0 && now.Sub(n.emptySince) >= s.cfg.NetworkTTL {
-				delete(s.networks, id)
-				if n.alertTimer != nil {
-					n.alertTimer.Stop()
+		now := s.mono()
+		ttl := int64(s.cfg.NetworkTTL)
+		for i := range s.nets {
+			sh := &s.nets[i]
+			sh.mu.Lock()
+			for id, n := range sh.m {
+				n.mu.Lock()
+				if len(n.members) == 0 && now-n.emptySince >= ttl {
+					delete(sh.m, id)
+					s.dropIdleLocked(n)
 				}
-			} else if s.cfg.QuotaBytesHour > 0 {
-				s.alertLocked(n, now)
+				n.mu.Unlock()
 			}
-			n.mu.Unlock()
+			sh.mu.Unlock()
 		}
-		s.mu.Unlock()
-		if now.Sub(lastSweep) >= time.Minute {
-			lastSweep = now
-			s.ipRegister.sweep(now)
-			s.ipPair.sweep(now)
-			s.ipNetworks.sweep(now)
+		if wall := time.Now(); wall.Sub(lastSweep) >= time.Minute {
+			lastSweep = wall
+			s.ipRegister.sweep(wall)
+			s.ipPair.sweep(wall)
+			s.ipNetworks.sweep(wall)
 		}
 	}
 }

@@ -5,7 +5,7 @@
     "keys: seed -> HKDF-derived Ed25519 seed and key, clamped X25519 private key and its public key, node id (b32 of the first 16 bytes of SHA-256(ed25519)) and its raw bytes in hex.",
     "rosters: roster is the full signed roster in JCS form. For signed cases jcs is JCS(roster without signature), signingInput is UTF-8(\"frontier-link/1/roster\") || jcs, signature is the Ed25519 signature. valid is whether a relay or member must find it valid (section 3).",
     "registrations: message is lenStr(\"frontier-link/1/register\") || lenStr(network) || lenStr(node) || challenge || u64be(ts) || lenStr(origin); sig is the node's Ed25519 signature over it.",
-    "frames: a routed frame (hex) as a member sends it and as the relay delivers it, with the peer field rewritten to the sender's raw id."
+    "frames: a routed frame (hex) as a member sends it and as the relay delivers it, with the peer field rewritten to the sender's raw id (and control, type 8, delivered as data, type 3)."
   ],
   "keys": [
     {
@@ -607,6 +607,11 @@
       "description": "a frame for seed 2, which is not connected, and the relay's unreachable answer (the peer field names seed 2)",
       "sent": "010110a4fedaa33c9e89349eed01240cd55600000001",
       "delivered": "010410a4fedaa33c9e89349eed01240cd556"
+    },
+    {
+      "description": "control from seed 1 to seed 0 (type 8), delivered as data (type 3): same body, peer rewritten",
+      "sent": "010812ca0b969c22fea3a9258e46c3952750000000070c0afe",
+      "delivered": "0103dbc38fcadfccbe069645dfe24a247b82000000070c0afe"
     }
   ]
 }

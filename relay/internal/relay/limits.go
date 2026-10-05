@@ -61,76 +61,136 @@ func (l *ipLimiter) sweep(now time.Time) {
 	}
 }
 
-// bucket is a byte-rate token bucket holding at most one second of tokens. It may go into
-// debt: a frame is always relayed whole, and the sender then waits the debt off.
-type bucket struct {
-	tokens float64
-	last   time.Time
+// ipConns counts each address's open connections, and those not registered yet (pairing
+// newcomers among them), against LINK_IP_CONNECTIONS and LINK_IP_PENDING (section 9). A nil
+// ipConns (both off) counts nothing.
+type ipConns struct {
+	pending, total int32
+	mu             sync.Mutex
+	m              map[string]*ipCount
 }
 
-// take spends n bytes at rate bytes per second and returns how long the sender must wait.
-func (b *bucket) take(n int, rate int64, now time.Time) time.Duration {
+// ipCount is one address's connections; each conn holds its address's, and whether it is
+// still one of the pending.
+type ipCount struct {
+	key            string
+	pending, total int32
+}
+
+func newIPConns(pending, total int) *ipConns {
+	if pending <= 0 && total <= 0 {
+		return nil
+	}
+	return &ipConns{pending: int32(pending), total: int32(total), m: map[string]*ipCount{}}
+}
+
+// acquire counts a new, unregistered connection from ip, unless that takes the address over
+// a limit.
+func (l *ipConns) acquire(ip string) (*ipCount, bool) {
+	if l == nil {
+		return nil, true
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a := l.m[ip]
+	if a == nil {
+		a = &ipCount{key: ip}
+	}
+	if l.pending > 0 && a.pending >= l.pending || l.total > 0 && a.total >= l.total {
+		return nil, false
+	}
+	a.pending++
+	a.total++
+	l.m[ip] = a
+	return a, true
+}
+
+// registered moves a connection of a out of the pending.
+func (l *ipConns) registered(a *ipCount) {
+	if l == nil || a == nil {
+		return
+	}
+	l.mu.Lock()
+	a.pending--
+	l.mu.Unlock()
+}
+
+// release ends a connection of a, still pending or not.
+func (l *ipConns) release(a *ipCount, pending bool) {
+	if l == nil || a == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	a.total--
+	if pending {
+		a.pending--
+	}
+	if a.total <= 0 {
+		delete(l.m, a.key)
+	}
+}
+
+// spend takes size bytes from a rate bucket of rate bytes per second holding one second of
+// burst, kept as one theoretical arrival time (GCRA) on the relay's monotonic clock, and
+// returns how long the sender must wait. The bucket may go into debt: a frame is always
+// relayed whole, and its sender then waits the debt off.
+func spend(tat *int64, now int64, size int, rate int64) time.Duration {
 	if rate <= 0 {
 		return 0
 	}
-	r := float64(rate)
-	if b.last.IsZero() {
-		b.tokens = r
-	} else {
-		b.tokens = min(r, b.tokens+now.Sub(b.last).Seconds()*r)
-	}
-	b.last = now
-	b.tokens -= float64(n)
-	if b.tokens >= 0 {
-		return 0
-	}
-	return time.Duration(-b.tokens / r * float64(time.Second))
+	t := max(*tat, now) + int64(size)*int64(time.Second)/rate
+	*tat = t
+	return time.Duration(t - now - int64(time.Second))
 }
 
-// usage counts bytes over a rolling hour (sixty one-minute slots) and a rolling day
-// (twenty-four one-hour slots).
-type usage struct {
-	minutes [60]uint64
-	hours   [24]uint64
-	minute  int64 // the minute the newest slot belongs to
-	hour    int64
+// allow spends cost from a budget that refills one unit of time per unit of time and holds
+// burst, kept as one theoretical arrival time: false, and nothing spent, when it lacks it.
+func allow(tat *int64, now, cost, burst int64) bool {
+	t := max(*tat, now) + cost
+	if t-now > burst {
+		return false
+	}
+	*tat = t
+	return true
 }
 
-func (u *usage) advance(now time.Time) {
-	m, h := now.Unix()/60, now.Unix()/3600
-	if d := m - u.minute; d >= 60 || d < 0 {
-		u.minutes = [60]uint64{}
+const (
+	hourSlots = 12
+	slotSpan  = int64(5 * time.Minute)
+)
+
+// hourWindow counts bytes over the last hour in twelve five-minute slots, with their sum.
+type hourWindow struct {
+	slots [hourSlots]uint64
+	sum   uint64
+	step  int64 // the five-minute step the newest slot belongs to
+}
+
+func (w *hourWindow) advance(now int64) {
+	step := now / slotSpan
+	if d := step - w.step; d >= hourSlots {
+		w.slots, w.sum = [hourSlots]uint64{}, 0
 	} else {
-		for i := u.minute + 1; i <= m; i++ {
-			u.minutes[i%60] = 0
+		for s := w.step + 1; s <= step; s++ {
+			w.sum -= w.slots[s%hourSlots]
+			w.slots[s%hourSlots] = 0
 		}
 	}
-	if d := h - u.hour; d >= 24 || d < 0 {
-		u.hours = [24]uint64{}
-	} else {
-		for i := u.hour + 1; i <= h; i++ {
-			u.hours[i%24] = 0
-		}
-	}
-	u.minute, u.hour = m, h
+	w.step = step
 }
 
-func (u *usage) add(n int, now time.Time) {
-	u.advance(now)
-	u.minutes[u.minute%60] += uint64(n)
-	u.hours[u.hour%24] += uint64(n)
+func (w *hourWindow) add(n uint64, now int64) {
+	if now/slotSpan != w.step {
+		w.advance(now)
+	}
+	w.slots[w.step%hourSlots] += n
+	w.sum += n
 }
 
-func (u *usage) totals(now time.Time) (hour, day uint64) {
-	if u == nil {
-		return 0, 0
+func (w *hourWindow) total(now int64) uint64 {
+	if now/slotSpan != w.step {
+		w.advance(now)
 	}
-	u.advance(now)
-	for _, v := range u.minutes {
-		hour += v
-	}
-	for _, v := range u.hours {
-		day += v
-	}
-	return hour, day
+	return w.sum
 }

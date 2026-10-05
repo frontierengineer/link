@@ -136,6 +136,8 @@ test('frames: layout, limits and every type', () => {
   assert.equal(toHex(encodeFrame(FrameType.Refused, peer, Uint8Array.of(1))).slice(0, 4), '0105');
   assert.equal(encodeFrame(FrameType.Pair, peer, new Uint8Array(MAX_FRAME - 18)).length, MAX_FRAME);
   assert.equal(toHex(encodeFrame(FrameType.Reset, peer, fromHex('0badcafe'))), '0107' + toHex(peer) + '0badcafe');
+  // Control carries a data body under its own type (section 6).
+  assert.equal(toHex(encodeFrame(FrameType.Control, peer, dataBody(7, fromHex('cafe')))), '0108' + toHex(peer) + '00000007' + 'cafe');
   assert.throws(() => encodeFrame(FrameType.Pair, peer, new Uint8Array(MAX_FRAME - 17)));
   assert.throws(() => decodeFrame(new Uint8Array(17)));
   assert.throws(() => decodeFrame(Uint8Array.of(2, 3, ...peer)));

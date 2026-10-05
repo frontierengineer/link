@@ -1,7 +1,8 @@
 // A minimal in-process relay for the client's integration tests: just enough
 // of sections 4, 5.2 and 6 to register members, route frames and pairing
-// channels, hold rosters and answer usage. Test support only; the real relay
-// is the Go one, and the limits of section 9 are not modelled here.
+// channels, hold rosters and answer usage (with the section 4.3 ask budget).
+// Test support only; the real relay is the Go one, and the other limits of
+// section 9 are not modelled here.
 
 import { randomBytes } from 'node:crypto';
 import { b64u, fromB64uLen } from '../../src/bytes.js';
@@ -34,6 +35,8 @@ export interface RelayOptions {
   enforceRoster?: boolean;
   /** Clock for the registration time check. */
   now?: () => number;
+  /** What `hello` lists (section 4.1). Default ['control']. */
+  features?: string[];
 }
 
 export type FrameVerdict = 'pass' | 'drop' | 'unreachable';
@@ -53,6 +56,9 @@ export class TestRelay {
   readonly frameLog: FrameLogEntry[] = [];
   readonly closes: { node: string | undefined; code: number }[] = [];
   enforceRoster: boolean;
+  readonly features: string[];
+  /** Usage asks per network: a GCRA of USAGE_BURST, then one per USAGE_INTERVAL_MS. */
+  private readonly usageTat = new Map<string, number>();
   /** Decides the fate of each routed member frame; tests use it to lose or block frames. */
   filter: ((e: FrameLogEntry) => FrameVerdict) | undefined;
   private readonly now: () => number;
@@ -62,6 +68,7 @@ export class TestRelay {
     opts: RelayOptions,
   ) {
     this.enforceRoster = opts.enforceRoster ?? true;
+    this.features = opts.features ?? ['control'];
     this.now = opts.now ?? Date.now;
   }
 
@@ -99,11 +106,6 @@ export class TestRelay {
     this.conns.get(network)?.get(node)?.sock.destroy();
   }
 
-  /** Pushes a usageAlert to the network's primary. */
-  usageAlert(network: string, quotaUsed: number, slowed: boolean): void {
-    this.conns.get(network)?.get(network)?.sock.sendText(JSON.stringify({ type: 'usageAlert', quotaUsed, slowed }));
-  }
-
   private accept(sock: ServerSocket): void {
     const conn: Conn = { sock, state: 'hello', challenge: new Uint8Array(randomBytes(32)) };
     sock.handlers = {
@@ -111,7 +113,7 @@ export class TestRelay {
       onBinary: (b) => this.onBinary(conn, b),
       onClose: (code) => this.onClose(conn, code),
     };
-    sock.sendText(JSON.stringify({ type: 'hello', version: 1, challenge: b64u(conn.challenge) }));
+    sock.sendText(JSON.stringify({ type: 'hello', version: 1, challenge: b64u(conn.challenge), features: this.features }));
   }
 
   private close(conn: Conn, code: number): void {
@@ -134,7 +136,7 @@ export class TestRelay {
   }
 
   private onText(conn: Conn, text: string): void {
-    if (Buffer.byteLength(text) > 1048576) return this.close(conn, 4000);
+    if (Buffer.byteLength(text) > 131072) return this.close(conn, 4000);
     let msg: Record<string, unknown>;
     try {
       msg = JSON.parse(text) as Record<string, unknown>;
@@ -163,6 +165,15 @@ export class TestRelay {
         if (!isPrimary) {
           conn.sock.sendText(JSON.stringify({ type: 'error', code: 'forbidden', id: msg.id }));
           return;
+        }
+        {
+          const now = Date.now();
+          const tat = Math.max(this.usageTat.get(conn.network!) ?? 0, now) + 10_000;
+          if (tat - now > 3 * 10_000) {
+            conn.sock.sendText(JSON.stringify({ type: 'error', code: 'rate_limited', id: msg.id }));
+            return;
+          }
+          this.usageTat.set(conn.network!, tat);
         }
         conn.sock.sendText(JSON.stringify(this.usage(conn.network!, msg.id)));
         return;
@@ -232,27 +243,25 @@ export class TestRelay {
     }
   }
 
+  /** Answers with what `usage` returns, for tests that need a quota or `slowed`. */
+  usageOverride: Partial<{ limits: { rateBps: number; quotaBytesHour: number; trickleBps: number }; quotaUsed: number; slowed: boolean }> | undefined;
+
   private usage(network: string, id: unknown): Record<string, unknown> {
     const roster = this.rosters.get(network)!;
     const net = this.conns.get(network) ?? new Map();
     let total = 0;
-    const members = roster.members.map((m) => {
-      const bytes = this.bytesFrom.get(m.id) ?? 0;
-      total += bytes;
-      return { id: m.id, bytesHour: bytes, bytesDay: bytes, connected: net.has(m.id) };
-    });
+    for (const m of roster.members) total += this.bytesFrom.get(m.id) ?? 0;
     return {
       type: 'usage',
       id,
       network: {
         bytesHour: total,
-        bytesDay: total,
         connections: net.size,
         limits: { rateBps: 0, quotaBytesHour: 0, trickleBps: 0 },
         quotaUsed: 0,
         slowed: false,
+        ...this.usageOverride,
       },
-      members,
     };
   }
 
@@ -312,7 +321,8 @@ export class TestRelay {
       return;
     }
     const routed: number[] = [FrameType.HandshakeInit, FrameType.HandshakeResp, FrameType.Data, FrameType.Refused, FrameType.Reset];
-    if (!routed.includes(f.type)) return;
+    if (this.features.includes('control')) routed.push(FrameType.Control);
+    if (!routed.includes(f.type)) return this.close(conn, 4000);
     const to = nodeIdFromBytes(f.peer);
     this.bytesFrom.set(from, (this.bytesFrom.get(from) ?? 0) + bytes.length);
     const entry = { from, to, type: f.type, size: bytes.length };
@@ -324,6 +334,7 @@ export class TestRelay {
       conn.sock.sendBinary(encodeFrame(FrameType.Unreachable, f.peer, new Uint8Array(0)));
       return;
     }
-    target.sock.sendBinary(encodeFrame(f.type, nodeIdToBytes(from), f.body));
+    // Section 6: control is delivered as data.
+    target.sock.sendBinary(encodeFrame(f.type === FrameType.Control ? FrameType.Data : f.type, nodeIdToBytes(from), f.body));
   }
 }

@@ -10,6 +10,7 @@ export type LinkErrorCode =
   | 'closed'
   | 'pairing'
   | 'roster-full'
+  | 'rate-limited'
   | 'invalid';
 
 export class LinkError extends Error {
@@ -75,6 +76,13 @@ export class PairingError extends LinkError {
 export class RosterFullError extends LinkError {
   constructor(readonly bytes: number) {
     super('roster-full', `the roster would be ${bytes} bytes, over the 65000-byte limit`);
+  }
+}
+
+/** The relay refused a request over its budget (section 4.3: usage asks); nothing was queued. Ask again later. */
+export class RateLimitedError extends LinkError {
+  constructor(what: string) {
+    super('rate-limited', `${what} refused: over the relay's budget`);
   }
 }
 

@@ -53,6 +53,10 @@ export class RelayConnection extends Emitter<RelayEvents> {
   private backoff: number;
   private _state: RelayState = 'disconnected';
   private url: string;
+  private _features: ReadonlySet<string> = new Set();
+  /** UTF-8 bytes of control messages sent and received, over every connection. */
+  textSent = 0;
+  textReceived = 0;
 
   constructor(private readonly o: RelayConnectionOptions) {
     super();
@@ -66,6 +70,27 @@ export class RelayConnection extends Emitter<RelayEvents> {
 
   get relayUrl(): string {
     return this.url;
+  }
+
+  /** The optional behaviours the current relay listed in `hello` (section 4.1); empty before it. */
+  get features(): ReadonlySet<string> {
+    return this._features;
+  }
+
+  /** Data may be handed to the socket now: little is waiting in it, or there is no socket (a send then fails at once). */
+  get writable(): boolean {
+    return this.channel?.writable ?? true;
+  }
+
+  /** Bytes handed to the socket and not yet sent. */
+  get bufferedAmount(): number {
+    return this.channel?.bufferedAmount ?? 0;
+  }
+
+  /** Calls `f` once data may be handed to the socket again. */
+  whenWritable(f: () => void): void {
+    if (this.channel) this.channel.whenWritable(f);
+    else f();
   }
 
   /** closed, revoked or replaced: no further connection attempts. */
@@ -83,7 +108,10 @@ export class RelayConnection extends Emitter<RelayEvents> {
   }
 
   sendControl(msg: ControlMessage): boolean {
-    return this._state === 'registered' && !!this.channel?.sendControl(msg);
+    if (this._state !== 'registered' || !this.channel) return false;
+    const n = this.channel.sendControl(msg);
+    this.textSent += n;
+    return n > 0;
   }
 
   close(): void {
@@ -111,15 +139,19 @@ export class RelayConnection extends Emitter<RelayEvents> {
 
   private dial(): void {
     this.setState('connecting');
+    this._features = new Set();
     let challenge: Uint8Array | undefined;
     const ch: Channel = new Channel(this.url, this.o.WebSocket, {
-      onControl: (msg) => {
+      onControl: (msg, bytes) => {
         if (this.channel !== ch) return;
+        this.textReceived += bytes;
         if (msg.type === 'hello' && challenge === undefined) {
           try {
             if (msg.version !== 1) throw new Error(`relay speaks version ${String(msg.version)}`);
             challenge = fromB64uLen(msg.challenge, 32, 'challenge');
-            ch.sendControl(this.registerMessage(challenge));
+            // Names this client does not know are ignored; a missing list is empty.
+            this._features = new Set(Array.isArray(msg.features) ? msg.features.filter((f): f is string => typeof f === 'string') : []);
+            this.textSent += ch.sendControl(this.registerMessage(challenge));
           } catch {
             ch.close(CloseCode.BadRequest);
           }

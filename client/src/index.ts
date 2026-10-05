@@ -38,17 +38,22 @@ export {
   type MemberEvents,
   type InboundMessage,
   type Timing,
-  type UsageAlert,
+  type Traffic,
+  type PeerTraffic,
+  type TrafficReport,
 } from './member.js';
 export {
   Primary,
   CODE_LIFETIME_MS,
   CODE_ATTEMPTS,
+  USAGE_BURST,
+  USAGE_INTERVAL_MS,
   type PairingCode,
   type PrimaryEvents,
   type UsageReport,
 } from './primary.js';
-export { DEFAULT_CREDIT_WINDOW, INITIAL_CREDIT, MAX_MESSAGE } from './sessions.js';
+export { DEFAULT_CREDIT_WINDOW, INITIAL_CREDIT, MAX_MESSAGE, CREDIT_BATCH_BYTES, CREDIT_DELAY_MS, PACE_FLOOR_BYTES } from './sessions.js';
+export type { DiagnosticsReport, FindingKind, CoreStats } from './diag-hook.js';
 export { CloseCode } from './relay.js';
 export {
   LinkError,
@@ -61,6 +66,8 @@ export {
   PairingError,
   InvalidError,
   RosterFullError,
+  RateLimitedError,
   type LinkErrorCode,
 } from './errors.js';
-export type { WebSocketLike, WebSocketConstructor } from './socket.js';
+export { MAX_CONTROL_BYTES } from './socket.js';
+export type { WebSocketLike, WebSocketConstructor, WebSocketStreamLike, WebSocketStreamConstructor } from './socket.js';

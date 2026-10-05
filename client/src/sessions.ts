@@ -2,6 +2,14 @@
 // transport with receiver indices, rekeying, idle expiry, and the session
 // message layer (fragmentation and credit flow control).
 //
+// Two lanes share the relay socket. Control (handshakes, refused, reset and
+// session messages other than `message`) is encrypted and handed over at once.
+// Message fragments wait in a gate until the socket is short, the session's
+// un-credited bytes are within its pace, and credit allows; only then is a
+// fragment encrypted, in the same synchronous step that hands it to the socket.
+// Wire order is therefore nonce order, and control can pass queued data without
+// breaking Noise's implicit counter.
+//
 // Credit and reassembly belong to one Noise session, and a message is never
 // split across two sessions: a rekey switches at a message boundary, and a
 // retired session lives past its 30 s grace while a message still uses it.
@@ -9,6 +17,7 @@
 // is granted as extra credit as soon as the session is up.
 
 import { EMPTY, readU32be, readU64be, u32be, u64be, utf8, fromB64uLen, randomBytes } from './bytes.js';
+import type { CoreStats, DiagnosticsEvent } from './diag-hook.js';
 import { ClosedError, InvalidError, LinkError, RefusedError, TimeoutError, UnreachableError } from './errors.js';
 import {
   dataBody,
@@ -35,6 +44,16 @@ export const MAX_FRAGMENT = MAX_PLAINTEXT - 2;
 /** Credit every session starts with, in each direction (section 7.3). */
 export const INITIAL_CREDIT = 1024 * 1024;
 export const DEFAULT_CREDIT_WINDOW = INITIAL_CREDIT;
+/** Owed credit is returned at once from this much (section 7.3)... */
+export const CREDIT_BATCH_BYTES = 65536;
+/** ...and otherwise this long after it began to be owed. */
+export const CREDIT_DELAY_MS = 250;
+/** A session may have at least this many message bytes un-credited, or one and a half times
+ * what was credited back over the last second if more: about 1.5 s of what the receiver takes.
+ * Not below CREDIT_BATCH_BYTES, so a receiver always owes enough to answer at once. */
+export const PACE_FLOOR_BYTES = 65536;
+/** The smallest fragment the pace cuts a message into. */
+export const PACE_MIN_FRAGMENT = 16384;
 
 export interface SessionTiming {
   /** Handshake timeout per message (10 s). */
@@ -70,8 +89,16 @@ export interface SessionHost {
   /** The receive window this side grants; at least INITIAL_CREDIT. */
   creditWindow: number;
   timing: SessionTiming;
-  /** Hands a frame to the relay; false when not connected. */
+  /** Hands a frame to the relay; false when not connected. Control is sent as FrameType.Control. */
   sendFrame(type: number, peer: string, body: Uint8Array): boolean;
+  /** Data may be handed to the socket now (little waits in it, or it is gone and a send fails at once). */
+  writable(): boolean;
+  /** Calls `f` once data may be handed to the socket again. */
+  whenWritable(f: () => void): void;
+  /** Bytes waiting in the socket. */
+  bufferedAmount(): number;
+  /** Tells an installed diagnostics hook. */
+  note(e: DiagnosticsEvent): void;
   /** A complete message; call `release` once the application has taken it. */
   deliver(from: string, bytes: Uint8Array, release: () => void): void;
   /** roster-request, roster or resign from a peer. */
@@ -80,9 +107,13 @@ export interface SessionHost {
   peerVersion(from: string, version: number): void;
 }
 
-interface Waiter {
-  resolve: () => void;
-  reject: (e: LinkError) => void;
+/** A message fragment waiting in the gate. `run` encrypts and hands it over, synchronously. */
+interface GateEntry {
+  s: Session;
+  /** An empty message needs no credit. */
+  empty: boolean;
+  run: () => void;
+  fail: (e: unknown) => void;
 }
 
 class Session {
@@ -97,7 +128,13 @@ class Session {
   activeSends = 0;
   /** Bytes this side may still send. */
   sendCredit: number;
-  creditWaiters: Waiter[] = [];
+  /** Message bytes sent and not yet credited back (credit beyond that, a larger window, is not carried). */
+  inflight = 0;
+  /** Credit applied to `inflight`, in one-second buckets: the receiver's take rate. */
+  rateAt: number;
+  rateCur = 0;
+  ratePrev = 0;
+  creditTimer: ReturnType<typeof setTimeout> | undefined;
   // Receive side.
   partial: Uint8Array[] = [];
   partialLen = 0;
@@ -117,6 +154,7 @@ class Session {
   ) {
     this.createdAt = now;
     this.lastActivity = now;
+    this.rateAt = now;
     this.sendCredit = INITIAL_CREDIT;
   }
 }
@@ -142,6 +180,11 @@ export class SessionManager {
   private readonly byIndex = new Map<number, Session | PendingInit>();
   private sweepTimer: ReturnType<typeof setInterval> | undefined;
   private closed = false;
+  private readonly gate: GateEntry[] = [];
+  private pumping = false;
+  private repump = false;
+  private awaitingSocket = false;
+  readonly stats: CoreStats = { creditsSent: 0, messagesReceived: 0, inflightMaxBytes: 0, socketBacklogMaxBytes: 0, controlBacklogMaxBytes: 0 };
 
   constructor(private readonly h: SessionHost) {
     const t = h.timing;
@@ -199,7 +242,7 @@ export class SessionManager {
   }
 
   /** For tests and diagnostics: live sessions with a peer. */
-  sessionInfo(peer: string): { localIndex: number; remoteIndex: number; initiator: boolean; current: boolean; sent: number; received: number; sendCredit: number }[] {
+  sessionInfo(peer: string): { localIndex: number; remoteIndex: number; initiator: boolean; current: boolean; sent: number; received: number; sendCredit: number; inflight: number }[] {
     const ps = this.peers.get(peer);
     if (!ps) return [];
     return [...ps.sessions].map((s) => ({
@@ -210,6 +253,7 @@ export class SessionManager {
       sent: s.sent,
       received: s.received,
       sendCredit: s.sendCredit,
+      inflight: s.inflight,
     }));
   }
 
@@ -224,6 +268,7 @@ export class SessionManager {
         case FrameType.HandshakeResp:
           return this.onResp(from, f.body);
         case FrameType.Data:
+        case FrameType.Control:
           return this.onData(from, f.body);
         case FrameType.Unreachable:
           return this.onUnreachable(from);
@@ -333,10 +378,15 @@ export class SessionManager {
       case 'message':
         this.onFragment(s, msg.more, msg.bytes);
         break;
-      case 'credit':
+      case 'credit': {
         s.sendCredit += msg.bytes;
-        for (const w of s.creditWaiters.splice(0)) w.resolve();
+        const took = Math.min(s.inflight, msg.bytes);
+        s.inflight -= took;
+        this.rollRate(s, this.h.now());
+        s.rateCur += took;
+        this.pump();
         break;
+      }
       default:
         this.h.control(from, msg);
     }
@@ -361,6 +411,7 @@ export class SessionManager {
       return;
     }
     const whole = joinParts(s.partial, s.partialLen);
+    this.stats.messagesReceived++;
     const uncredited = s.partialLen - s.partialCredited;
     s.partial = [];
     s.partialLen = 0;
@@ -380,11 +431,25 @@ export class SessionManager {
     });
   }
 
-  private flushCredit(s: Session): void {
+  /** Returns owed credit in batches: at once from CREDIT_BATCH_BYTES, else CREDIT_DELAY_MS after it began to be owed. */
+  private flushCredit(s: Session, now = false): void {
     if (s.ended || s.owed <= 0) return;
+    if (!now && s.owed < CREDIT_BATCH_BYTES) {
+      if (s.creditTimer === undefined) {
+        s.creditTimer = setTimeout(() => {
+          s.creditTimer = undefined;
+          this.flushCredit(s, true);
+        }, CREDIT_DELAY_MS);
+        (s.creditTimer as { unref?: () => void }).unref?.();
+      }
+      return;
+    }
+    clearTimeout(s.creditTimer);
+    s.creditTimer = undefined;
     while (s.owed > 0) {
       const n = Math.min(s.owed, 0xffffffff);
       s.owed -= n;
+      this.stats.creditsSent++;
       if (!this.transmit(s, { type: 'credit', bytes: n })) return;
     }
   }
@@ -470,6 +535,8 @@ export class SessionManager {
   }
 
   private initiate(peer: string): Promise<Session> {
+    // A send chained before close() runs after it: it must not start a handshake.
+    if (this.closed) return Promise.reject(new ClosedError());
     const ps = this.peer(peer);
     if (ps.pending) {
       const p = ps.pending;
@@ -487,6 +554,7 @@ export class SessionManager {
     });
     const localIndex = this.newIndex();
     const { message } = hs.writeMessage(u64be(roster.version));
+    this.h.note({ kind: 'handshake', peer });
     return new Promise<Session>((resolve, reject) => {
       const p: PendingInit = {
         peer,
@@ -524,7 +592,10 @@ export class SessionManager {
       ps.sessions.delete(s);
       if (ps.current === s) ps.current = undefined;
     }
-    for (const w of s.creditWaiters.splice(0)) w.reject(err);
+    clearTimeout(s.creditTimer);
+    s.creditTimer = undefined;
+    // Fragments waiting in the gate on this session fail with it.
+    this.pump();
   }
 
   /** A responder session older than the rekey interval plus the grace has expired. */
@@ -573,10 +644,15 @@ export class SessionManager {
     const plaintext = encodeSessionMessage(msg);
     // Checked before encrypting, so a refused message does not spend a nonce.
     if (plaintext.length > MAX_PLAINTEXT) throw new InvalidError(`a ${msg.type} session message exceeds ${MAX_PLAINTEXT} bytes`);
+    const backlog = this.h.bufferedAmount();
+    const data = msg.type === 'message';
+    if (data) this.stats.socketBacklogMaxBytes = Math.max(this.stats.socketBacklogMaxBytes, backlog);
+    else this.stats.controlBacklogMaxBytes = Math.max(this.stats.controlBacklogMaxBytes, backlog);
+    // Encrypted and handed over in one step: the frame's nonce is its place on the wire.
     const ct = s.send.encryptWithAd(EMPTY, plaintext);
     s.sent++;
     s.lastActivity = this.h.now();
-    return this.h.sendFrame(FrameType.Data, s.peer, dataBody(s.remoteIndex, ct));
+    return this.h.sendFrame(data ? FrameType.Data : FrameType.Control, s.peer, dataBody(s.remoteIndex, ct));
   }
 
   private async sendNow(peer: string, bytes: Uint8Array): Promise<void> {
@@ -585,21 +661,110 @@ export class SessionManager {
     try {
       let off = 0;
       do {
-        while (s.sendCredit <= 0 && bytes.length - off > 0) {
-          await new Promise<void>((resolve, reject) => s.creditWaiters.push({ resolve, reject }));
-        }
-        if (s.ended) throw s.endError ?? new ClosedError(`session with ${peer} ended`);
-        const n = Math.min(bytes.length - off, MAX_FRAGMENT, Math.max(s.sendCredit, 0));
-        const more = off + n < bytes.length;
-        if (!this.transmit(s, { type: 'message', more, bytes: bytes.subarray(off, off + n) })) {
-          throw s.endError ?? new ClosedError('not connected to the relay');
-        }
-        s.sendCredit -= n;
-        off += n;
+        await new Promise<void>((resolve, reject) => {
+          this.gate.push({
+            s,
+            empty: bytes.length === 0,
+            fail: reject,
+            run: () => {
+              // Never more than the room left under the pace (but not below PACE_MIN_FRAGMENT), so
+              // the socket holds about the pace and no more: on a slow link fragments shrink, and
+              // control behind them waits a fraction of a second rather than a whole fragment.
+              const room = Math.max(PACE_MIN_FRAGMENT, this.pace(s) - s.inflight);
+              const n = Math.min(bytes.length - off, MAX_FRAGMENT, Math.max(s.sendCredit, 0), room);
+              const more = off + n < bytes.length;
+              if (!this.transmit(s, { type: 'message', more, bytes: bytes.subarray(off, off + n) })) {
+                throw s.endError ?? new ClosedError('not connected to the relay');
+              }
+              s.sendCredit -= n;
+              s.inflight += n;
+              if (s.inflight > this.stats.inflightMaxBytes) this.stats.inflightMaxBytes = s.inflight;
+              off += n;
+              resolve();
+            },
+          });
+          this.pump();
+        });
       } while (off < bytes.length);
     } finally {
       s.activeSends--;
       this.maybeRekey(s);
+    }
+  }
+
+  /** Message bytes `s` may have un-credited: about a second and a half of what its receiver takes. */
+  private pace(s: Session): number {
+    const now = this.h.now();
+    this.rollRate(s, now);
+    // A second's worth of credit: the larger of the last whole second and the one under way.
+    // (Not their interpolated sum: credit comes in lumps, and a lump early in the second under
+    // way would count a second twice.)
+    return Math.max(PACE_FLOOR_BYTES, Math.floor(1.5 * Math.max(s.ratePrev, s.rateCur)));
+  }
+
+  private rollRate(s: Session, now: number): void {
+    const d = now - s.rateAt;
+    if (d >= 2000 || d < 0) {
+      s.ratePrev = 0;
+      s.rateCur = 0;
+      s.rateAt = now;
+    } else if (d >= 1000) {
+      s.ratePrev = s.rateCur;
+      s.rateCur = 0;
+      s.rateAt += 1000;
+    }
+  }
+
+  /**
+   * Hands waiting fragments to the socket, oldest first, skipping a session that is out of
+   * credit or over its pace (it is woken by its next credit) so one slow receiver never holds
+   * up another. Stops while the socket is backed up, and resumes once it drains.
+   */
+  private pump(): void {
+    if (this.pumping) {
+      // Asked again while running (a socket that turned writable at once): run once more after.
+      this.repump = true;
+      return;
+    }
+    this.pumping = true;
+    try {
+      do {
+        this.repump = false;
+        this.pumpOnce();
+      } while (this.repump);
+    } finally {
+      this.pumping = false;
+    }
+  }
+
+  private pumpOnce(): void {
+    for (let i = 0; i < this.gate.length; ) {
+      const e = this.gate[i]!;
+      if (e.s.ended || this.closed) {
+        this.gate.splice(i, 1);
+        e.fail(e.s.endError ?? new ClosedError());
+        continue;
+      }
+      if ((!e.empty && e.s.sendCredit <= 0) || e.s.inflight >= this.pace(e.s)) {
+        i++;
+        continue;
+      }
+      if (!this.h.writable()) {
+        if (!this.awaitingSocket) {
+          this.awaitingSocket = true;
+          this.h.whenWritable(() => {
+            this.awaitingSocket = false;
+            this.pump();
+          });
+        }
+        return;
+      }
+      this.gate.splice(i, 1);
+      try {
+        e.run();
+      } catch (err) {
+        e.fail(err);
+      }
     }
   }
 }

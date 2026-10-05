@@ -69,6 +69,10 @@ connecting and returns at once):
   (`connecting`, `connected`, `disconnected`, `revoked`, `replaced`, `closed`), `roster`, `disconnect`
   (`{ code, reason }`), `moved` (4009), `relayError`.
 - `syncRoster()` asks the primary for its newest roster. `resign()` leaves the network.
+  Rosters also spread member to member: when a handshake shows a peer holds a newer roster,
+  the member asks that peer for it, and hands its own to a peer that is behind. A roster is
+  taken only if the pinned primary signed it, so a revocation reaches every member that meets
+  one that has it, with the primary offline and whatever the relay remembers.
   `roster`, `state`, `id`, `network`, `waitConnected(timeoutMs?)`, `close()`.
 - `traffic()` counts what this member sent and received, always on: `{ since, total, relay, peers }`,
   where `total` and each `peers[id]` are `{ sent, received }` of `{ messages, bytes, frames, frameBytes }`.

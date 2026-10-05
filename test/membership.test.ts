@@ -217,3 +217,49 @@ test('quota: the primary asks and learns the network is slowed; the trickle rate
     await net.close();
   }
 });
+
+test('a revocation spreads member to member: with the primary offline and the relay forgetful, the up-to-date peer hands it on', async () => {
+  // The relay forgets a network 300 ms after its last member leaves.
+  const net = await startNet({ env: { LINK_NETWORK_TTL: '300ms' } });
+  try {
+    const { identity: wId } = await net.pairOnly('worker');
+    const { identity: tId } = await net.pairOnly('surface');
+    const { identity: xId, roster: before } = await net.pairOnly('worker');
+    const start = (identity: typeof wId, roster: typeof before) => {
+      const m = new Member({ identity, roster, timing: FAST });
+      net.members.push(m);
+      return m;
+    };
+    // The tablet stays offline while the primary revokes the phone (x).
+    const w = start(wId, net.primary.roster);
+    await w.waitConnected(10_000);
+    const tRoster = net.primary.roster;
+    net.primary.revoke(xId.id);
+    const after = net.primary.roster.version;
+    await until(() => w.roster.version === after, 'the worker to learn the revocation');
+    // Everyone goes; the relay forgets the network.
+    w.close();
+    net.primary.close();
+    await sleep(800);
+    // The tablet and the revoked phone come back first, both on the roster from before: a relay
+    // that knows nothing newer lets them in, and they would talk.
+    const t = start(tId, tRoster);
+    const x = start(xId, before);
+    await t.waitConnected(10_000);
+    await x.waitConnected(10_000);
+    const xIn = inbox(x);
+    await t.send(x.id, bytesOf('before'));
+    await xIn.next();
+    // The worker comes back with the revocation. The primary is still offline: the tablet
+    // learns it from the worker alone, then refuses the phone by itself.
+    const w2 = start(wId, w.roster);
+    await w2.waitConnected(10_000);
+    const wIn = inbox(w2);
+    await t.send(w2.id, bytesOf('hello'));
+    await wIn.next();
+    await until(() => t.roster.version === after, 'the tablet to learn the revocation from its peer');
+    await assert.rejects(t.send(x.id, bytesOf('after')), { code: 'invalid' });
+  } finally {
+    await net.close();
+  }
+});

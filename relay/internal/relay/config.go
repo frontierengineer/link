@@ -15,7 +15,7 @@ import (
 type Config struct {
 	Addr              string        // LINK_ADDR
 	Origin            string        // LINK_ORIGIN; empty: the request's Host
-	TrustProxy        bool          // LINK_TRUST_PROXY
+	TrustProxy        int           // LINK_TRUST_PROXY: proxies in front of the relay
 	TLSCert, TLSKey   string        // LINK_TLS_CERT, LINK_TLS_KEY; both empty: plain HTTP
 	RateBps           int64         // LINK_RATE_BPS
 	QuotaBytesHour    int64         // LINK_QUOTA_BYTES_HOUR
@@ -25,7 +25,11 @@ type Config struct {
 	IPRegisterPerMin  int           // LINK_IP_REGISTER_PER_MIN
 	IPPairPerMin      int           // LINK_IP_PAIR_PER_MIN
 	IPNetworksPerHour int           // LINK_IP_NETWORKS_PER_HOUR
+	IPPending         int           // LINK_IP_PENDING: connections per address not registered
+	IPConnections     int           // LINK_IP_CONNECTIONS: connections per address in all
+	IdleRostersBytes  int64         // LINK_IDLE_ROSTERS_BYTES: rosters held for networks nobody is connected to
 	NetworkTTL        time.Duration // LINK_NETWORK_TTL
+	ParkIdle          bool          // LINK_PARK_IDLE: idle connections hold no goroutine (Linux, without LINK_TLS_CERT)
 
 	PingInterval time.Duration // 30 s (section 9); LINK_PING_INTERVAL
 	PairTimeout  time.Duration // 60 s (section 5.2); LINK_PAIR_TIMEOUT
@@ -38,6 +42,7 @@ func Defaults() Config {
 	return Config{
 		Addr:         ":8080",
 		NetworkTTL:   7 * 24 * time.Hour,
+		ParkIdle:     true,
 		PingInterval: 30 * time.Second,
 		PairTimeout:  60 * time.Second,
 		HelloTimeout: 30 * time.Second,
@@ -73,11 +78,24 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	str("LINK_TLS_CERT", &c.TLSCert)
 	str("LINK_TLS_KEY", &c.TLSKey)
 	if v := getenv("LINK_TRUST_PROXY"); v != "" {
+		// A number of proxies; true and false (as before) mean one and none.
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 && n <= 64 {
+			c.TrustProxy = int(n)
+		} else if b, err := strconv.ParseBool(v); err == nil {
+			c.TrustProxy = 0
+			if b {
+				c.TrustProxy = 1
+			}
+		} else {
+			errs = append(errs, "LINK_TRUST_PROXY: not a number of proxies (0 to 64) or a boolean")
+		}
+	}
+	if v := getenv("LINK_PARK_IDLE"); v != "" {
 		b, err := strconv.ParseBool(v)
 		if err != nil {
-			errs = append(errs, "LINK_TRUST_PROXY: not a boolean")
+			errs = append(errs, "LINK_PARK_IDLE: not a boolean")
 		}
-		c.TrustProxy = b
+		c.ParkIdle = b
 	}
 	i64("LINK_RATE_BPS", &c.RateBps)
 	i64("LINK_QUOTA_BYTES_HOUR", &c.QuotaBytesHour)
@@ -89,6 +107,9 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	num("LINK_IP_REGISTER_PER_MIN", &c.IPRegisterPerMin)
 	num("LINK_IP_PAIR_PER_MIN", &c.IPPairPerMin)
 	num("LINK_IP_NETWORKS_PER_HOUR", &c.IPNetworksPerHour)
+	num("LINK_IP_PENDING", &c.IPPending)
+	num("LINK_IP_CONNECTIONS", &c.IPConnections)
+	i64("LINK_IDLE_ROSTERS_BYTES", &c.IdleRostersBytes)
 	dur := func(name string, dst *time.Duration) {
 		if v := getenv(name); v != "" {
 			d, err := parseDuration(v)

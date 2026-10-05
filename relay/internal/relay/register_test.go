@@ -255,6 +255,7 @@ func TestConfigFromEnv(t *testing.T) {
 		"LINK_IP_REGISTER_PER_MIN": "60", "LINK_IP_PAIR_PER_MIN": "61", "LINK_IP_NETWORKS_PER_HOUR": "10",
 		"LINK_NETWORK_TTL": "168h", "LINK_ORIGIN": "eu.example", "LINK_TRUST_PROXY": "true",
 		"LINK_PING_INTERVAL": "250ms", "LINK_PAIR_TIMEOUT": "2", "LINK_HELLO_TIMEOUT": "1s",
+		"LINK_PARK_IDLE": "false", "LINK_IP_PENDING": "16", "LINK_IP_CONNECTIONS": "1024", "LINK_IDLE_ROSTERS_BYTES": "1073741824",
 	}
 	c, err := FromEnv(func(k string) string { return env[k] })
 	if err != nil {
@@ -263,22 +264,37 @@ func TestConfigFromEnv(t *testing.T) {
 	if c.Addr != "127.0.0.1:9" || c.RateBps != 1048576 || c.QuotaBytesHour != 5 || c.TrickleBps != 16384 ||
 		c.QueueBytes != 4194304 || c.SlowPeer != 30*time.Second || c.IPRegisterPerMin != 60 ||
 		c.IPPairPerMin != 61 || c.IPNetworksPerHour != 10 || c.NetworkTTL != 168*time.Hour ||
-		c.Origin != "eu.example" || !c.TrustProxy || c.PingInterval != 250*time.Millisecond ||
-		c.PairTimeout != 2*time.Second || c.HelloTimeout != time.Second {
+		c.Origin != "eu.example" || c.TrustProxy != 1 || c.PingInterval != 250*time.Millisecond ||
+		c.PairTimeout != 2*time.Second || c.HelloTimeout != time.Second || c.ParkIdle ||
+		c.IPPending != 16 || c.IPConnections != 1024 || c.IdleRostersBytes != 1<<30 {
 		t.Fatalf("config: %+v", c)
 	}
 	d, err := FromEnv(func(string) string { return "" })
 	if err != nil || d.RateBps != 0 || d.QueueBytes != 0 || d.SlowPeer != 0 || d.Addr != ":8080" || d.NetworkTTL != 168*time.Hour ||
-		d.PingInterval != 30*time.Second || d.PairTimeout != 60*time.Second || d.HelloTimeout != 30*time.Second {
+		d.PingInterval != 30*time.Second || d.PairTimeout != 60*time.Second || d.HelloTimeout != 30*time.Second ||
+		d.TrustProxy != 0 || !d.ParkIdle {
 		t.Fatalf("defaults: %+v %v", d, err)
 	}
-	if _, err := FromEnv(func(k string) string {
-		if k == "LINK_RATE_BPS" {
-			return "fast"
+	for v, want := range map[string]int{"false": 0, "0": 0, "1": 1, "2": 2, "TRUE": 1} {
+		c, err := FromEnv(func(k string) string {
+			if k == "LINK_TRUST_PROXY" {
+				return v
+			}
+			return ""
+		})
+		if err != nil || c.TrustProxy != want {
+			t.Fatalf("LINK_TRUST_PROXY=%s: %d %v", v, c.TrustProxy, err)
 		}
-		return ""
-	}); err == nil || !strings.Contains(err.Error(), "LINK_RATE_BPS") {
-		t.Fatalf("bad value accepted: %v", err)
+	}
+	for k, v := range map[string]string{"LINK_RATE_BPS": "fast", "LINK_TRUST_PROXY": "-1", "LINK_PARK_IDLE": "maybe"} {
+		if _, err := FromEnv(func(name string) string {
+			if name == k {
+				return v
+			}
+			return ""
+		}); err == nil || !strings.Contains(err.Error(), k) {
+			t.Fatalf("%s=%s accepted: %v", k, v, err)
+		}
 	}
 }
 
@@ -343,8 +359,11 @@ func TestEffectiveRoster(t *testing.T) {
 	wc2.send(h.registerMsg(wc2, w, p.ID.String(), r4))
 	wc2.expectClose(4008)
 	wc.expectClose(4008) // w's registered connection is not on version 4 either
-	pc.send(map[string]any{"type": "usage", "id": "v"})
-	if u := pc.json(); len(u["members"].([]any)) != 1 {
-		t.Fatalf("relay did not adopt version 4: %v", u)
+	n := h.s.networkOf(p.ID)
+	n.mu.Lock()
+	v := n.roster.Version
+	n.mu.Unlock()
+	if v != 4 {
+		t.Fatalf("relay holds version %d, not 4", v)
 	}
 }

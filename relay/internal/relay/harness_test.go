@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"net"
@@ -21,16 +22,17 @@ import (
 )
 
 type harness struct {
-	t      *testing.T
+	t      testing.TB
 	s      *Server
 	addr   string
 	origin string
 }
 
-func start(t *testing.T, tune func(*Config)) *harness {
+func start(t testing.TB, tune func(*Config)) *harness {
 	t.Helper()
 	cfg := Defaults()
 	cfg.CloseGrace = 3 * time.Second
+	parkFromEnv(&cfg)
 	if tune != nil {
 		tune(&cfg)
 	}
@@ -122,7 +124,9 @@ func (h *harness) dial(opts ...dialOpt) *client {
 	for _, o := range opts {
 		o(nd)
 	}
-	d := websocket.Dialer{NetDialContext: nd.DialContext, HandshakeTimeout: 5 * time.Second}
+	// Messages up to 128 KiB go as one frame, so tests can count wire bytes; 1 MiB is still
+	// fragmented.
+	d := websocket.Dialer{NetDialContext: nd.DialContext, HandshakeTimeout: 5 * time.Second, WriteBufferSize: 128 << 10}
 	ws, _, err := d.Dial("ws://"+h.addr+"/v1", nil)
 	if err != nil {
 		h.t.Fatal(err)
@@ -252,6 +256,52 @@ func (c *client) quiet(d time.Duration) {
 	}
 }
 
+// wire is the size on the wire of a client frame (masked) with an n-byte payload: what the
+// relay charges for it.
+func wire(n int) int {
+	h := 2 + 4
+	switch {
+	case n > 0xffff:
+		h += 8
+	case n >= 126:
+		h += 2
+	}
+	return h + n
+}
+
+// rawFrame is one masked client frame, for what gorilla will not send: a chosen
+// fragmentation, or a header that promises more than follows.
+func rawFrame(fin bool, op byte, payload []byte, declared int) []byte {
+	b := []byte{op}
+	if fin {
+		b[0] |= 0x80
+	}
+	switch {
+	case declared > 0xffff:
+		b = append(b, 0x80|127)
+		b = binary.BigEndian.AppendUint64(b, uint64(declared))
+	case declared >= 126:
+		b = append(b, 0x80|126)
+		b = binary.BigEndian.AppendUint16(b, uint16(declared))
+	default:
+		b = append(b, 0x80|byte(declared))
+	}
+	mask := [4]byte{1, 2, 3, 4}
+	b = append(b, mask[:]...)
+	for i, v := range payload {
+		b = append(b, v^mask[i%4])
+	}
+	return b
+}
+
+// writeRaw writes bytes to the socket under the client's WebSocket.
+func (c *client) writeRaw(b []byte) {
+	c.t.Helper()
+	if _, err := c.ws.NetConn().Write(b); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
 func frame(typ byte, peer link.ID, body []byte) []byte {
 	f := append([]byte{1, typ}, peer[:]...)
 	return append(f, body...)
@@ -265,9 +315,7 @@ func peerOf(f []byte) link.ID {
 
 // queuedFor reads, from the relay's own state, the bytes queued for a connected node.
 func (s *Server) queuedFor(network, node link.ID) int64 {
-	s.mu.Lock()
-	n := s.networks[network]
-	s.mu.Unlock()
+	n := s.networkOf(network)
 	if n == nil {
 		return 0
 	}

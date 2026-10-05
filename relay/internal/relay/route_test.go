@@ -18,11 +18,15 @@ func TestRoutingWithinANetwork(t *testing.T) {
 	r := roster(t, 1, p, w, s)
 	pc, wc := h.register(p, p, r), h.register(w, p, r)
 
-	for _, typ := range []byte{typeInit, typeResp, typeData, typeRefused, typeReset} {
+	for _, typ := range []byte{typeInit, typeResp, typeData, typeRefused, typeReset, typeControl} {
 		body := []byte{typ, 0, 0, 0, 7, 'x'}
 		wc.sendBinary(frame(typ, p.ID, body))
 		f := pc.frame()
-		if f[0] != 1 || f[1] != typ || peerOf(f) != w.ID || !bytes.Equal(f[18:], body) {
+		want := typ
+		if typ == typeControl {
+			want = typeData // control is delivered as data (section 6)
+		}
+		if f[0] != 1 || f[1] != want || peerOf(f) != w.ID || !bytes.Equal(f[18:], body) {
 			t.Fatalf("type %d: got %x", typ, f)
 		}
 	}
@@ -82,9 +86,9 @@ func TestFrameRules(t *testing.T) {
 		"shorter than a header":   func(c *client) { c.sendBinary([]byte{1, typeData, 0}) },
 		"wrong version":           func(c *client) { c.sendBinary(append([]byte{2, typeData}, make([]byte, 16)...)) },
 		"unreachable from a node": func(c *client) { c.sendBinary(frame(typeUnreachable, p.ID, nil)) },
-		"unknown type":            func(c *client) { c.sendBinary(frame(0x08, p.ID, nil)) },
-		"control message over 1 MiB": func(c *client) {
-			c.ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"usage","id":"`+strings.Repeat("x", 1<<20)+`"}`))
+		"unknown type":            func(c *client) { c.sendBinary(frame(0x09, p.ID, nil)) },
+		"control message over 128 KiB": func(c *client) {
+			c.ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"usage","id":"`+strings.Repeat("x", maxText)+`"}`))
 		},
 		"malformed control message": func(c *client) { c.ws.WriteMessage(websocket.TextMessage, []byte(`{"type":`)) },
 	}
@@ -98,12 +102,12 @@ func TestFrameRules(t *testing.T) {
 	}
 	// Non-fatal problems are answered with an error.
 	pc2 := h.register(p, p, r)
-	// A control message of exactly 1 MiB is accepted (here a usage request with a long id).
+	// A control message of exactly 128 KiB is accepted (here a usage request with a long id).
 	head, tail := `{"type":"usage","id":"`, `"}`
-	longID := strings.Repeat("y", 1<<20-len(head)-len(tail))
+	longID := strings.Repeat("y", maxText-len(head)-len(tail))
 	pc2.ws.WriteMessage(websocket.TextMessage, []byte(head+longID+tail))
 	if m := pc2.json(); m["type"] != "usage" || m["id"] != longID {
-		t.Fatalf("1 MiB control message: got type %v", m["type"])
+		t.Fatalf("128 KiB control message: got type %v", m["type"])
 	}
 	pc2.send(map[string]any{"type": "dance", "id": "7"})
 	if m := pc2.json(); m["type"] != "error" || m["code"] != "bad_request" || m["id"] != "7" {

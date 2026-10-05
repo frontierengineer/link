@@ -136,7 +136,7 @@ func Generate() ([]byte, error) {
 		"keys: seed -> HKDF-derived Ed25519 seed and key, clamped X25519 private key and its public key, node id (b32 of the first 16 bytes of SHA-256(ed25519)) and its raw bytes in hex.",
 		"rosters: roster is the full signed roster in JCS form. For signed cases jcs is JCS(roster without signature), signingInput is UTF-8(\"frontier-link/1/roster\") || jcs, signature is the Ed25519 signature. valid is whether a relay or member must find it valid (section 3).",
 		"registrations: message is lenStr(\"frontier-link/1/register\") || lenStr(network) || lenStr(node) || challenge || u64be(ts) || lenStr(origin); sig is the node's Ed25519 signature over it.",
-		"frames: a routed frame (hex) as a member sends it and as the relay delivers it, with the peer field rewritten to the sender's raw id.",
+		"frames: a routed frame (hex) as a member sends it and as the relay delivers it, with the peer field rewritten to the sender's raw id (and control, type 8, delivered as data, type 3).",
 	}}
 	for _, s := range seeds() {
 		k, err := link.DeriveKeys(s)
@@ -229,6 +229,12 @@ func Generate() ([]byte, error) {
 	f.Frames = append(f.Frames, frameVector{
 		Description: "a frame for seed 2, which is not connected, and the relay's unreachable answer (the peer field names seed 2)",
 		Sent:        hex.EncodeToString(append(append([]byte{1, 0x01}, c.ID[:]...), 0, 0, 0, 1)), Delivered: hex.EncodeToString(unreach),
+	})
+	control := []byte{0, 0, 0, 7, 0x0c, 0x0a, 0xfe}
+	f.Frames = append(f.Frames, frameVector{
+		Description: "control from seed 1 to seed 0 (type 8), delivered as data (type 3): same body, peer rewritten",
+		Sent:        hex.EncodeToString(append(append([]byte{1, 0x08}, a.ID[:]...), control...)),
+		Delivered:   hex.EncodeToString(append(append([]byte{1, 0x03}, b.ID[:]...), control...)),
 	})
 
 	var out bytes.Buffer

@@ -223,7 +223,7 @@ func TestClientVectorsRegistration(t *testing.T) {
 func TestClientVectorsFrameLayout(t *testing.T) {
 	types := map[string]byte{
 		"handshake-init": typeInit, "handshake-resp": typeResp, "data": typeData, "unreachable": typeUnreachable,
-		"refused": typeRefused, "pair": typePair, "reset": typeReset,
+		"refused": typeRefused, "pair": typePair, "reset": typeReset, "control": typeControl,
 	}
 	for _, f := range readClientVectors(t).Frames {
 		b := unhex(t, f.Frame)
@@ -279,5 +279,59 @@ func TestClientVectorsRouted(t *testing.T) {
 		}
 		copy(delivered[2:frameHeader], sender.ID[:])
 		through(tr.Direction, from, to, sent, delivered)
+	}
+}
+
+// The relay's own frame vectors (spec/vectors/relay.json), sent through the real routing code
+// between the members they name: each comes out exactly as recorded.
+func TestRelayVectorsRouted(t *testing.T) {
+	raw, err := os.ReadFile("../../../spec/vectors/relay.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		Keys   []struct{ Seed string }
+		Frames []struct{ Description, Sent, Delivered string }
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		t.Fatal(err)
+	}
+	var ks []*link.Keys
+	for _, k := range v.Keys {
+		seed, ok := link.DecodeKey(k.Seed, 32)
+		if !ok {
+			t.Fatalf("seed %q", k.Seed)
+		}
+		dk, err := link.DeriveKeys(seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ks = append(ks, dk)
+	}
+	h := start(t, nil)
+	// Seed 0 is the primary, seed 1 a worker; seed 2 is listed but never connects.
+	r := roster(t, 1, ks[0], ks[1], ks[2])
+	conns := map[link.ID]*client{ks[0].ID: h.register(ks[0], ks[0], r), ks[1].ID: h.register(ks[1], ks[0], r)}
+	if len(v.Frames) < 3 {
+		t.Fatalf("%d frame vectors", len(v.Frames))
+	}
+	for _, f := range v.Frames {
+		sent, delivered := unhex(t, f.Sent), unhex(t, f.Delivered)
+		// The sender is whichever connected member the frame is not addressed to.
+		var from, to *client
+		for id, c := range conns {
+			if peerOf(sent) == id {
+				to = c
+			} else {
+				from = c
+			}
+		}
+		if to == nil {
+			to = from // unreachable: the answer comes back to the sender
+		}
+		from.sendBinary(sent)
+		if got := to.frame(); !bytes.Equal(got, delivered) {
+			t.Errorf("%s:\n got %x\nwant %x", f.Description, got, delivered)
+		}
 	}
 }

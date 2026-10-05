@@ -1,15 +1,16 @@
 // The primary: the member that signs the roster. It opens pairing codes and
 // runs the B side of pairing (section 5), revokes (section 8), accepts
 // resignations (section 7.3), pushes every new roster to the relay and the
-// members, and reads the relay's usage figures (section 4.3).
+// members, and asks the relay for its usage figures (section 4.3: request-only,
+// within the relay's budget).
 
 import { b64u, fromB64u, fromB64uLen, randomBytes } from './bytes.js';
 import { buildPairingLink, formatCode, generateCode, generateCodeId, normalizeCode } from './code.js';
-import { ClosedError, InvalidError, LinkError, RosterFullError, TimeoutError } from './errors.js';
+import { ClosedError, InvalidError, LinkError, RateLimitedError, RosterFullError, TimeoutError } from './errors.js';
 import { encodeFrame, FrameType } from './frames.js';
 import { nodeIdFromEd25519 } from './identity.js';
 import { canonicalize } from './jcs.js';
-import { Member, type MemberEvents, type MemberOptions, type UsageAlert } from './member.js';
+import { Member, type MemberEvents, type MemberOptions } from './member.js';
 import { PrimaryExchange } from './pairing.js';
 import type { RelayState } from './relay.js';
 import {
@@ -51,17 +52,25 @@ export interface PairingCode {
   expiresAt: number;
 }
 
+/** The relay's answer to a usage ask (section 4.3). Per-member figures come from each member's `traffic()`. */
 export interface UsageReport {
   network: {
+    /** Bytes charged to the network over the last hour, in five-minute steps. */
     bytesHour: number;
-    bytesDay: number;
+    /** Connected members. */
     connections: number;
     limits: { rateBps: number; quotaBytesHour: number; trickleBps: number };
+    /** bytesHour / quotaBytesHour; 0 without a quota. */
     quotaUsed: number;
+    /** The trickle rate is in effect: send less (drop video, keep audio). */
     slowed: boolean;
   };
-  members: { id: string; bytesHour: number; bytesDay: number; connected: boolean }[];
 }
+
+/** The relay's budget for usage asks per network (section 4.3): this many at once... */
+export const USAGE_BURST = 3;
+/** ...then one per this many milliseconds. */
+export const USAGE_INTERVAL_MS = 10_000;
 
 export type PrimaryEvents = MemberEvents & {
   /** A newcomer completed pairing and is on the published roster. */
@@ -154,9 +163,14 @@ export class Primary extends Member<PrimaryEvents> {
     return this.publish(this.nextRoster(this.currentRoster.members.filter((m) => m.id !== nodeId)));
   }
 
-  /** Asks the relay for this network's usage. */
+  /**
+   * Asks the relay for this network's usage. The relay allows USAGE_BURST asks at once and then
+   * one per USAGE_INTERVAL_MS per network; beyond that it refuses, and this rejects with
+   * RateLimitedError. Ask rarely, and keep the answer.
+   */
   usage(): Promise<UsageReport> {
     const id = b64u(randomBytes(9));
+    this.diag?.event({ kind: 'usageAsk' });
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.usageRequests.delete(id);
@@ -238,12 +252,11 @@ export class Primary extends Member<PrimaryEvents> {
         if (!req) return;
         clearTimeout(req.timer);
         this.usageRequests.delete(msg.id as string);
-        req.resolve({ network: msg.network, members: msg.members } as UsageReport);
+        const report = { network: msg.network } as UsageReport;
+        this.diag?.event({ kind: 'usage', slowed: report.network?.slowed === true, trickleBps: Number(report.network?.limits?.trickleBps) || 0 });
+        req.resolve(report);
         return;
       }
-      case 'usageAlert':
-        this.emit('usageAlert', { quotaUsed: Number(msg.quotaUsed), slowed: msg.slowed === true } satisfies UsageAlert);
-        return;
       case 'pairing':
         this.onPairing(msg);
         return;
@@ -255,7 +268,12 @@ export class Primary extends Member<PrimaryEvents> {
         if (req) {
           clearTimeout(req.timer);
           this.usageRequests.delete(msg.id as string);
-          req.reject(new LinkError(msg.code === 'forbidden' ? 'refused' : 'invalid', `relay answered ${String(msg.code)}`));
+          if (msg.code === 'rate_limited') {
+            this.diag?.event({ kind: 'usageRefused' });
+            req.reject(new RateLimitedError('usage request'));
+          } else {
+            req.reject(new LinkError(msg.code === 'forbidden' ? 'refused' : 'invalid', `relay answered ${String(msg.code)}`));
+          }
           return;
         }
         super.onControl(msg);

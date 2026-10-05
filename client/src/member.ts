@@ -1,16 +1,17 @@
 // A member of a network: one relay connection, sessions with the other
 // members, the roster it holds, and the application's message stream.
 
-import { ClosedError, InvalidError, ReplacedError, RevokedError, TimeoutError, type LinkError } from './errors.js';
+import { DIAGNOSTICS, type CoreStats, type DiagnosticsHook, type DiagnosticsReport } from './diag-hook.js';
+import { ClosedError, InvalidError, ReplacedError, RevokedError, TimeoutError, UnreachableError, type LinkError } from './errors.js';
 import { Emitter } from './events.js';
-import { decodeFrame, encodeFrame, FrameType, type SessionMessage } from './frames.js';
+import { decodeFrame, encodeFrame, FRAME_HEADER, FrameType, type SessionMessage } from './frames.js';
 import { nodeIdFromBytes, nodeIdToBytes, type Identity } from './identity.js';
 import { canonicalize } from './jcs.js';
 import { RelayConnection, type RelayState } from './relay.js';
 import { acceptanceProblem, cloneRoster, findMember, isValidRoster, type Roster } from './roster.js';
 import { DEFAULT_CREDIT_WINDOW, DEFAULT_SESSION_TIMING, INITIAL_CREDIT, SessionManager, type SessionTiming } from './sessions.js';
 import { signResignation } from './signed.js';
-import { defaultWebSocket, type ControlMessage, type WebSocketConstructor } from './socket.js';
+import { chooseSocket, type ControlMessage, type WebSocketConstructor, type WebSocketStreamConstructor } from './socket.js';
 
 export interface Timing extends SessionTiming {
   /** First reconnect delay (500 ms), doubling... */
@@ -36,8 +37,11 @@ export interface MemberOptions {
   relayUrl?: string;
   /** The primary key pinned at pairing; defaults to `roster.primary.ed25519`. */
   pinnedPrimary?: string;
-  /** Defaults to globalThis.WebSocket. */
+  /** A WHATWG WebSocket constructor. When given, it is used as is. */
   WebSocket?: WebSocketConstructor;
+  /** A WHATWG WebSocketStream constructor, for real back-pressure. Without either option, a
+   * member uses globalThis.WebSocketStream where it exists and globalThis.WebSocket otherwise. */
+  WebSocketStream?: WebSocketStreamConstructor;
   /** The receive window this member grants each session: 1 MiB (the initial credit) or more. */
   creditWindow?: number;
   timing?: Partial<Timing>;
@@ -54,10 +58,35 @@ export interface InboundMessage {
   bytes: Uint8Array;
 }
 
-export interface UsageAlert {
-  quotaUsed: number;
-  slowed: boolean;
+/** Counts in one direction. */
+export interface Traffic {
+  /** Whole application messages, and their payload bytes. */
+  messages: number;
+  bytes: number;
+  /** Routed frames of every type (handshakes, credit and control included) and their full size,
+   * header included: what the relay charges. Pairing frames are not counted. */
+  frames: number;
+  frameBytes: number;
 }
+
+export interface PeerTraffic {
+  sent: Traffic;
+  received: Traffic;
+}
+
+/** `member.traffic()`: what this member sent and received since `since`, per peer and in total. */
+export interface TrafficReport {
+  /** Unix milliseconds the counts start from (creation, or the last `resetTraffic`). */
+  since: number;
+  total: PeerTraffic;
+  /** UTF-8 bytes of control messages exchanged with the relay. */
+  relay: { sent: number; received: number };
+  peers: Record<string, PeerTraffic>;
+}
+
+const zeroTraffic = (): Traffic => ({ messages: 0, bytes: 0, frames: 0, frameBytes: 0 });
+const zeroPeer = (): PeerTraffic => ({ sent: zeroTraffic(), received: zeroTraffic() });
+const copyPeer = (p: PeerTraffic): PeerTraffic => ({ sent: { ...p.sent }, received: { ...p.received } });
 
 export type MemberEvents = {
   state: MemberState;
@@ -69,8 +98,6 @@ export type MemberEvents = {
   moved: { network: string };
   /** A non-fatal `error` control message from the relay. */
   relayError: { code: string; message?: string; id?: string };
-  /** Primary only: the relay's quota or shaping state changed. */
-  usageAlert: UsageAlert;
 };
 
 function mapState(s: RelayState): MemberState {
@@ -90,6 +117,13 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   private readers: ((r: IteratorResult<InboundMessage>) => void)[] = [];
   private stateWaiters: (() => void)[] = [];
   private rosterWaiters: (() => void)[] = [];
+  private trafficSince: number;
+  private trafficTotal = zeroPeer();
+  private trafficPeers = new Map<string, PeerTraffic>();
+  private relayTextBase = { sent: 0, received: 0 };
+  private wasRegistered = false;
+  /** Installed by the diagnostics entry point; checked once per send and per receive. */
+  protected diag: DiagnosticsHook | undefined;
 
   /** Creates the member and starts connecting; see also `Member.connect`. */
   constructor(opts: MemberOptions) {
@@ -110,7 +144,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
       url: opts.relayUrl ?? opts.roster.relay,
       identity: opts.identity,
       roster: () => this.currentRoster,
-      WebSocket: opts.WebSocket ?? defaultWebSocket(),
+      WebSocket: chooseSocket({ WebSocket: opts.WebSocket, WebSocketStream: opts.WebSocketStream }),
       now: this.now,
       backoffInitialMs: this.timing.backoffInitialMs,
       backoffMaxMs: this.timing.backoffMaxMs,
@@ -123,10 +157,15 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
       creditWindow,
       timing: this.timing,
       sendFrame: (type, peer, body) => this.sendFrame(type, peer, body),
+      writable: () => this.relay.writable,
+      whenWritable: (f) => this.relay.whenWritable(f),
+      bufferedAmount: () => this.relay.bufferedAmount,
+      note: (e) => this.diag?.event(e),
       deliver: (from, bytes, release) => this.deliver({ from, bytes }, release),
       control: (from, msg) => this.onSessionControl(from, msg),
       peerVersion: (from, version) => this.onPeerVersion(from, version),
     });
+    this.trafficSince = this.now();
     this.relay.on('state', (s) => this.onRelayState(s));
     this.relay.on('disconnect', (d) => this.emitAny('disconnect', d));
     this.relay.on('moved', (m) => this.emitAny('moved', m));
@@ -207,8 +246,68 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
    */
   async send(peerId: string, bytes: Uint8Array): Promise<void> {
     if (!(bytes instanceof Uint8Array)) throw new InvalidError('bytes must be a Uint8Array');
-    await this.online();
-    return this.sessions.send(peerId, bytes);
+    const diag = this.diag;
+    if (diag) diag.send(peerId, bytes); // `throw` mode fails the send here, before anything goes out
+    const began = diag ? this.now() : 0;
+    try {
+      await this.online();
+      await this.sessions.send(peerId, bytes);
+    } catch (e) {
+      if (diag) {
+        if (e instanceof UnreachableError) diag.event({ kind: 'unreachable', peer: peerId });
+        diag.sent(peerId, bytes.length, this.now() - began, true);
+      }
+      throw e;
+    }
+    const t = this.peerTraffic(peerId).sent;
+    t.messages++;
+    t.bytes += bytes.length;
+    this.trafficTotal.sent.messages++;
+    this.trafficTotal.sent.bytes += bytes.length;
+    if (diag) diag.sent(peerId, bytes.length, this.now() - began, false);
+  }
+
+  /** What this member sent and received, per peer and in total, since creation or `resetTraffic()`. */
+  traffic(): TrafficReport {
+    const peers: Record<string, PeerTraffic> = {};
+    for (const [id, p] of this.trafficPeers) peers[id] = copyPeer(p);
+    return {
+      since: this.trafficSince,
+      total: copyPeer(this.trafficTotal),
+      relay: { sent: this.relay.textSent - this.relayTextBase.sent, received: this.relay.textReceived - this.relayTextBase.received },
+      peers,
+    };
+  }
+
+  resetTraffic(): void {
+    this.trafficSince = this.now();
+    this.trafficTotal = zeroPeer();
+    this.trafficPeers.clear();
+    this.relayTextBase = { sent: this.relay.textSent, received: this.relay.textReceived };
+  }
+
+  /** The diagnostics report, when `enableDiagnostics` (from `@frontierengineer/link-client/diagnostics`) is on. */
+  diagnostics(): DiagnosticsReport | undefined {
+    return this.diag?.report(this.coreStats());
+  }
+
+  resetDiagnostics(): void {
+    this.diag?.reset();
+  }
+
+  /** Installs or removes the diagnostics hook; used by the diagnostics entry point only. */
+  [DIAGNOSTICS](hook: DiagnosticsHook | undefined): void {
+    this.diag = hook;
+  }
+
+  protected coreStats(): CoreStats {
+    return { ...this.sessions.stats };
+  }
+
+  private peerTraffic(id: string): PeerTraffic {
+    let p = this.trafficPeers.get(id);
+    if (!p) this.trafficPeers.set(id, (p = zeroPeer()));
+    return p;
   }
 
   /**
@@ -329,10 +428,24 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   }
 
   protected sendFrame(type: number, peer: string, body: Uint8Array): boolean {
-    return this.relay.sendBinary(encodeFrame(type, nodeIdToBytes(peer), body));
+    // Section 6: 0x08 only to a relay that lists `control`; otherwise the same body as 0x03.
+    if (type === FrameType.Control && !this.relay.features.has('control')) type = FrameType.Data;
+    if (!this.relay.sendBinary(encodeFrame(type, nodeIdToBytes(peer), body))) return false;
+    const size = FRAME_HEADER + body.length;
+    const t = this.peerTraffic(peer).sent;
+    t.frames++;
+    t.frameBytes += size;
+    this.trafficTotal.sent.frames++;
+    this.trafficTotal.sent.frameBytes += size;
+    return true;
   }
 
   private onRelayState(s: RelayState): void {
+    if (this.diag) {
+      if (s === 'connecting' && this.wasRegistered) this.diag.event({ kind: 'reconnect' });
+      if (s === 'replaced') this.diag.event({ kind: 'replaced' });
+    }
+    if (s === 'registered') this.wasRegistered = true;
     if (s !== 'registered') {
       const err: LinkError =
         s === 'revoked'
@@ -373,13 +486,25 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
       return;
     }
     if (f.type === FrameType.Pair) return this.onPairFrame(f.peer, f.body);
-    this.sessions.handleFrame(f, nodeIdFromBytes(f.peer));
+    const from = nodeIdFromBytes(f.peer);
+    const t = this.peerTraffic(from).received;
+    t.frames++;
+    t.frameBytes += bytes.length;
+    this.trafficTotal.received.frames++;
+    this.trafficTotal.received.frameBytes += bytes.length;
+    this.sessions.handleFrame(f, from);
   }
 
   /** Hook for the primary. */
   protected onPairFrame(_channel: Uint8Array, _body: Uint8Array): void {}
 
   private deliver(msg: InboundMessage, release: () => void): void {
+    const t = this.peerTraffic(msg.from).received;
+    t.messages++;
+    t.bytes += msg.bytes.length;
+    this.trafficTotal.received.messages++;
+    this.trafficTotal.received.bytes += msg.bytes.length;
+    if (this.diag) this.diag.received(msg.from, msg.bytes);
     this.inbox.push({ msg, release });
     this.pump();
   }

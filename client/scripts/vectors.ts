@@ -303,6 +303,8 @@ export function buildVectors(): unknown {
     frame('refused', FrameType.Refused, Uint8Array.of(1)),
     frame('pair', FrameType.Pair, p1),
     frame('reset', FrameType.Reset, u32be(0x0badcafe)),
+    // A credit message as control: the body is exactly a data body (section 6).
+    frame('control', FrameType.Control, dataBody(0xfffffffe, fromHex('dd'.repeat(21)))),
   ];
   const resignJson = JSON.stringify({ node: resignation.node, ts: resignation.ts, sig: resignation.sig });
   const sm = (name: string, m: SessionMessage) => ({ name, encoding: toHex(encodeSessionMessage(m)) });

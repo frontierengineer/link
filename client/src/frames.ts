@@ -15,6 +15,9 @@ export const FrameType = {
   Refused: 0x05,
   Pair: 0x06,
   Reset: 0x07,
+  /** As Data, carrying a session message other than `message`; sent only to a relay that lists
+   * the `control` feature, which delivers it as Data (section 6). */
+  Control: 0x08,
 } as const;
 export type FrameType = (typeof FrameType)[keyof typeof FrameType];
 

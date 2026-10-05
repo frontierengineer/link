@@ -3,7 +3,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canonicalize, createIdentity, MAX_ROSTER_BYTES, Member, memberFromIdentity, nodeIdFromEd25519, pair, Primary, RosterFullError, rosterSize, signRoster, type Roster } from '../src/index.js';
+import { canonicalize, createIdentity, MAX_ROSTER_BYTES, Member, memberFromIdentity, nodeIdFromEd25519, pair, Primary, RateLimitedError, RosterFullError, rosterSize, signRoster, type Roster } from '../src/index.js';
 import { b64u, fromB64u, randomBytes } from '../src/bytes.js';
 import { encodeFrame, FrameType } from '../src/frames.js';
 import { NewcomerExchange } from '../src/pairing.js';
@@ -99,7 +99,7 @@ test('a sender waits for credit while the receiver does not consume', async () =
 });
 
 test('rekey: the initiator starts a new session on a timer and messages keep flowing in order', async () => {
-  const timing = { ...FAST, rekeyIntervalMs: 150, retireGraceMs: 100 };
+  const timing = { ...FAST, rekeyIntervalMs: 150, retireGraceMs: 300 };
   const net = await startNetwork({ member: { timing } });
   try {
     const worker = await net.add('worker');
@@ -400,21 +400,25 @@ test('reconnect with backoff after a drop; 4009 surfaces moved and re-resolves t
   }
 });
 
-test('usage and usageAlert reach the primary', async () => {
+test('usage: the primary asks, the relay answers network totals, and refuses asks over its budget', async () => {
   const net = await startNetwork();
   try {
     const worker = await net.add('worker');
     await worker.send(net.primary.id, bytesOf('some bytes'));
     const u = await net.primary.usage();
     assert.equal(u.network.connections, 2);
-    const w = u.members.find((m) => m.id === worker.id)!;
-    assert.equal(w.connected, true);
-    assert.ok(w.bytesHour > 0);
-    const alerts: { quotaUsed: number; slowed: boolean }[] = [];
-    net.primary.on('usageAlert', (a) => alerts.push(a));
-    net.relay.usageAlert(net.primary.id, 0.8, false);
-    await until(() => alerts.length === 1, 'usageAlert');
-    assert.deepEqual(alerts[0], { quotaUsed: 0.8, slowed: false });
+    assert.ok(u.network.bytesHour > 0);
+    assert.deepEqual(Object.keys(u), ['network']);
+    // Three at once are within the budget (the first above was one); the fourth is refused.
+    await net.primary.usage();
+    await net.primary.usage();
+    await assert.rejects(net.primary.usage(), (e: unknown) => e instanceof RateLimitedError && e.code === 'rate-limited');
+    // A member that is not the primary is forbidden.
+    const errors: { code: string; id?: string }[] = [];
+    worker.on('relayError', (e) => errors.push(e));
+    assert.ok((worker as unknown as { relay: { sendControl(m: object): boolean } }).relay.sendControl({ type: 'usage', id: 'x' }));
+    await until(() => errors.length === 1, 'the forbidden answer');
+    assert.deepEqual(errors[0], { code: 'forbidden', id: 'x' });
   } finally {
     await net.close();
   }
@@ -692,7 +696,8 @@ test('a roster near 65000 bytes travels in one session message; the primary refu
     const size = rosterSize(primary.roster);
     assert.ok(size <= MAX_ROSTER_BYTES && size > MAX_ROSTER_BYTES - entry, `v3 is ${size} bytes`);
     await until(() => worker.roster.version === 3, 'the worker to receive v3 in a session');
-    const data = relay.frameLog.filter((f) => f.type === FrameType.Data);
+    const data = relay.frameLog.filter((f) => f.type === FrameType.Data || f.type === FrameType.Control);
+    assert.ok(data.some((f) => f.type === FrameType.Control && f.size > 60_000), 'the roster went as control');
     assert.ok(data.every((f) => f.size <= 18 + 4 + 65535), 'no Noise message over 65535 bytes');
 
     // No room left: a new code is refused at once, and a code opened earlier fails at P5.
@@ -742,5 +747,61 @@ test('a responder that sends on an expired session lets a message still arriving
     assert.deepEqual((await sReader.next()).value!.bytes, second);
   } finally {
     await net.close();
+  }
+});
+
+test('traffic: each member counts its own messages and frames per peer, matching what the relay saw', async () => {
+  const net = await startNetwork();
+  try {
+    const worker = await net.add('worker');
+    const pIn = inbox(net.primary);
+    worker.resetTraffic();
+    net.primary.resetTraffic();
+    const from = net.relay.frameLog.length;
+    for (const n of [10, 2000, 70_000]) await worker.send(net.primary.id, new Uint8Array(n));
+    await pIn.next(3);
+    await until(() => net.relay.frameLog.slice(from).some((f) => f.from === net.primary.id && f.type === FrameType.Control), 'credit back');
+    const w = worker.traffic();
+    const p = net.primary.traffic();
+    const toPrimary = net.relay.frameLog.slice(from).filter((f) => f.from === worker.id);
+    const toWorker = net.relay.frameLog.slice(from).filter((f) => f.from === net.primary.id);
+    assert.deepEqual(w.peers[net.primary.id]!.sent, {
+      messages: 3,
+      bytes: 72_010,
+      frames: toPrimary.length,
+      frameBytes: toPrimary.reduce((a, f) => a + f.size, 0),
+    });
+    assert.deepEqual(w.total.sent, w.peers[net.primary.id]!.sent);
+    assert.deepEqual(p.peers[worker.id]!.received.messages, 3);
+    assert.deepEqual(p.peers[worker.id]!.received.bytes, 72_010);
+    assert.equal(p.peers[worker.id]!.received.frameBytes, toPrimary.reduce((a, f) => a + f.size, 0));
+    assert.equal(w.peers[net.primary.id]!.received.frameBytes, toWorker.reduce((a, f) => a + f.size, 0));
+    assert.equal(w.relay.sent, 0, 'reset after registering');
+    await net.primary.usage();
+    assert.ok(net.primary.traffic().relay.sent > 0 && net.primary.traffic().relay.received > 0);
+  } finally {
+    await net.close();
+  }
+});
+
+test('control frames: 0x08 only to a relay that lists control; otherwise the same messages go as 0x03', async () => {
+  for (const features of [['control'], [] as string[]]) {
+    const net = await startNetwork({ relay: { features } });
+    try {
+      const worker = await net.add('worker');
+      const pIn = inbox(net.primary);
+      for (let i = 0; i < 3; i++) await worker.send(net.primary.id, new Uint8Array(40_000));
+      await pIn.next(3);
+      // The primary returns credit, and pushes the roster, as session control.
+      await until(() => net.relay.frameLog.some((f) => f.from === net.primary.id && f.to === worker.id && f.type !== FrameType.HandshakeResp), 'credit');
+      const types = new Set(net.relay.frameLog.filter((f) => f.from === net.primary.id).map((f) => f.type));
+      if (features.length) assert.ok(types.has(FrameType.Control), 'control used');
+      else assert.ok(!types.has(FrameType.Control), 'never 0x08 without the feature');
+      const wIn = inbox(worker);
+      await net.primary.send(worker.id, bytesOf('both ways'));
+      assert.equal(textOf((await wIn.next())[0]!.bytes), 'both ways');
+    } finally {
+      await net.close();
+    }
   }
 });

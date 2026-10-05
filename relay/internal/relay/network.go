@@ -48,6 +48,7 @@ type network struct {
 	members    map[link.ID]*conn
 	emptySince int64         // s.mono()
 	idleAt     *list.Element // in Server.idle while nobody is connected
+	idleOwner  *idleOwner
 	idleSize   int64
 	hour       hourWindow // bytes charged over the last hour
 	rateTAT    int64      // the rate bucket, as a theoretical arrival time
@@ -187,7 +188,8 @@ func (c *conn) admit(r *link.Roster, id link.ID, pub ed25519.PublicKey, now time
 	s := c.s
 	isMember := func(rr *link.Roster) bool {
 		m := rr.Member(id)
-		return m != nil && bytes.Equal(m.Ed25519, pub)
+		// A compact record (idle.go) holds ids only; an id is derived from its key, checked in step 2.
+		return m != nil && (rr.Raw == nil || bytes.Equal(m.Ed25519, pub))
 	}
 	sh := s.netShard(r.Network)
 	sh.mu.Lock()
@@ -215,7 +217,9 @@ func (c *conn) admit(r *link.Roster, id link.ID, pub ed25519.PublicKey, now time
 	case r.Version > n.roster.Version:
 		evict = n.adoptLocked(r, s.mono())
 	case r.Version < n.roster.Version:
-		newer = n.roster.Raw
+		newer = n.roster.Raw // none from a compact record: the member learns it from its peers
+	case n.roster.Raw == nil && sameMembers(r, n.roster):
+		n.roster = r // the roster the compact record was cut from, back whole
 	}
 	member := isMember(n.roster)
 	var old *conn
@@ -231,7 +235,7 @@ func (c *conn) admit(r *link.Roster, id link.ID, pub ed25519.PublicKey, now time
 			c.ipPending = false
 		}
 	}
-	s.syncIdleLocked(n)
+	s.syncIdleLocked(n, c.ip)
 	n.mu.Unlock()
 	for _, e := range evict {
 		e.closeWith(closeNotMember, "not a member", false)
@@ -242,9 +246,22 @@ func (c *conn) admit(r *link.Roster, id link.ID, pub ed25519.PublicKey, now time
 	}
 
 	c.nc.SetReadDeadline(time.Time{})
-	c.origin, c.ip = "", ""
+	c.origin = ""
 	if old != nil && old != c {
 		old.closeWith(closeReplaced, "replaced by a newer connection", false)
+	}
+	return true
+}
+
+// sameMembers reports whether a and b list the same member ids (both are sorted by id).
+func sameMembers(a, b *link.Roster) bool {
+	if len(a.Members) != len(b.Members) {
+		return false
+	}
+	for i := range a.Members {
+		if a.Members[i].ID != b.Members[i].ID {
+			return false
+		}
 	}
 	return true
 }
@@ -298,7 +315,7 @@ func (c *conn) pushRoster(data []byte) {
 		return
 	}
 	evict := n.adoptLocked(r, c.s.mono())
-	c.s.syncIdleLocked(n)
+	c.s.syncIdleLocked(n, c.ip)
 	n.mu.Unlock()
 	for _, e := range evict {
 		e.closeWith(closeNotMember, "not a member", false)

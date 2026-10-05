@@ -314,7 +314,7 @@ func (s *Server) unregister(c *conn) {
 				n.emptySince = s.mono()
 			}
 		}
-		s.syncIdleLocked(n)
+		s.syncIdleLocked(n, c.ip)
 		n.mu.Unlock()
 		s.trimIdle()
 	}

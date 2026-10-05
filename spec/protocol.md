@@ -69,11 +69,16 @@ without padding. `b32` is RFC 4648 base32, lowercase, without padding.
 ## 4. Connecting to the relay
 
 WebSocket over TLS, path `/v1`. Text frames carry control messages, one JSON object each with a
-`type`, at most 1 MiB (a roster travels inside some of them). Binary frames carry routed frames (section 6).
+`type`, at most 131072 bytes (128 KiB; a roster, at most 65000 bytes, travels inside some of
+them). Larger ones close the connection `4000`. Binary frames carry routed frames (section 6).
 
 ### 4.1 Registration
 
-1. Relay → node: `{"type":"hello","version":1,"challenge":"<b64u 32 bytes>"}`
+1. Relay → node: `{"type":"hello","version":1,"challenge":"<b64u 32 bytes>","features":["control"]}`
+
+   `features` lists optional behaviours the relay supports; a node ignores names it does not
+   know, and treats a missing `features` as empty. `control`: the relay accepts routed frames of
+   type `0x08` (section 6).
 2. Node → relay:
    ```json
    {"type":"register","network":"<id>","node":"<id>","ed25519":"<b64u>",
@@ -102,7 +107,9 @@ WebSocket over TLS, path `/v1`. Text frames carry control messages, one JSON obj
    the newest roster no longer lists it.
 
 A node must send nothing but `register` (or `pair`) before `registered`, and must send it within
-30 seconds of `hello`; otherwise the relay closes `4000`. Malformed ids, or keys and signatures of
+30 seconds of `hello`; otherwise the relay closes `4000`. A connection that has not registered
+(a pairing newcomer's included) may send at most 16 WebSocket frames, control frames included;
+the 17th closes it `4000`. Malformed ids, or keys and signatures of
 the wrong length, are shape errors (`4000`). Per-IP limits are checked before signatures; over
 the limit, the relay answers `rate_limited` and closes `4002`. Membership is checked before a
 network the relay does not know is created, so a non-member never uses up an IP address's
@@ -128,21 +135,24 @@ copy wins and nothing is sent back.
 
 ### 4.3 Usage
 
+Usage is request-only: the relay never pushes it.
+
 - The primary may send `{"type":"usage","id":"<request id>"}`. The relay answers:
   ```json
   {"type":"usage","id":"<request id>",
-   "network":{"bytesHour":0,"bytesDay":0,"connections":3,
+   "network":{"bytesHour":0,"connections":3,
               "limits":{"rateBps":1048576,"quotaBytesHour":0,"trickleBps":16384},
-              "quotaUsed":0.0,"slowed":false},
-   "members":[{"id":"<node id>","bytesHour":0,"bytesDay":0,"connected":true}]}
+              "quotaUsed":0.0,"slowed":false}}
   ```
-  `bytes*` count bytes relayed from that member (frame bodies and headers). A `quotaBytesHour` of
-  `0` means no quota, and `quotaUsed` is then `0`.
-- The relay pushes `{"type":"usageAlert","quotaUsed":0.8,"slowed":false}` to the primary when
-  `quotaUsed` crosses 0.5, 0.8, 0.95 or 1 in either direction, or `slowed` changes; at most once a
-  second.
+  `bytesHour` is what the network was charged (section 9) over the last hour, in five-minute
+  steps. `connections` counts its connected members. A `quotaBytesHour` of `0` means no quota,
+  and `quotaUsed` is then `0`. Each member counts its own traffic; the relay keeps no
+  per-member figures.
+- Asks are limited per network: 3 at once, then one every 10 seconds. An ask beyond that is
+  refused, not queued: `{"type":"error","code":"rate_limited","id":"<request id>"}`.
 - A `usage` request from a node that is not the primary is answered
   `{"type":"error","code":"forbidden","id":"<request id>"}`.
+- Asks, answers and refusals are charged to the network like any other traffic (section 9).
 
 ### 4.4 Errors
 
@@ -246,11 +256,19 @@ the channel id, unchanged.
 | `0x05` | refused | `u8(reason)`; a member will not talk to the sender. Reason `1`: not on my roster |
 | `0x06` | pair | a pairing message (section 5.3) |
 | `0x07` | reset | `u32be(index)`; member → member: I hold no session with this receiver index |
+| `0x08` | control | as `0x03`; a session message other than `message` (section 7.3) |
 
 - The maximum binary frame is 1 MiB (1048576 bytes) including the header. Larger frames close
   the connection `4000`.
-- The relay forwards `0x01`–`0x03`, `0x05` and `0x07` only between registered members of the same
-  network, and answers `0x04` when the peer is not connected. It never parses bodies.
+- The relay forwards `0x01`–`0x03`, `0x05`, `0x07` and `0x08` only between registered members of
+  the same network, and answers `0x04` when the peer is not connected. It never parses bodies.
+- **Control.** A node may send a session message other than `message` (credit,
+  roster-request, roster, resign) as `0x08` instead of `0x03`, only to a relay whose `hello`
+  lists `control`. The body is exactly that of `0x03`: the same session, the same nonce
+  sequence. The relay delivers it as `0x03`, so a receiver never sees `0x08` and needs no new
+  behaviour; the type only lets the relay keep such frames ahead of shaping (section 9). A
+  relay without `control` closes `4000` on `0x08`.
+- A pairing newcomer's `pair` frames are at most 1024 bytes each; a larger one closes it `4000`.
 
 ## 7. Sessions
 
@@ -311,8 +329,11 @@ Each decrypted plaintext starts with a type byte:
     message bytes (the `bytes` of `message` plaintexts) up to the credit it holds, and waits
     otherwise.
   - The receiver returns credit with `credit` messages: for complete messages as its application
-    takes them, and for fragments of a message still arriving at once while the application has
+    takes them, and for fragments of a message still arriving while the application has
     nothing waiting, so a message larger than the window cannot deadlock.
+  - Credit is returned in batches: at once when 65536 bytes or more are owed, and otherwise
+    no later than 250 ms after credit began to be owed. One `credit` message per received
+    message would make credits a large share of all frames.
   - A receiver that wants a larger window (a client setting) simply grants extra credit at any
     time. Nothing is negotiated.
   - Credit and reassembly belong to one session.
@@ -338,32 +359,63 @@ A self-hosted relay defaults every limit to off; the values below are the public
 
 | Setting | Meaning | Public default |
 |---|---|---|
-| `LINK_RATE_BPS` | bytes per second relayed for a network | 1048576 |
-| `LINK_QUOTA_BYTES_HOUR` | rolling hourly quota (0 = none) | set per deployment |
+| `LINK_RATE_BPS` | bytes per second charged to a network | 1048576 |
+| `LINK_QUOTA_BYTES_HOUR` | quota over the last hour (0 = none) | set per deployment |
 | `LINK_TRICKLE_BPS` | rate once the quota is spent | 16384 |
-| `LINK_QUEUE_BYTES` | queued bytes for one recipient before senders are paused | 4194304 |
+| `LINK_QUEUE_BYTES` | bytes held in the relay for one recipient before its senders pause | 0 |
 | `LINK_SLOW_PEER_SEC` | a recipient that drains nothing this long with a full queue is closed `4006` | 30 |
 | `LINK_IP_REGISTER_PER_MIN` | registrations per IP address | 60 |
 | `LINK_IP_PAIR_PER_MIN` | pairing attempts per IP address | 60 |
 | `LINK_IP_NETWORKS_PER_HOUR` | new networks first seen from one IP address | 10 |
+| `LINK_IP_PENDING` | connections from one IP address not registered yet (pairing newcomers included) | 16 |
+| `LINK_IP_CONNECTIONS` | connections from one IP address in all | 1024 |
 | `LINK_NETWORK_TTL` | forget an idle network's roster after | 168h |
+| `LINK_IDLE_ROSTERS_BYTES` | rosters (by signed size) kept for networks nobody is connected to; beyond it the longest idle are forgotten first | 1073741824 |
 | `LINK_ORIGIN` | the origin used to check signatures (else the request's Host) | — |
-| `LINK_TRUST_PROXY` | take the client IP from the first `X-Forwarded-For` hop | false |
+| `LINK_TRUST_PROXY` | the number of proxies in front of the relay (`true` = 1, `false` = 0) | 0 |
 | `LINK_ADDR` | listen address | `:8080` |
 
-- **Shaping.** When a network is over its rate, the relay stops reading from the sending
-  connection until its bucket allows more; frames are never dropped.
-- **Back-pressure.** When the bytes queued for one recipient exceed `LINK_QUEUE_BYTES`, the relay
-  stops reading from connections that have frames waiting for it, and resumes below the
-  threshold.
+- **Charging.** Every frame a registered member sends the relay (routed frames, the primary's
+  `pair` frames included, control messages, WebSocket pings and pongs) and every answer the
+  relay sends it in return (`error`, `usage`, `unreachable`) is charged to the member's network,
+  by its size on the wire (the WebSocket frame, header included), whether or not it reaches a
+  recipient. The rate and the quota both count charged bytes. A pairing newcomer, which has no
+  network yet, is not charged; its frames are limited instead (sections 4.1 and 6).
+- **Shaping.** When a network is over its rate, the relay holds back the connection that
+  sends next: it reads the header of its next data frame and does not read that frame's body,
+  or anything behind it, until the network's bucket allows (one second of burst). A network
+  over its quota is shaped at `LINK_TRICKLE_BPS`. Frames are never dropped.
+- **Control ahead of shaping.** Text control messages, WebSocket pings and pongs, and routed
+  frames of types `0x01`, `0x02`, `0x05`, `0x06`, `0x07` and `0x08`, each sent as one unfragmented
+  WebSocket frame, are read at once while the network's control budget allows: 4096 bytes per
+  second, with 131072 bytes of burst. Beyond the budget, and for any fragmented message,
+  control waits like data. It is charged like data either way.
+- **Back-pressure.** A sender that hands a frame to a recipient whose queue in the relay then
+  holds more than `LINK_QUEUE_BYTES` (0: anything at all) stops being read until that queue
+  drains. With the default, each sender has at most one frame waiting for a recipient, the
+  relay holds no other buffer, and everything else is TCP's own flow control: the relay stops
+  reading, and the sender's kernel stops sending. A connection's own answers (`error`, `usage`,
+  `unreachable`) pause its reading beyond 65536 bytes queued.
 - **Liveness.** The relay sends a WebSocket ping every 30 seconds and drops a connection that
   has not answered by the next one. A connection the relay is currently pausing is exempt, since
-  its answer may be stuck behind frames held back.
+  its answer may be stuck behind frames held back. A node's own pings are answered with one pong
+  for the latest ping.
 - **Slowed** means the trickle rate is in effect. A quota without a trickle rate is reported but
   never slows.
-- With `LINK_QUEUE_BYTES` off, a recipient's queue counts as full for the slow-peer rule as soon
-  as anything is waiting for it.
-- `pair` frames do not count towards usage or rate limits.
+- **Connections per address.** An upgrade that would take an address over `LINK_IP_PENDING` or
+  `LINK_IP_CONNECTIONS` is answered HTTP 429 before any WebSocket exists. The client backs off
+  and retries as after any failed connection.
+- **Idle networks.** The relay's roster is a cache of what the primary signed: forgetting it is
+  what a restart does, and the next member to register brings it back. It is kept while anyone
+  of the network is connected, and after that for `LINK_NETWORK_TTL`, within
+  `LINK_IDLE_ROSTERS_BYTES` (longest idle forgotten first). While it is kept, it closes revoked
+  members at registration and brings members that were offline up to date, even with the
+  primary offline.
+- **Addresses.** Per-IP limits count IPv6 addresses by their /64 prefix. With
+  `LINK_TRUST_PROXY` set to n, the client address is the n-th `X-Forwarded-For` entry counted
+  from the right (the one the outermost trusted proxy added), never one the client wrote.
+- With `LINK_QUEUE_BYTES` at 0, a recipient's queue counts as full for the slow-peer rule as
+  soon as anything is waiting for it.
 
 ## 10. Close codes
 

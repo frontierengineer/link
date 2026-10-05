@@ -71,7 +71,7 @@ serves one install; the "public" column is what the shared relay runs with.
 | `LINK_IP_PENDING` | off | 16 | connections per IP address not registered yet; over it the upgrade is answered 429 |
 | `LINK_IP_CONNECTIONS` | off | 1024 | connections per IP address in all; over it the upgrade is answered 429 |
 | `LINK_NETWORK_TTL` | `168h` | `168h` | forget a network's roster after this long with nobody connected |
-| `LINK_IDLE_ROSTERS_BYTES` | off | 1073741824 | rosters kept for networks nobody is connected to; beyond it the longest idle are forgotten first |
+| `LINK_IDLE_ROSTERS_BYTES` | off | 1073741824 | memory for the rosters of networks nobody is connected to; beyond it, the address holding the most has its longest idle cut to a compact record (still refusing revoked members), then forgotten |
 | `LINK_PARK_IDLE` | `true` | `true` | on Linux, an idle connection holds no goroutine (its socket waits in epoll); `false` keeps a reader goroutine per connection. Not used with `LINK_TLS_CERT` |
 
 Durations take a Go duration (`168h`, `30s`) or a number of seconds. `LINK_PING_INTERVAL`,
@@ -84,8 +84,8 @@ fixes; leave them unset.
   it) and exits 0; members reconnect with backoff, to this relay or its replacement.
 - A restart loses nothing that matters: each network's roster comes back with its first member.
   The relay's roster is a cache; it is kept while anyone of the network is connected and then
-  for `LINK_NETWORK_TTL`, within `LINK_IDLE_ROSTERS_BYTES`, so creating networks to fill memory
-  only pushes other idle caches out. While kept, it closes revoked members at registration and
+  for `LINK_NETWORK_TTL`, within `LINK_IDLE_ROSTERS_BYTES`. Room is made at the address holding
+  the most idle rosters, so creating networks to fill memory evicts the attacker's own first. While kept, it closes revoked members at registration and
   updates members that were offline, even with the primary offline.
 - Memory is about 3.8 KB per idle connection on Linux behind a TLS terminator (measured at
   60 000 connections), plus about 3.6 KB of kernel memory per socket: about 7.5 GB for a

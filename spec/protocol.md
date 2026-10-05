@@ -104,7 +104,9 @@ them). Larger ones close the connection `4000`. Binary frames carry routed frame
    newer roster than the node presented, it adds `"roster":{ ... }` with that newer roster, and
    the node applies the acceptance rules of section 3. A member that was offline while the
    roster changed is therefore brought up to date at registration, and is closed `4008` only if
-   the newest roster no longer lists it.
+   the newest roster no longer lists it. A relay that keeps only a compact record of its newest
+   roster (section 9) sends a higher `rosterVersion` without `roster`; the node then learns the
+   roster from the primary or from its peers (section 7.1).
 
 A node must send nothing but `register` (or `pair`) before `registered`, and must send it within
 30 seconds of `hello`; otherwise the relay closes `4000`. A connection that has not registered
@@ -130,8 +132,10 @@ copy wins and nothing is sent back.
 - After registration, an unknown control message type is answered `bad_request` and the
   connection stays open. A node sending a frame of type `0x04` or an unknown type is closed
   `4000`.
-- The relay forgets a network's roster once it has had no connected member for
-  `LINK_NETWORK_TTL` (default 7 days).
+- The relay's roster is a cache: it forgets a network's roster once it has had no connected
+  member for `LINK_NETWORK_TTL` (default 7 days), or sooner to stay within
+  `LINK_IDLE_ROSTERS_BYTES`, first cutting it to a compact record (section 9). Members do not
+  depend on it for revocation (section 8).
 
 ### 4.3 Usage
 
@@ -286,8 +290,11 @@ roster.
   roster, and requires that entry to be the member the relay named as the frame's sender. Either
   check failing: it answers `refused` with reason `1` and drops the handshake. The initiator
   likewise checks the responder's key when it reads message 2.
-- If a payload shows the peer holds a newer roster, the side that is behind asks the primary for
-  it (section 7.3).
+- **Rosters spread member to member.** If a payload shows the peer holds a newer roster, the
+  side that is behind asks that peer for it (`roster-request`, section 7.3; the primary when it
+  cannot open a session to the peer). If it shows the peer is behind, and the peer is on this
+  side's roster, this side sends the peer its roster. A roster is accepted only under section
+  3's rules, signed by the pinned primary key, so it may come from any member.
 - Handshake timeout: 10 seconds per message.
 
 ### 7.2 Transport
@@ -348,7 +355,14 @@ Each decrypted plaintext starts with a type byte:
 
 - The primary publishes a roster without the member, pushes it to the relay (section 4.2) and to
   every member.
-- Members drop sessions with peers no longer on the roster, and refuse their handshakes.
+- Members drop sessions with peers no longer on the roster, and refuse their handshakes. A
+  member that was offline learns the new roster from the relay at registration, or from the
+  first up-to-date member it meets (section 7.1), so revocation reaches it with the primary
+  offline and whatever the relay remembers: members enforce it themselves, and the relay is not
+  trusted to.
+- A primary whose seed is lost cannot change the roster again: there is no second key that could
+  sign one, by design, since any such key could also admit or revoke. The way back is a new
+  network, with every node paired again.
 - A client whose registration is closed `4008`, or that accepts a roster no longer listing it,
   enters a terminal `revoked` state and stops retrying.
 
@@ -370,7 +384,7 @@ A self-hosted relay defaults every limit to off; the values below are the public
 | `LINK_IP_PENDING` | connections from one IP address not registered yet (pairing newcomers included) | 16 |
 | `LINK_IP_CONNECTIONS` | connections from one IP address in all | 1024 |
 | `LINK_NETWORK_TTL` | forget an idle network's roster after | 168h |
-| `LINK_IDLE_ROSTERS_BYTES` | rosters (by signed size) kept for networks nobody is connected to; beyond it the longest idle are forgotten first | 1073741824 |
+| `LINK_IDLE_ROSTERS_BYTES` | memory for the rosters of networks nobody is connected to; beyond it, room is made at the address holding the most | 1073741824 |
 | `LINK_ORIGIN` | the origin used to check signatures (else the request's Host) | — |
 | `LINK_TRUST_PROXY` | the number of proxies in front of the relay (`true` = 1, `false` = 0) | 0 |
 | `LINK_ADDR` | listen address | `:8080` |
@@ -408,9 +422,14 @@ A self-hosted relay defaults every limit to off; the values below are the public
 - **Idle networks.** The relay's roster is a cache of what the primary signed: forgetting it is
   what a restart does, and the next member to register brings it back. It is kept while anyone
   of the network is connected, and after that for `LINK_NETWORK_TTL`, within
-  `LINK_IDLE_ROSTERS_BYTES` (longest idle forgotten first). While it is kept, it closes revoked
-  members at registration and brings members that were offline up to date, even with the
-  primary offline.
+  `LINK_IDLE_ROSTERS_BYTES`. While kept, it closes revoked members at registration and brings
+  members that were offline up to date, even with the primary offline. An idle network counts
+  against the address of the last member connected to it. Over the budget, room is made at the
+  address holding the most: its longest idle roster is cut to a compact record (version and
+  member ids, enough to go on refusing members it does not list, but not to hand the roster
+  out), and a record is forgotten only once all that address's full rosters are cut. A node
+  that creates networks to fill memory therefore evicts its own first. A member presenting the
+  version a record was cut from restores the full roster.
 - **Addresses.** Per-IP limits count IPv6 addresses by their /64 prefix. With
   `LINK_TRUST_PROXY` set to n, the client address is the n-th `X-Forwarded-For` entry counted
   from the right (the one the outermost trusted proxy added), never one the client wrote.

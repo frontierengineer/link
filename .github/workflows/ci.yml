@@ -23,6 +23,10 @@ jobs:
           cache-dependency-path: relay/go.sum
       - run: go vet ./...
       - run: go test -race -count=1 ./...
+      # Again with a reader goroutine per connection (TLS in the relay, non-Linux, LINK_PARK_IDLE=false).
+      - run: go test -race -count=1 ./internal/relay
+        env:
+          LINK_TEST_NO_PARK: "1"
 
   client:
     name: client (typecheck, test, build)

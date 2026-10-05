@@ -17,6 +17,7 @@ on a port, and the relay never sees content.
 
 ```sh
 (cd relay && go vet ./... && go test -race -count=1 ./...)
+(cd relay && LINK_TEST_NO_PARK=1 go test -race -count=1 ./internal/relay)   # a goroutine per connection
 (cd client && npm ci && npm run typecheck && npm test && npm run build)
 (cd test && npm ci && npm test)                    # builds the client and the relay first
 (cd client/scripts/check-vectors-go && go run .)   # the client's vectors, checked in Go

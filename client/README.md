@@ -15,7 +15,7 @@ import { createIdentity, identityFromSeed, createNetwork, Primary, Member, pair 
 
 // The primary: create the network once, then persist the seed and the roster.
 const me = createIdentity();                                   // me.seed: 32 secret bytes
-const roster = createNetwork({ identity: me, relay: 'wss://eu.frontierengineer.link/v1' });
+const roster = createNetwork({ identity: me, relay: 'wss://frontierengineer.link/v1' });
 const primary = await Primary.connect({ identity: me, roster });
 primary.on('roster', (r) => save(r));                         // every accepted roster: persist it
 
@@ -122,11 +122,31 @@ links: `buildPairingLink`, `parsePairingLink`.
 - To a relay whose `hello` lists `control`, session messages other than application messages go
   as frame type `0x08`, which the relay keeps ahead of its shaping (spec section 9).
 - A message is never split across sessions: a rekey switches at a message boundary.
+- A handshake-init carries a stamp (wall-clock milliseconds, always above the last sent), and
+  a member refuses an init from a peer stamped no later than the last it accepted from it, so a
+  recorded init replayed by the relay or an observer changes nothing (spec section 7.1). The
+  cost is in clock steps: a member whose clock steps back below a stamp a peer stored is refused
+  by that peer until its clock passes it again (at most 10 minutes for an honest member: the
+  relay keeps every member within 5 minutes of its own clock), and one whose clock runs more
+  than 10 minutes ahead is refused until it is fixed. A restart, which in a browser is every page
+  load, costs nothing by itself: stamps come from the wall clock again.
 - Fragments carry at most 65517 bytes, so each transport message fits Noise's 65535 bytes.
 - A data frame for a session the receiver does not hold is answered `reset`; the sender drops the
   session and its next send handshakes again. The message in that frame is lost.
 - Losing the relay connection ends every session. Sends wait up to the handshake timeout for the
   connection to come back. `syncRoster()` and `resign()` repeat their request until answered.
+- **A peer is held to the protocol** (spec sections 7.2 to 7.4, 11). A session ends when its peer
+  sends message bytes beyond the credit granted, an empty fragment that says more follow, or a Noise
+  message over 65535 bytes. Per peer, a member keeps at most 2 × 64 MiB + 4 × `creditWindow` bytes
+  in reassembly or waiting for the application, 65536 waiting messages and 8 sessions. A peer gets a
+  roster (asked for, or pushed after a handshake) at most once per 250 ms, and never a second while
+  one is still unsent. Resets and handshake-inits come out of each id's own budget, kept across
+  reconnects and measured on a monotonic clock; a member id whose inits keep failing is silenced
+  alone; pairing channel setups per open code are budgeted; `relayError` and `pairingFailed` events
+  are rate-limited. More than 64 MiB unsent in the socket drops the connection, which reconnects.
+  Every JSON document read from the relay or a peer is parsed strictly: a repeated name, a lone
+  surrogate, more than 32 levels of nesting, or a `version`, `issuedAt` or `ts` not written as
+  digits only (`12`, never `12.0` or `-0`) makes it invalid.
 
 ## Rules for apps on Link
 

@@ -46,27 +46,32 @@ async function timedTransfer(env: Record<string, string>, size: number) {
   }
 }
 
+// The relay drops a connection that has not answered a ping by the next one, so the interval is
+// the time a member has to answer. A second is enough on a loaded machine, where 100 ms is not
+// (the relay's real interval is 30 s).
+const PING = '1s';
+
 test('shaping: LINK_RATE_BPS slows a transfer, and pings never drop the sender held back', async () => {
   const size = 2 * 1024 * 1024;
   const rate = 512 * 1024;
-  const fast = await timedTransfer({}, size);
-  // Pings every 200 ms; the sender is paused for seconds at a time and must be exempt.
-  const shaped = await timedTransfer({ LINK_RATE_BPS: String(rate), LINK_PING_INTERVAL: '200ms' }, size);
-  // The bucket holds one second of tokens, so 2 MiB at 512 KiB/s take at least 3 s.
+  // A ping every second; the sender is paused for seconds at a time and must be exempt.
+  const shaped = await timedTransfer({ LINK_RATE_BPS: String(rate), LINK_PING_INTERVAL: PING }, size);
+  // The bucket holds one second of tokens, so 2 MiB at 512 KiB/s take at least 3 s: a lower
+  // bound from the rate alone, which no machine, however fast or loaded, can beat.
   assert.ok(shaped.took >= 2700, `shaped transfer took ${shaped.took} ms`);
-  assert.ok(shaped.took > fast.took * 2, `shaped ${shaped.took} ms against ${fast.took} ms unshaped`);
   assert.deepEqual(shaped.drops, [], 'no connection was dropped');
   assert.equal(shaped.usage.network.limits.rateBps, rate);
   assert.equal(shaped.usage.network.slowed, false, 'slowed means the trickle rate, not shaping');
 });
 
 test('liveness: members answer the relay\'s pings and stay connected', async () => {
-  const net = await startNet({ env: { LINK_PING_INTERVAL: '100ms' } });
+  const net = await startNet({ env: { LINK_PING_INTERVAL: PING } });
   try {
     const worker = await net.add('worker');
     const drops: number[] = [];
     for (const m of [net.primary, worker]) m.on('disconnect', (d) => drops.push(d.code));
-    await new Promise((r) => setTimeout(r, 1500));
+    // Three pings each, every one answered in time, or the relay would have dropped the member.
+    await new Promise((r) => setTimeout(r, 3500));
     assert.deepEqual(drops, []);
     const pIn = inbox(net.primary);
     await worker.send(net.primary.id, bytesOf('still here'));

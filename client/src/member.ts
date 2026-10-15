@@ -6,10 +6,10 @@ import { ClosedError, InvalidError, ReplacedError, RevokedError, TimeoutError, U
 import { Emitter } from './events.js';
 import { decodeFrame, encodeFrame, FRAME_HEADER, FrameType, type SessionMessage } from './frames.js';
 import { nodeIdFromBytes, nodeIdToBytes, type Identity } from './identity.js';
-import { canonicalize } from './jcs.js';
+import { integerMember, parseJson } from './json.js';
 import { RelayConnection, type RelayState } from './relay.js';
 import { acceptanceProblem, cloneRoster, findMember, isValidRoster, type Roster } from './roster.js';
-import { DEFAULT_CREDIT_WINDOW, DEFAULT_SESSION_TIMING, INITIAL_CREDIT, SessionManager, type SessionTiming } from './sessions.js';
+import { Bucket, DEFAULT_CREDIT_WINDOW, DEFAULT_SESSION_TIMING, INITIAL_CREDIT, SessionManager, type SessionTiming } from './sessions.js';
 import { signResignation } from './signed.js';
 import { chooseSocket, type ControlMessage, type WebSocketConstructor, type WebSocketStreamConstructor } from './socket.js';
 
@@ -47,9 +47,33 @@ export interface MemberOptions {
   timing?: Partial<Timing>;
   /** On close code 4009: where the network lives now. */
   resolveRelay?: (network: string) => Promise<string | undefined>;
-  /** Clock, for tests. */
+  /** Wall clock, Unix milliseconds, for tests: signed times (`ts`, `issuedAt`) and expiry shown to
+   * the application. */
   now?: () => number;
+  /** Monotonic clock, milliseconds, for tests: every rate, interval and timeout (section 7.4).
+   * Defaults to `performance.now()`. A reading earlier than the last is held at the last, so a
+   * budget is never stranded by a clock that steps back. */
+  monotonicNow?: () => number;
 }
+
+/** A clock that never goes back: a reading earlier than the last is the last. */
+export function monotonic(read: () => number): () => number {
+  let last = -Infinity;
+  return () => {
+    const t = read();
+    if (t > last) last = t;
+    return last;
+  };
+}
+
+/** A roster goes to one peer, asked for or pushed, at most once in this long; offers within it
+ * are coalesced into one at its end (section 7.4). A roster can be 65000 bytes; a request, or a
+ * replayed handshake-init showing an old version, is small. */
+export const ROSTER_ANSWER_INTERVAL_MS = 250;
+
+/** `relayError` events: this many a second, this many at once (section 11). */
+export const RELAY_ERROR_RATE = 16;
+export const RELAY_ERROR_BURST = 64;
 
 export type MemberState = 'connecting' | 'connected' | 'disconnected' | 'revoked' | 'replaced' | 'closed';
 
@@ -112,6 +136,8 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   protected readonly sessions: SessionManager;
   protected readonly timing: Timing;
   protected readonly now: () => number;
+  /** For every rate, interval and timeout: never the wall clock, which can step back. */
+  protected readonly mono: () => number;
   private readonly inbox: { msg: InboundMessage; release: () => void }[] = [];
   private handler: ((m: InboundMessage) => void) | undefined;
   private readers: ((r: IteratorResult<InboundMessage>) => void)[] = [];
@@ -122,6 +148,10 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   private trafficPeers = new Map<string, PeerTraffic>();
   private relayTextBase = { sent: 0, received: 0 };
   private wasRegistered = false;
+  /** Budget for `relayError` events, so a relay's errors cannot flood the application. */
+  private readonly relayErrors = new Bucket(RELAY_ERROR_RATE, RELAY_ERROR_BURST);
+  /** Per peer: when a roster last went to it, and an offer due at the interval's end. */
+  private readonly rosterAnswers = new Map<string, { at: number; due: ReturnType<typeof setTimeout> | undefined }>();
   /** Installed by the diagnostics entry point; checked once per send and per receive. */
   protected diag: DiagnosticsHook | undefined;
 
@@ -136,6 +166,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     if (this.pinnedPrimary !== opts.roster.primary.ed25519) throw new InvalidError('the roster is not signed by the pinned primary');
     this.timing = { ...DEFAULT_TIMING, ...opts.timing };
     this.now = opts.now ?? Date.now;
+    this.mono = monotonic(opts.monotonicNow ?? (() => performance.now()));
     const creditWindow = opts.creditWindow ?? DEFAULT_CREDIT_WINDOW;
     if (!Number.isInteger(creditWindow) || creditWindow < INITIAL_CREDIT || creditWindow > 0xffffffff) {
       throw new InvalidError('creditWindow must be an integer from 1 MiB to 2^32 - 1');
@@ -153,17 +184,20 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     this.sessions = new SessionManager({
       identity: opts.identity,
       roster: () => this.currentRoster,
-      now: this.now,
+      now: this.mono,
+      wallNow: this.now,
       creditWindow,
       timing: this.timing,
       sendFrame: (type, peer, body) => this.sendFrame(type, peer, body),
       writable: () => this.relay.writable,
       whenWritable: (f) => this.relay.whenWritable(f),
       bufferedAmount: () => this.relay.bufferedAmount,
+      wirePosition: () => this.relay.wirePosition,
       note: (e) => this.diag?.event(e),
       deliver: (from, bytes, release) => this.deliver({ from, bytes }, release),
       control: (from, msg) => this.onSessionControl(from, msg),
       peerVersion: (from, version) => this.onPeerVersion(from, version),
+      rosterHint: () => this.askPrimary(),
     });
     this.trafficSince = this.now();
     this.relay.on('state', (s) => this.onRelayState(s));
@@ -174,7 +208,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
       if (msg.roster !== undefined) this.offerRoster(msg.roster);
       // A relay that keeps only a compact record of a newer roster says so without sending it;
       // the primary, or the first up-to-date peer met (onPeerVersion), hands it over.
-      else if (typeof msg.rosterVersion === 'number' && msg.rosterVersion > this.currentRoster.version) {
+      else if ((integerMember(msg, 'rosterVersion') ?? 0) > this.currentRoster.version) {
         queueMicrotask(() => this.askPrimary());
       }
     });
@@ -253,14 +287,14 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     if (!(bytes instanceof Uint8Array)) throw new InvalidError('bytes must be a Uint8Array');
     const diag = this.diag;
     if (diag) diag.send(peerId, bytes); // `throw` mode fails the send here, before anything goes out
-    const began = diag ? this.now() : 0;
+    const began = diag ? this.mono() : 0;
     try {
       await this.online();
       await this.sessions.send(peerId, bytes);
     } catch (e) {
       if (diag) {
         if (e instanceof UnreachableError) diag.event({ kind: 'unreachable', peer: peerId });
-        diag.sent(peerId, bytes.length, this.now() - began, true);
+        diag.sent(peerId, bytes.length, this.mono() - began, true);
       }
       throw e;
     }
@@ -269,7 +303,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     t.bytes += bytes.length;
     this.trafficTotal.sent.messages++;
     this.trafficTotal.sent.bytes += bytes.length;
-    if (diag) diag.sent(peerId, bytes.length, this.now() - began, false);
+    if (diag) diag.sent(peerId, bytes.length, this.mono() - began, false);
   }
 
   /** What this member sent and received, per peer and in total, since creation or `resetTraffic()`. */
@@ -413,6 +447,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     if (this.relay.state === 'closed') return;
     this.relay.close();
     this.sessions.close();
+    this.cancelRosterOffers(true);
   }
 
   // ── Internals ──
@@ -451,6 +486,12 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
       if (s === 'replaced') this.diag.event({ kind: 'replaced' });
     }
     if (s === 'registered') this.wasRegistered = true;
+    if (s === 'connecting') {
+      // Budgets carry across connections and refill only with time (section 7.4), so a relay
+      // that forces reconnects gains nothing; an offer due on the old connection is dropped,
+      // but when the last went to each peer is kept.
+      this.cancelRosterOffers();
+    }
     if (s !== 'registered') {
       const err: LinkError =
         s === 'revoked'
@@ -464,6 +505,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     }
     if (this.relay.terminal) {
       this.sessions.close();
+      this.cancelRosterOffers(true);
       for (const r of this.readers.splice(0)) r({ value: undefined, done: true });
     }
     this.onConnectionState(s);
@@ -479,7 +521,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
       const e: { code: string; message?: string; id?: string } = { code: String(msg.code) };
       if (typeof msg.message === 'string') e.message = msg.message;
       if (typeof msg.id === 'string') e.id = msg.id;
-      this.emitAny('relayError', e);
+      if (this.relayErrors.take(this.mono())) this.emitAny('relayError', e);
     }
   }
 
@@ -540,14 +582,12 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   private onSessionControl(from: string, msg: SessionMessage): void {
     switch (msg.type) {
       case 'roster-request':
-        this.sessions
-          .sendControl(from, { type: 'roster', json: canonicalize(this.currentRoster) })
-          .catch(() => undefined);
+        this.offerRosterTo(from);
         return;
       case 'roster': {
         let candidate: unknown;
         try {
-          candidate = JSON.parse(msg.json);
+          candidate = parseJson(msg.json);
         } catch {
           return;
         }
@@ -565,6 +605,39 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
 
   /** Hook for the primary. */
   protected onResign(_from: string, _json: string): void {}
+
+  /** Sends a peer this member's roster (it asked, or a handshake showed it behind) at once, or
+   * once at the end of ROSTER_ANSWER_INTERVAL_MS after the last, however often meanwhile. */
+  private offerRosterTo(from: string): void {
+    const now = this.mono();
+    const a = this.rosterAnswers.get(from);
+    if (a?.due !== undefined) return;
+    if (a && now - a.at < ROSTER_ANSWER_INTERVAL_MS) {
+      a.due = setTimeout(() => {
+        a.due = undefined;
+        a.at = this.mono();
+        this.sendRoster(from);
+      }, a.at + ROSTER_ANSWER_INTERVAL_MS - now);
+      (a.due as { unref?: () => void }).unref?.();
+      return;
+    }
+    this.rosterAnswers.set(from, { at: now, due: undefined });
+    this.sendRoster(from);
+  }
+
+  /** Drops offers due; `forget` also drops when the last went (on close). */
+  private cancelRosterOffers(forget = false): void {
+    for (const a of this.rosterAnswers.values()) {
+      clearTimeout(a.due);
+      a.due = undefined;
+    }
+    if (forget) this.rosterAnswers.clear();
+  }
+
+  /** Sends the newest roster held to a peer; never a second while one is still unsent to it. */
+  protected sendRoster(to: string): void {
+    this.sessions.sendRoster(to, this.currentRoster).catch(() => undefined);
+  }
 
   /** Applies section 3 acceptance. Returns true when the roster was taken. */
   protected offerRoster(candidate: unknown): boolean {
@@ -594,7 +667,9 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
       // The primary is the fallback, for a peer this member cannot open a session to.
       this.sessions.sendControl(from, { type: 'roster-request' }).catch(() => this.askPrimary());
     } else if (version < mine && from !== this.id && findMember(this.currentRoster, from)) {
-      this.sessions.sendControl(from, { type: 'roster', json: canonicalize(this.currentRoster) }).catch(() => undefined);
+      // Coalesced like an answer: a relay may replay one genuine handshake-init carrying an old
+      // version as often as it likes (message 1 has no replay protection).
+      this.offerRosterTo(from);
     }
   }
 

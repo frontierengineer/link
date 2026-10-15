@@ -1,0 +1,50 @@
+[package]
+name = "link-client"
+version = "0.1.0"
+edition = "2024"
+description = "The Rust client for Link, protocol version 1 (spec/protocol.md)"
+license = "MIT"
+publish = false
+
+[lib]
+name = "link_client"
+
+[[bin]]
+name = "link-driver"
+path = "src/bin/link-driver.rs"
+
+[dependencies]
+# Primitives (section 1), all RustCrypto / dalek.
+ed25519-dalek = "3"
+x25519-dalek = { version = "3", features = ["static_secrets"] }
+p256 = { version = "0.14", default-features = false, features = ["arithmetic"] }
+sha2 = { version = "0.11", features = ["zeroize"] }
+hmac = { version = "0.13", features = ["zeroize"] }
+hkdf = "0.13"
+chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
+subtle = "2.6"
+zeroize = "1.9"
+getrandom = "0.4"
+# JSON parsing (strict, into the crate's own value type), URLs as WHATWG parses them.
+serde = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
+ryu = "1"
+url = "2"
+# The async shell: one WebSocket per member, TLS for wss://.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time", "net", "io-std", "io-util"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+bytes = "1"
+
+# The tests move many MiB through ChaCha20-Poly1305 and SHA-256; optimise the dependencies
+# even in debug builds so they run in seconds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[dev-dependencies]
+# The driver test spawns the driver binary.
+tokio = { version = "1", features = ["process"] }
+# The Ed25519 tests build signatures no signer would (small-order R, a mixed-order key); this is
+# the curve ed25519-dalek already uses, no new code.
+curve25519-dalek = "5"

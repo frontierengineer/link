@@ -10,7 +10,9 @@ import { ClosedError, InvalidError, LinkError, RateLimitedError, RosterFullError
 import { encodeFrame, FrameType } from './frames.js';
 import { nodeIdFromEd25519 } from './identity.js';
 import { canonicalize } from './jcs.js';
+import { integerMember, parseJson } from './json.js';
 import { Member, type MemberEvents, type MemberOptions } from './member.js';
+import { Bucket } from './sessions.js';
 import { PrimaryExchange } from './pairing.js';
 import type { RelayState } from './relay.js';
 import {
@@ -39,6 +41,25 @@ function placeholderMember(kind: PairingKind): RosterMember {
 export const CODE_ATTEMPTS = 5;
 export const PAIRING_CHANNEL_MS = 60_000;
 const RESIGN_SKEW_MS = 300_000;
+/** Closed code ids remembered, so a `pairing` naming one is still told apart from one naming an
+ * id this primary never opened, which only a relay can make up (section 5.2). */
+const CLOSED_CODES = 1024;
+/** A `pairingFailed` event for one code and reason at most once in this long. */
+export const REFUSAL_EVENT_MS = 1000;
+/** A `pairEnd` refusing a code this primary issued always answers the first refusal on a pairing
+ * channel, and repeats on that channel at most once in this long, apart from the shared budget
+ * below: neither made-up ids nor anyone else holding the code id can use up the answer an honest
+ * newcomer with a mistyped or expired code is owed (it would otherwise wait out the relay's 60 s). */
+export const CODE_REPLY_MS = 1000;
+/** `pairEnd` answers refusing code ids never issued here: this rate, this burst. */
+export const REFUSAL_REPLY_RATE = 32;
+/** Pairing channels set up per open code: this many a second, this many at once. Each costs a
+ * SPAKE2 setup (milliseconds of work), and a `pairEnd` refunds its attempt, so the five attempts
+ * alone do not bound them (section 5.2). Beyond it, refused as a code out of attempts, with the
+ * text "too many attempts at once; try again". */
+export const CHANNEL_SETUP_RATE = 4;
+export const CHANNEL_SETUP_BURST = 8;
+export const REFUSAL_REPLY_BURST = 64;
 
 export interface PairingCode {
   /** Display form, `XXXX-XXXX`. */
@@ -72,6 +93,11 @@ export const USAGE_BURST = 3;
 /** ...then one per this many milliseconds. */
 export const USAGE_INTERVAL_MS = 10_000;
 
+/** A roster push to a member that fails is tried again after this long, doubling to the
+ * maximum, until it goes, the member leaves the roster, or a newer roster replaces it (section 8). */
+export const PUSH_RETRY_INITIAL_MS = 1000;
+export const PUSH_RETRY_MAX_MS = 600_000;
+
 export type PrimaryEvents = MemberEvents & {
   /** A newcomer completed pairing and is on the published roster. */
   paired: { member: RosterMember; roster: Roster };
@@ -83,7 +109,11 @@ interface OpenCode {
   code: string;
   codeId: string;
   kind: PairingKind;
+  /** Unix milliseconds, as shown; `deadline` is the same moment on the monotonic clock. */
   expiresAt: number;
+  deadline: number;
+  /** Channel setups this code may still have. */
+  setups: Bucket;
   failed: number;
   inFlight: number;
   claimed: boolean;
@@ -103,6 +133,14 @@ interface PairChannel {
 export class Primary extends Member<PrimaryEvents> {
   private readonly codes = new Map<string, OpenCode>();
   private readonly channels = new Map<string, PairChannel>();
+  /** Code ids closed here (used, burned, cancelled, expired), oldest first. */
+  private readonly closedCodes = new Set<string>();
+  /** When a refusal event was last raised, by code id and reason; when a refusal last went, by issued code id. */
+  private readonly refusalEvents = new Map<string, number>();
+  private readonly codeReplies = new Map<string, number>();
+  private readonly refusalReplies = new Bucket(REFUSAL_REPLY_RATE, REFUSAL_REPLY_BURST);
+  /** Pushes of the current roster waiting to be tried again, by member. */
+  private readonly pushRetries = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly usageRequests = new Map<string, { resolve: (r: UsageReport) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 
   constructor(opts: MemberOptions) {
@@ -138,8 +176,20 @@ export class Primary extends Member<PrimaryEvents> {
     this.pruneCodes();
     const code = chosen ?? generateCode();
     const codeId = b64u(generateCodeId());
-    const expiresAt = this.now() + (opts.lifetimeMs ?? CODE_LIFETIME_MS);
-    this.codes.set(codeId, { code, codeId, kind, expiresAt, failed: 0, inFlight: 0, claimed: false, burned: false });
+    const lifetime = opts.lifetimeMs ?? CODE_LIFETIME_MS;
+    const expiresAt = this.now() + lifetime;
+    this.codes.set(codeId, {
+      code,
+      codeId,
+      kind,
+      expiresAt,
+      deadline: this.mono() + lifetime,
+      setups: new Bucket(CHANNEL_SETUP_RATE, CHANNEL_SETUP_BURST),
+      failed: 0,
+      inFlight: 0,
+      claimed: false,
+      burned: false,
+    });
     return {
       code: formatCode(code),
       codeId,
@@ -153,7 +203,7 @@ export class Primary extends Member<PrimaryEvents> {
   cancelPairingCode(codeId: string): void {
     const entry = this.codes.get(codeId);
     if (entry) entry.burned = true;
-    this.codes.delete(codeId);
+    this.closeCode(codeId);
   }
 
   /** Removes a member and publishes the roster. Returns the new roster. */
@@ -217,25 +267,58 @@ export class Primary extends Member<PrimaryEvents> {
   }
 
   /** Adopts a roster this primary signed and pushes it to the relay and every member. */
-  private publish(roster: Roster): Roster {
+  /** Adopts and pushes `roster`: to the relay, and to every member but `skip` (a newcomer that
+   * holds it already, from P6). */
+  private publish(roster: Roster, skip?: string): Roster {
     this.adoptRoster(roster);
     this.relay.sendControl({ type: 'roster', roster });
+    // A newer roster replaces any push still waiting to be tried again.
+    this.cancelPushes();
     const json = canonicalize(roster);
     for (const m of roster.members) {
-      if (m.id === this.id) continue;
-      this.sessions.sendControl(m.id, { type: 'roster', json }).catch(() => undefined);
+      if (m.id === this.id || m.id === skip) continue;
+      this.pushRoster(m.id, roster, json, PUSH_RETRY_INITIAL_MS);
     }
     return roster;
+  }
+
+  /**
+   * Pushes `roster` to a member, and if that fails (the member unreachable, the relay connection
+   * down) tries again after `wait`, doubling, until it goes: a member with no traffic would
+   * otherwise keep an old roster, a revocation above all, until its next handshake.
+   */
+  private pushRoster(id: string, roster: Roster, json: string, wait: number): void {
+    const current = () => !this.isTerminal() && this.currentRoster.version === roster.version && !!findMember(this.currentRoster, id);
+    this.sessions.sendRoster(id, roster, json).catch(() => {
+      if (!current()) return;
+      const t = setTimeout(() => {
+        this.pushRetries.delete(id);
+        if (current()) this.pushRoster(id, roster, json, Math.min(2 * wait, PUSH_RETRY_MAX_MS));
+      }, wait);
+      (t as { unref?: () => void }).unref?.();
+      clearTimeout(this.pushRetries.get(id));
+      this.pushRetries.set(id, t);
+    });
+  }
+
+  private cancelPushes(): void {
+    for (const t of this.pushRetries.values()) clearTimeout(t);
+    this.pushRetries.clear();
+  }
+
+  override close(): void {
+    this.cancelPushes();
+    super.close();
   }
 
   protected override onResign(from: string, json: string): void {
     let r: Resignation;
     try {
-      r = JSON.parse(json) as Resignation;
+      r = parseJson(json) as Resignation;
     } catch {
       return;
     }
-    if (typeof r !== 'object' || r === null || r.node !== from || typeof r.ts !== 'number') return;
+    if (typeof r !== 'object' || r === null || r.node !== from || integerMember(r, 'ts') === undefined) return;
     if (Math.abs(this.now() - r.ts) > RESIGN_SKEW_MS) return;
     const member = findMember(this.currentRoster, from);
     if (!member || member.kind === 'primary') return;
@@ -297,8 +380,34 @@ export class Primary extends Member<PrimaryEvents> {
   // ── Pairing, B side ──
 
   private pruneCodes(): void {
-    const now = this.now();
-    for (const [id, c] of this.codes) if (c.burned || c.expiresAt <= now) this.codes.delete(id);
+    const now = this.mono();
+    for (const [id, c] of this.codes) if (c.burned || c.deadline <= now) this.closeCode(id);
+  }
+
+  /** Forgets an open code, remembering that it was one. */
+  private closeCode(id: string): void {
+    this.codes.delete(id);
+    this.closedCodes.delete(id);
+    this.closedCodes.add(id);
+    for (const old of this.closedCodes) {
+      if (this.closedCodes.size <= CLOSED_CODES) break;
+      this.closedCodes.delete(old);
+    }
+  }
+
+  /**
+   * Refuses a `pairing` (section 5.2). For a code id never issued here (only a relay makes those
+   * up): `pairEnd` within the shared REFUSAL_REPLY_RATE, and no event. For a code issued here:
+   * `pairEnd` for the first refusal on the channel and at most once per CODE_REPLY_MS for that
+   * code and channel after, outside the shared budget, and a `pairingFailed` event at most once
+   * per REFUSAL_EVENT_MS for that code and reason.
+   */
+  private refusePairing(key: string, codeId: string, reason: string): void {
+    const now = this.mono();
+    const issued = this.codes.has(codeId) || this.closedCodes.has(codeId);
+    const reply = issued ? once(this.codeReplies, `${codeId}/${key}`, now, CODE_REPLY_MS) : this.refusalReplies.take(now);
+    if (reply) this.relay.sendControl({ type: 'pairEnd', channel: key });
+    if (issued && once(this.refusalEvents, `${codeId}/${reason}`, now, REFUSAL_EVENT_MS)) this.emit('pairingFailed', { codeId, reason });
   }
 
   private onPairing(msg: ControlMessage): void {
@@ -311,15 +420,16 @@ export class Primary extends Member<PrimaryEvents> {
     }
     const key = msg.channel;
     const entry = this.codes.get(msg.code);
-    const refuse = (reason: string) => {
-      this.relay.sendControl({ type: 'pairEnd', channel: key });
-      this.emit('pairingFailed', { codeId: msg.code as string, reason });
-    };
+    const refuse = (reason: string) => this.refusePairing(key, msg.code as string, reason);
     if (this.channels.has(key)) return;
-    if (!entry || entry.burned || entry.expiresAt <= this.now()) return refuse('unknown or expired code');
+    if (!entry || entry.burned || entry.deadline <= this.mono()) return refuse('unknown or expired code');
     if (entry.claimed) return refuse('code already used');
-    // Reserve a slot atomically: attempts in flight plus failures never exceed five.
+    // Reserve a slot atomically: attempts in flight plus failures never exceed five, and setups
+    // stay within the code's own budget (a relay could otherwise set up and end channels on it,
+    // each refunded, as fast as it likes).
     if (entry.failed + entry.inFlight >= CODE_ATTEMPTS) return refuse('no attempts left');
+    // The same refusal (a code out of attempts, for now), but an honest newcomer is told to retry.
+    if (!entry.setups.take(this.mono())) return refuse('too many attempts at once; try again');
     entry.inFlight++;
     const ch: PairChannel = {
       channel,
@@ -379,9 +489,11 @@ export class Primary extends Member<PrimaryEvents> {
     this.channels.delete(ch.key);
     ch.entry.inFlight--;
     ch.entry.burned = true;
-    this.codes.delete(ch.entry.codeId);
+    this.closeCode(ch.entry.codeId);
     this.sendPair(ch, ch.exchange.p6(next));
-    this.publish(next);
+    // The newcomer has this roster already (P6): pushing it too would only fail while it
+    // reconnects, and be tried again.
+    this.publish(next, member.id);
     this.relay.sendControl({ type: 'pairEnd', channel: ch.key });
     this.emit('paired', { member, roster: next });
   }
@@ -399,7 +511,7 @@ export class Primary extends Member<PrimaryEvents> {
     if (ch.claimed) ch.entry.claimed = false;
     if (ch.entry.failed >= CODE_ATTEMPTS) {
       ch.entry.burned = true;
-      this.codes.delete(ch.entry.codeId);
+      this.closeCode(ch.entry.codeId);
     }
     this.relay.sendControl({ type: 'pairEnd', channel: ch.key });
     this.emit('pairingFailed', { codeId: ch.entry.codeId, reason });
@@ -414,6 +526,23 @@ export class Primary extends Member<PrimaryEvents> {
     ch.entry.inFlight--;
     if (ch.claimed) ch.entry.claimed = false;
     if (tellRelay) this.relay.sendControl({ type: 'pairEnd', channel: key });
-    this.emit('pairingFailed', { codeId: ch.entry.codeId, reason });
+    // Channels ended without a failed attempt (left, timed out) cost nothing to whoever ends
+    // them, so they tell the application at most once a second per code and reason.
+    if (once(this.refusalEvents, `${ch.entry.codeId}/${reason}`, this.mono(), REFUSAL_EVENT_MS)) {
+      this.emit('pairingFailed', { codeId: ch.entry.codeId, reason });
+    }
   }
+}
+
+/** Whether `key` may act now, at most once per `ms`; the table is bounded (when full, the stale
+ * entries go, and then all, so a key's first use is never refused). */
+function once(table: Map<string, number>, key: string, now: number, ms: number): boolean {
+  const last = table.get(key);
+  if (last !== undefined && now - last < ms) return false;
+  if (table.size >= 2 * CLOSED_CODES) {
+    for (const [k, t] of table) if (now - t >= ms) table.delete(k);
+    if (table.size >= 2 * CLOSED_CODES) table.clear();
+  }
+  table.set(key, now);
+  return true;
 }

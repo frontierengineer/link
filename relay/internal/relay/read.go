@@ -220,12 +220,18 @@ func (c *conn) held() bool {
 }
 
 // holdUnless holds the body of a frame of size bytes back until the network's bucket allows,
-// unless it is control and the network's control budget takes it.
+// unless it is control and this member's control budget (and the network's ceiling) takes it.
 func (c *conn) holdUnless(control bool, size int) {
-	if control && c.network.allowControl(c.s, size) {
+	if control && c.allowControl(size) {
 		return
 	}
 	c.sleepUntil(c.holdUntil)
+}
+
+// allowControl spends size bytes of this member's control budget, and of the network's
+// ceiling, if both have them (section 9).
+func (c *conn) allowControl(size int) bool {
+	return c.s.allowControl(c.network, c.id, c.s.mono(), size)
 }
 
 // charge counts size bytes against a registered member's network (section 9) and defers the

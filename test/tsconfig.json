@@ -10,5 +10,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["*.ts", "support/**/*.ts"]
+  "include": ["*.ts", "support/**/*.ts", "drivers/**/*.ts"]
 }

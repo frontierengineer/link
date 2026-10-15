@@ -1,8 +1,9 @@
 name: CI
 
-# Every pull request and every push to master: the relay's suite, the client's suite, the
-# client driven against the real relay binary (test/), and an independent Go check of the
-# client's vectors. Each half also checks the other's vectors inside its own suite.
+# Every pull request and every push to master: the relay's suite, the TypeScript, Go and Rust
+# clients' suites, every client driven against the real relay binary and each other (test/),
+# and an independent Go check of the client's vectors. Each side checks the others' vectors
+# inside its own suite.
 on:
   pull_request:
   push:
@@ -47,7 +48,7 @@ jobs:
       - run: npm run build
 
   cross:
-    name: client against the real relay (Node and Chromium)
+    name: every client against the real relay and each other (Node, Chromium, Go, Rust)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +56,7 @@ jobs:
         with:
           go-version-file: relay/go.mod
           cache-dependency-path: relay/go.sum
+      - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -78,6 +80,8 @@ jobs:
         working-directory: test
         env:
           LINK_REQUIRE_PORT_443: "1"
+          # Every implementation's driver must build and pass: no cast is skipped in CI.
+          LINK_REQUIRE_DRIVERS: "go,rust"
 
   vectors-go:
     name: client vectors, checked in Go
@@ -92,6 +96,41 @@ jobs:
           go-version-file: client/scripts/check-vectors-go/go.mod
           cache-dependency-path: client/scripts/check-vectors-go/go.sum
       - run: go run .
+
+  client-go:
+    name: Go client (vet, race tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client-go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: client-go/go.mod
+          cache-dependency-path: client-go/go.sum
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+
+  client-rust:
+    name: Rust client (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client-rust
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: relay/go.mod
+          cache-dependency-path: relay/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
 
   relay-package:
     name: relay npm package (cross-compile, pack, run)

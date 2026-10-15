@@ -11,7 +11,11 @@ on a port, and the relay never sees content.
   `relay/npm/`, the npm package `@frontierengineer/link-server` that carries the binary for
   five platforms behind a `link-relay` launcher.
 - `client/` — the client library, in TypeScript; published to npm as `@frontierengineer/link-client`.
-- `test/` — the client driven against the real relay binary: pairing, registration, sessions,
+- `client-go/` — the client library in Go, module `github.com/frontierengineer/link/client-go`,
+  released by `client-go/v<version>` tags.
+- `client-rust/` — the client library in Rust, crate `link-client`.
+- `test/` — every client driven against the real relay binary and against each other through
+  per-implementation drivers (`test/drivers/PROTOCOL.md`): pairing, registration, sessions,
   rekeying, revocation, usage and the relay's limits, end to end.
 - `deploy/` — running a self-hosted relay from the binary, npm or Docker, and its settings.
 
@@ -19,7 +23,9 @@ on a port, and the relay never sees content.
 (cd relay && go vet ./... && go test -race -count=1 ./...)
 (cd relay && LINK_TEST_NO_PARK=1 go test -race -count=1 ./internal/relay)   # a goroutine per connection
 (cd client && npm ci && npm run typecheck && npm test && npm run build)
-(cd test && npm ci && npm test)                    # builds the client and the relay first
+(cd client-go && go vet ./... && go test -race -count=1 ./...)
+(cd client-rust && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test)
+(cd test && npm ci && LINK_REQUIRE_DRIVERS=go,rust npm test)   # builds the clients and the relay first
 (cd client/scripts/check-vectors-go && go run .)   # the client's vectors, checked in Go
 (cd relay/npm && npm run build && npm test)        # cross-compile, pack, run the launcher
 ```

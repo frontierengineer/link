@@ -4,6 +4,8 @@
     "Binary values are b64u (base64url, no padding) unless named hex.",
     "keys: seed -> HKDF-derived Ed25519 seed and key, clamped X25519 private key and its public key, node id (b32 of the first 16 bytes of SHA-256(ed25519)) and its raw bytes in hex.",
     "rosters: roster is the full signed roster in JCS form. For signed cases jcs is JCS(roster without signature), signingInput is UTF-8(\"frontier-link/1/roster\") || jcs, signature is the Ed25519 signature. valid is whether a relay or member must find it valid (section 3).",
+    "rosterTexts: text is a roster exactly as a parser reads it (UTF-8, escapes as written); valid is whether a relay or member must find it valid. Every JSON document is I-JSON (section 1): a repeated name, an escaped lone surrogate, a number out of range (1e309) or more than 32 arrays and objects open at once makes it invalid, as does a version or issuedAt not written as a non-negative integer literal, digits only (section 3), whatever a lenient parser would make of it.",
+    "ed25519: pub, msg and sig (b64u) and whether section 1's verification accepts them: A and R canonical (y < p, no x = 0 with the sign bit set), neither of small order, S < L, and the cofactorless equation [S]B = R + [k]A. Cases where a lax or cofactored verifier would answer otherwise say so.",
     "registrations: message is lenStr(\"frontier-link/1/register\") || lenStr(network) || lenStr(node) || challenge || u64be(ts) || lenStr(origin); sig is the node's Ed25519 signature over it.",
     "frames: a routed frame (hex) as a member sends it and as the relay delivers it, with the peer field rewritten to the sender's raw id (and control, type 8, delivered as data, type 3)."
   ],
@@ -570,6 +572,258 @@
         "signature": "qPJE2lPFZK_hJR94y5TBelRVdZzcxiG-ayrs8XnM0_8K0Cnf9n9BT9Rnsz-Fv29iadQy2KtHbUGk8wNkufFfAg",
         "version": 14
       },
+      "valid": false
+    }
+  ],
+  "rosterTexts": [
+    {
+      "description": "the JCS text of a valid roster",
+      "text": "{\"issuedAt\":1790000000000,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1\",\"signature\":\"qDk4GaZF52FveMyRrd2-UNNgU9eU7kAHebWtNBcFzhv-U2Gs8PiBa_gb8Rs_DdlSSg1Msvf6cWKFUvWXSz5JDw\",\"version\":12}",
+      "valid": true
+    },
+    {
+      "description": "the same roster with whitespace between tokens",
+      "text": " \n{\"issuedAt\" : 1790000000000,\n  \"members\" : [{\"ed25519\" : \"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\n  \"id\" : \"3i4v4domfz7r5qsmc4syjrmvfy\",\n  \"kind\" : \"mcp\",\n  \"x25519\" : \"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\" : \"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\n  \"id\" : \"3pby7sw7zs7anfsf37reujd3qi\",\n  \"kind\" : \"worker\",\n  \"x25519\" : \"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\" : \"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\n  \"id\" : \"ccsp5wvdhspisne65uasidgvky\",\n  \"kind\" : \"surface\",\n  \"x25519\" : \"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\" : \"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\n  \"id\" : \"clfaxfu4el7khkjfrzdmhfjhka\",\n  \"kind\" : \"primary\",\n  \"x25519\" : \"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\n  \"network\" : \"clfaxfu4el7khkjfrzdmhfjhka\",\n  \"primary\" : {\"ed25519\" : \"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\n  \"relay\" : \"wss://eu.frontierengineer.link/v1\",\n  \"signature\" : \"qDk4GaZF52FveMyRrd2-UNNgU9eU7kAHebWtNBcFzhv-U2Gs8PiBa_gb8Rs_DdlSSg1Msvf6cWKFUvWXSz5JDw\",\n  \"version\" : 12}\n",
+      "valid": true
+    },
+    {
+      "description": "version named twice, the signed value last",
+      "text": "{\"version\":999,\"issuedAt\":1790000000000,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1\",\"signature\":\"qDk4GaZF52FveMyRrd2-UNNgU9eU7kAHebWtNBcFzhv-U2Gs8PiBa_gb8Rs_DdlSSg1Msvf6cWKFUvWXSz5JDw\",\"version\":12}",
+      "valid": false
+    },
+    {
+      "description": "a member's kind named twice, the signed value last",
+      "text": "{\"issuedAt\":1790000000000,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"worker\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1\",\"signature\":\"qDk4GaZF52FveMyRrd2-UNNgU9eU7kAHebWtNBcFzhv-U2Gs8PiBa_gb8Rs_DdlSSg1Msvf6cWKFUvWXSz5JDw\",\"version\":12}",
+      "valid": false
+    },
+    {
+      "description": "version written 12.0",
+      "text": "{\"issuedAt\":1790000000000,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1\",\"signature\":\"qDk4GaZF52FveMyRrd2-UNNgU9eU7kAHebWtNBcFzhv-U2Gs8PiBa_gb8Rs_DdlSSg1Msvf6cWKFUvWXSz5JDw\",\"version\":12.0}",
+      "valid": false
+    },
+    {
+      "description": "version written 1.2e1",
+      "text": "{\"issuedAt\":1790000000000,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1\",\"signature\":\"qDk4GaZF52FveMyRrd2-UNNgU9eU7kAHebWtNBcFzhv-U2Gs8PiBa_gb8Rs_DdlSSg1Msvf6cWKFUvWXSz5JDw\",\"version\":1.2e1}",
+      "valid": false
+    },
+    {
+      "description": "issuedAt written 1.79e12",
+      "text": "{\"issuedAt\":1.79e12,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1\",\"signature\":\"qDk4GaZF52FveMyRrd2-UNNgU9eU7kAHebWtNBcFzhv-U2Gs8PiBa_gb8Rs_DdlSSg1Msvf6cWKFUvWXSz5JDw\",\"version\":12}",
+      "valid": false
+    },
+    {
+      "description": "U+FFFD in relay, escaped",
+      "text": "{\"issuedAt\":1790000000000,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1?\\ufffd\",\"signature\":\"klsc9cCGlJLBf7397brmz9nCxucCdxkZTFbM6ol6EaXXCZ33W6B0jXzeZX0YWcnTt4Ea5L-CCIgXCIBIQFUkCw\",\"version\":12}",
+      "valid": true
+    },
+    {
+      "description": "an escaped lone high surrogate where the primary signed U+FFFD",
+      "text": "{\"issuedAt\":1790000000000,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1?\\ud800\",\"signature\":\"klsc9cCGlJLBf7397brmz9nCxucCdxkZTFbM6ol6EaXXCZ33W6B0jXzeZX0YWcnTt4Ea5L-CCIgXCIBIQFUkCw\",\"version\":12}",
+      "valid": false
+    },
+    {
+      "description": "an escaped lone low surrogate where the primary signed U+FFFD",
+      "text": "{\"issuedAt\":1790000000000,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1?\\udfff\",\"signature\":\"klsc9cCGlJLBf7397brmz9nCxucCdxkZTFbM6ol6EaXXCZ33W6B0jXzeZX0YWcnTt4Ea5L-CCIgXCIBIQFUkCw\",\"version\":12}",
+      "valid": false
+    },
+    {
+      "description": "U+1F600 in relay, escaped as a surrogate pair",
+      "text": "{\"issuedAt\":1790000000000,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1?\\ud83d\\ude00\",\"signature\":\"mQrlGrdY2SuEVXP160vjnS5tR4uGA6jmenDzYlnoPOzLiNcmKRy2TfIRwwHjQmETca_AIjfT4EU88Wb_FEOwAg\",\"version\":12}",
+      "valid": true
+    },
+    {
+      "description": "issuedAt 0",
+      "text": "{\"issuedAt\":0,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1\",\"signature\":\"4wNHg9OANaaTpSp9hzRHWIWXoR1CzNC9YNW2ktOVTyq-pDx_Sz72fHJFqdaGo0-vcXVhLRR4Whay-Rrlk77jDQ\",\"version\":12}",
+      "valid": true
+    },
+    {
+      "description": "issuedAt written -0",
+      "text": "{\"issuedAt\":-0,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1\",\"signature\":\"4wNHg9OANaaTpSp9hzRHWIWXoR1CzNC9YNW2ktOVTyq-pDx_Sz72fHJFqdaGo0-vcXVhLRR4Whay-Rrlk77jDQ\",\"version\":12}",
+      "valid": false
+    },
+    {
+      "description": "nested 32 deep (an extra member of 31 arrays)",
+      "text": "{\"issuedAt\":1790000000000,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1\",\"signature\":\"50rTJ3BxRteAnemG1937qxqhOljmZd_uu5twkRQW2SGXI8VlkVzWZ8O5KOsLy-B7hBwDmXXeoMFX5LA24_wWBQ\",\"version\":12,\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+      "valid": true
+    },
+    {
+      "description": "nested 33 deep (an extra member of 32 arrays)",
+      "text": "{\"issuedAt\":1790000000000,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1\",\"signature\":\"MAPPEhoGbBJ39syFppgtpy--CH5wss3std7n_q2fPSkk9_rq5KPQELReNAoht9ayLfhOxqyufHlxcFeYQlK4Aw\",\"version\":12,\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+      "valid": false
+    },
+    {
+      "description": "an extra member 1e309, a number out of range",
+      "text": "{\"x\":1e309,\"issuedAt\":1790000000000,\"members\":[{\"ed25519\":\"gFSfI4dMGPjmgtz72a6smQ7U2_4FHmxMu7gMqi-6qDY\",\"id\":\"3i4v4domfz7r5qsmc4syjrmvfy\",\"kind\":\"mcp\",\"x25519\":\"nxWiw1kgBA3j8LbxXDWLX0Dom0KsgRf1gjPFhQGS_GA\"},{\"ed25519\":\"PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ\",\"id\":\"3pby7sw7zs7anfsf37reujd3qi\",\"kind\":\"worker\",\"x25519\":\"Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4\"},{\"ed25519\":\"lxMDnD3gsR7zE3LX3m6Ze798vlaemsFcOHDqYxLgkts\",\"id\":\"ccsp5wvdhspisne65uasidgvky\",\"kind\":\"surface\",\"x25519\":\"SaSjm0N90v1XN1i4_2br9MiqX68YEesu8DCCKeLZom8\"},{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\",\"id\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"kind\":\"primary\",\"x25519\":\"bGbAJvi-fDApTRAy7V_OViOgqKrbI_DE4RNH4Nr56Gk\"}],\"network\":\"clfaxfu4el7khkjfrzdmhfjhka\",\"primary\":{\"ed25519\":\"RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg\"},\"relay\":\"wss://eu.frontierengineer.link/v1\",\"signature\":\"qDk4GaZF52FveMyRrd2-UNNgU9eU7kAHebWtNBcFzhv-U2Gs8PiBa_gb8Rs_DdlSSg1Msvf6cWKFUvWXSz5JDw\",\"version\":12}",
+      "valid": false
+    }
+  ],
+  "ed25519": [
+    {
+      "description": "an honest signature",
+      "pub": "RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg",
+      "msg": "ZnJvbnRpZXItbGluay8xL3Jvc3RlcnsidmVjdG9yIjoxfQ",
+      "sig": "_ZMZDVATDnghBZbrm46yS9TOgrHpAeNjFk-PbYX6_4mfXwYQ8pgVbOjZzvXpYQo7tGLesvcdxBBkR5s_H2a6Cg",
+      "valid": true
+    },
+    {
+      "description": "an honest signature by another key",
+      "pub": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+      "msg": "ZnJvbnRpZXItbGluay8xL3JlZ2lzdGVyLCBhbm90aGVyIGtleQ",
+      "sig": "-OMVpapYUL-GcO6HCEKLsLtayP7-S3uGivmMZQcaPe71N-gGhwaL0QmQmlaogfONJjudsm8e44zIyqRCUhXqAw",
+      "valid": true
+    },
+    {
+      "description": "small-order A: the identity",
+      "pub": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciAxMQ",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvddnRSMBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    },
+    {
+      "description": "small-order A: the point of order 2",
+      "pub": "7P_______________________________________38",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciAx",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvddnRSMBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    },
+    {
+      "description": "small-order A: a point of order 4",
+      "pub": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciA2",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvddnRSMBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    },
+    {
+      "description": "small-order A: the other point of order 4",
+      "pub": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIA",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciA3",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvddnRSMBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    },
+    {
+      "description": "small-order A: a point of order 8",
+      "pub": "xxdqcD1N2E-6PAt2DRBnDyogU_osOczGTsf9d5KsA3o",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciAxNw",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvddnRSMBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    },
+    {
+      "description": "small-order A: its negation",
+      "pub": "xxdqcD1N2E-6PAt2DRBnDyogU_osOczGTsf9d5KsA_o",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciA0",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvddnRSMBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    },
+    {
+      "description": "small-order A: another point of order 8",
+      "pub": "JuiVj8KyJ7BFw_SJ8u-Y8NXfrAXTxjM5sTgCiG1T_AU",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciAz",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvddnRSMBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    },
+    {
+      "description": "small-order A: its negation",
+      "pub": "JuiVj8KyJ7BFw_SJ8u-Y8NXfrAXTxjM5sTgCiG1T_IU",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciA1",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvddnRSMBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    },
+    {
+      "description": "non-canonical small-order A: the identity written y = p + 1",
+      "pub": "7v_______________________________________38",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciAw",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvddnRSMBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    },
+    {
+      "description": "non-canonical small-order A: the identity with the sign bit set (x = 0)",
+      "pub": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIA",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciAx",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvddnRSMBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    },
+    {
+      "description": "non-canonical small-order A: the point of order 2 with the sign bit set (x = 0)",
+      "pub": "7P________________________________________8",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciAz",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvddnRSMBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    },
+    {
+      "description": "non-canonical small-order A: a point of order 4 written y = p",
+      "pub": "7f_______________________________________38",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciA5",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvddnRSMBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    },
+    {
+      "description": "non-canonical small-order A: the other point of order 4 written y = p",
+      "pub": "7f________________________________________8",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciAw",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvddnRSMBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    },
+    {
+      "description": "non-canonical A: the point with y = 3 written y = p + 3",
+      "pub": "8P_______________________________________38",
+      "msg": "ZnJvbnRpZXItbGluay8xL25vbi1jYW5vbmljYWwga2V5",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvddnRSMBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "valid": false
+    },
+    {
+      "description": "non-canonical R: the identity written y = p + 1 (the equation holds over the decoded points)",
+      "pub": "RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg",
+      "msg": "ZnJvbnRpZXItbGluay8xL3Jvc3RlcnsidmVjdG9yIjoxfQ",
+      "sig": "7v_______________________________________3_26Y1ovKyDW3hrCeRH-seL3zu3xPFIcjwjkMwBHaq9DA",
+      "valid": false
+    },
+    {
+      "description": "small-order R: the identity, S = k·a",
+      "pub": "RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg",
+      "msg": "ZnJvbnRpZXItbGluay8xL3Jvc3RlcnsidmVjdG9yIjoxfQ",
+      "sig": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADv_syBI_4x6b1sVRv4oWFKaplTlRH9B2fSbIxAjQKQAA",
+      "valid": false
+    },
+    {
+      "description": "small-order R: a point of order 8, S = k·a",
+      "pub": "RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg",
+      "msg": "ZnJvbnRpZXItbGluay8xL3Jvc3RlcnsidmVjdG9yIjoxfQ",
+      "sig": "xxdqcD1N2E-6PAt2DRBnDyogU_osOczGTsf9d5KsA3pgH43wdPv4SOxxivv3a09h8WTj6bJ1oVnJQoi4ELsfCA",
+      "valid": false
+    },
+    {
+      "description": "S + L in place of S (S >= L)",
+      "pub": "RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg",
+      "msg": "ZnJvbnRpZXItbGluay8xL3Jvc3RlcnsidmVjdG9yIjoxfQ",
+      "sig": "_ZMZDVATDnghBZbrm46yS9TOgrHpAeNjFk-PbYX6_4mMM_xsDPwnxL52xpjIW-lPtGLesvcdxBBkR5s_H2a6Gg",
+      "valid": false
+    },
+    {
+      "description": "mixed-order A = [a]B + T8, k a multiple of 8: both equations hold",
+      "pub": "sBLi_NUUY2sUHsfrpOvDV-cB71EYyU4sxiWDWhedK2A",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciAx",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvde8h4D5lSvGSSdYQj63mxgXWWMSmygDSoao8S9rqrdEDg",
+      "valid": true
+    },
+    {
+      "description": "mixed-order A = [a]B + T8, k not a multiple of 8: only the cofactored equation holds",
+      "pub": "sBLi_NUUY2sUHsfrpOvDV-cB71EYyU4sxiWDWhedK2A",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciAw",
+      "sig": "k8lEm-Tjl195mmkfEdO9q4rGNIuir737kxD9trMuvdfaGAdZ4fzYEMXRvHm5IsGDDNMzSTf4VvT26KI4R8x6Dg",
+      "valid": false
+    },
+    {
+      "description": "mixed-order R = [r]B + T8: only the cofactored equation holds",
+      "pub": "RPQv6Nu2LGLcsfNhWsDNmioFqB8JJtnal8O6TxFFVLg",
+      "msg": "ZnJvbnRpZXItbGluay8xL3Jvc3RlcnsidmVjdG9yIjoxfQ",
+      "sig": "r-mF5DLRarru0PvYSNtEUg7xk73eZdlEtqlCqPl6sRwZwiaIwTzyS4Q68qLH0qDlsT1RgQ1yowqBpYLdzij0Ag",
+      "valid": false
+    },
+    {
+      "description": "the order-4 forgery: A of order 4, R the identity, S = 0",
+      "pub": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "msg": "ZnJvbnRpZXItbGluay8xL3ZlY3RvciAz",
+      "sig": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
       "valid": false
     }
   ],

@@ -68,6 +68,34 @@ func TestVectorsVerify(t *testing.T) {
 	if valid == 0 || valid == len(f.Rosters) {
 		t.Fatal("expected both valid and invalid rosters")
 	}
+	if len(f.RosterTexts) == 0 {
+		t.Fatal("expected roster texts")
+	}
+	for _, rv := range f.RosterTexts {
+		if _, err := link.ParseRoster([]byte(rv.Text)); (err == nil) != rv.Valid {
+			t.Errorf("roster text %q: valid=%v but ParseRoster says %v", rv.Description, rv.Valid, err)
+		}
+	}
+	// Every Ed25519 vector, through the relay's one verification; and the rule matters: plain
+	// crypto/ed25519 answers some of them otherwise.
+	if len(f.Ed25519) == 0 {
+		t.Fatal("expected ed25519 vectors")
+	}
+	lax := 0
+	for _, v := range f.Ed25519 {
+		pub, _ := link.B64u.DecodeString(v.Pub)
+		msg, _ := link.B64u.DecodeString(v.Msg)
+		sig, _ := link.B64u.DecodeString(v.Sig)
+		if got := link.VerifyEd25519(pub, msg, sig); got != v.Valid {
+			t.Errorf("ed25519 %q: valid=%v but VerifyEd25519 says %v", v.Description, v.Valid, got)
+		}
+		if len(pub) == ed25519.PublicKeySize && ed25519.Verify(pub, msg, sig) != v.Valid {
+			lax++
+		}
+	}
+	if lax == 0 {
+		t.Error("crypto/ed25519 alone agrees with every vector: they test nothing beyond it")
+	}
 	for _, rv := range f.Registrations {
 		k := keys[rv.Node]
 		ch, _ := link.B64u.DecodeString(rv.Challenge)

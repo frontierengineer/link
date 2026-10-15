@@ -3,6 +3,7 @@
 
 import { b64u, fromB64uLen } from './bytes.js';
 import { Emitter } from './events.js';
+import { integerMember } from './json.js';
 import type { Identity } from './identity.js';
 import type { Roster } from './roster.js';
 import { originOf, registerSigningBytes } from './signed.js';
@@ -54,6 +55,8 @@ export class RelayConnection extends Emitter<RelayEvents> {
   private _state: RelayState = 'disconnected';
   private url: string;
   private _features: ReadonlySet<string> = new Set();
+  /** Counts connections dialled, so a position on one is never read as one on another. */
+  private conn = 0;
   /** UTF-8 bytes of control messages sent and received, over every connection. */
   textSent = 0;
   textReceived = 0;
@@ -85,6 +88,12 @@ export class RelayConnection extends Emitter<RelayEvents> {
   /** Bytes handed to the socket and not yet sent. */
   get bufferedAmount(): number {
     return this.channel?.bufferedAmount ?? 0;
+  }
+
+  /** The current connection, the bytes handed to its socket, and those of them it has sent. */
+  get wirePosition(): { conn: number; queued: number; written: number } {
+    const ch = this.channel;
+    return ch ? { conn: this.conn, queued: ch.queued, written: ch.queued - ch.bufferedAmount } : { conn: this.conn, queued: 0, written: 0 };
   }
 
   /** Calls `f` once data may be handed to the socket again. */
@@ -138,6 +147,7 @@ export class RelayConnection extends Emitter<RelayEvents> {
   }
 
   private dial(): void {
+    this.conn++;
     this.setState('connecting');
     this._features = new Set();
     let challenge: Uint8Array | undefined;
@@ -147,7 +157,7 @@ export class RelayConnection extends Emitter<RelayEvents> {
         this.textReceived += bytes;
         if (msg.type === 'hello' && challenge === undefined) {
           try {
-            if (msg.version !== 1) throw new Error(`relay speaks version ${String(msg.version)}`);
+            if (integerMember(msg, 'version') !== 1) throw new Error(`relay speaks version ${String(msg.version)}`);
             challenge = fromB64uLen(msg.challenge, 32, 'challenge');
             // Names this client does not know are ignored; a missing list is empty.
             this._features = new Set(Array.isArray(msg.features) ? msg.features.filter((f): f is string => typeof f === 'string') : []);
@@ -159,8 +169,11 @@ export class RelayConnection extends Emitter<RelayEvents> {
         }
         if (msg.type === 'registered' && challenge !== undefined && this._state === 'connecting') {
           this.backoff = this.o.backoffInitialMs;
-          // A newer roster in `registered` is applied before anything is sent under it.
+          // A newer roster in `registered` is applied before anything is sent under it. If it no
+          // longer lists this node, applying it revoked this connection (section 8), which is
+          // terminal: the node is then never registered.
           this.emit('registered', msg);
+          if (this.channel !== ch || this._state !== 'connecting') return;
           this.setState('registered');
           return;
         }

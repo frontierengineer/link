@@ -15,7 +15,7 @@ without padding. `b32` is RFC 4648 base32, lowercase, without padding.
 
 | Use | Primitive |
 |---|---|
-| Identity and signatures | Ed25519 (RFC 8032), strict verification: non-canonical encodings are rejected, as Go's `crypto/ed25519` does. Every implementation verifies identically. |
+| Identity and signatures | Ed25519 (RFC 8032), verified as below |
 | Session key agreement | X25519 |
 | Sessions | `Noise_IK_25519_ChaChaPoly_SHA256`, Noise revision 34 |
 | Pairing | SPAKE2, RFC 9382, ciphersuite P256-SHA256-HKDF-HMAC |
@@ -23,6 +23,40 @@ without padding. `b32` is RFC 4648 base32, lowercase, without padding.
 | Hash | SHA-256 |
 | Pairing transport | ChaCha20-Poly1305 (RFC 8439) |
 | Canonical JSON for signing | JSON Canonicalization Scheme, RFC 8785 (JCS) |
+
+**Ed25519 verification.** A signature `R || S` by public key `A` over message `M` is valid
+exactly when all of these hold, and every implementation checks exactly these:
+
+- `A` and `R` are canonical encodings: the encoded `y` is below `p = 2^255 - 19`, and the sign
+  bit is not set when `x = 0` (the points with `y = 1` and `y = p - 1`);
+- neither `A` nor `R` is one of the eight points of small order;
+- `S < L`, the order of the prime subgroup;
+- the equation is cofactorless: `[S]B = R + [k]A`, with `k = SHA-512(R || A || M) mod L`.
+
+No other check is made: in particular no subgroup check, so a key or `R` of mixed order (a
+point of the prime subgroup plus one of small order) is valid whenever the cofactorless
+equation holds, as one vector shows.
+
+Implementations disagree out of the box (on non-canonical and small-order keys, and on the
+cofactored against the cofactorless equation), and every implementation must accept exactly
+the same signatures, or members holding the same roster can disagree about whether it is valid.
+Lax keys are worse: under a small-order key, anyone can forge a signature on any message (`R` the
+identity, `S = 0`). `spec/vectors/relay.json` holds a vector for each of these rules
+(section 12).
+
+**JSON.** Every JSON document of the protocol (control messages, rosters, the `roster` and
+`resign` session messages, sealed pairing messages) is I-JSON, RFC 7493: UTF-8, one value with
+nothing after it but whitespace, no member name twice in one object, no lone surrogate in a
+string or a name, escaped (`"\ud800"`) or not, and every number finite as an IEEE 754 double
+(`1e309` overflows to infinity and is refused). At most 32 arrays and objects are open at once
+(a roster needs three). Member names match exactly, case included: `"Type"` is not `type`. A
+receiver refuses a document that breaks any of this, whatever a lenient parser would make of it
+(keeping the last of two names, turning a lone surrogate into U+FFFD, matching names without
+regard to case, reading `1e309` as infinity): the relay closes the connection `4000`, a member
+ignores the document. A field this document gives as an integer (`version`, `issuedAt`, `ts`) is
+written as a non-negative integer literal: digits only, with no sign, fraction or exponent. `12`
+and `0` are integers; `12.0`, `1.2e1` and `-0` are not, and make the document invalid as a wrong
+type would. `spec/vectors/relay.json` holds such documents as text (section 12).
 
 ## 2. Keys and ids
 
@@ -42,7 +76,7 @@ without padding. `b32` is RFC 4648 base32, lowercase, without padding.
   "network": "<network id>",
   "version": 12,
   "issuedAt": 1790000000000,
-  "relay": "wss://eu.frontierengineer.link/v1",
+  "relay": "wss://frontierengineer.link/v1",
   "primary": { "ed25519": "<b64u>" },
   "members": [
     { "id": "<node id>", "ed25519": "<b64u>", "x25519": "<b64u>", "kind": "primary" }
@@ -52,7 +86,8 @@ without padding. `b32` is RFC 4648 base32, lowercase, without padding.
 ```
 
 - `version` is a positive integer that increases with every change. `issuedAt` is Unix
-  milliseconds. `kind` is one of `primary`, `worker`, `surface`, `mcp`.
+  milliseconds. Both are non-negative integer literals (section 1) of at most 2^53 − 1. `kind`
+  is one of `primary`, `worker`, `surface`, `mcp`.
 - A roster's JCS encoding (with its signature) is at most **65000 bytes**, about 400 members,
   so that it always fits in one session message. A primary refuses to add a member beyond that,
   and a roster over the limit is invalid everywhere.
@@ -70,7 +105,8 @@ without padding. `b32` is RFC 4648 base32, lowercase, without padding.
 
 WebSocket over TLS, path `/v1`. Text frames carry control messages, one JSON object each with a
 `type`, at most 131072 bytes (128 KiB; a roster, at most 65000 bytes, travels inside some of
-them). Larger ones close the connection `4000`. Binary frames carry routed frames (section 6).
+them). Larger ones close the connection `4000`, as does one that is not I-JSON (section 1); a
+node ignores such a message from the relay. Binary frames carry routed frames (section 6).
 
 ### 4.1 Registration
 
@@ -102,11 +138,14 @@ them). Larger ones close the connection `4000`. Binary frames carry routed frame
    7. `node` is a member of the effective roster (`4008`).
 4. Relay → node: `{"type":"registered","node":"<id>","rosterVersion":12}`. When the relay held a
    newer roster than the node presented, it adds `"roster":{ ... }` with that newer roster, and
-   the node applies the acceptance rules of section 3. A member that was offline while the
-   roster changed is therefore brought up to date at registration, and is closed `4008` only if
-   the newest roster no longer lists it. A relay that keeps only a compact record of its newest
-   roster (section 9) sends a higher `rosterVersion` without `roster`; the node then learns the
-   roster from the primary or from its peers (section 7.1).
+   the node applies the acceptance rules of section 3, before it counts itself registered. A
+   member that was offline while the roster changed is therefore brought up to date at
+   registration, and is closed `4008` only if the newest roster no longer lists it. A node that
+   accepts a `roster` here that does not list it enters the terminal `revoked` state at once
+   (section 8): it never counts itself registered, and does not reconnect. A relay that keeps
+   only a compact record of its newest roster (section 9) sends a higher `rosterVersion`
+   without `roster`; the node then learns the roster from the primary or from its peers
+   (section 7.1).
 
 A node must send nothing but `register` (or `pair`) before `registered`, and must send it within
 30 seconds of `hello`; otherwise the relay closes `4000`. A connection that has not registered
@@ -194,7 +233,34 @@ when answering a request. Codes: `forbidden`, `bad_request`, `unreachable`, `rat
    when the newcomer disconnects, or after 60 seconds. In every case the relay sends `pairEnd`
    to whichever side is still connected, so the primary learns that a newcomer left mid-pairing
    and can refund its guess slot.
-5. Pairing attempts are limited per IP address (section 9).
+5. Pairing attempts are limited per IP address (section 9). Anyone holding a code id (the
+   relay, an observer of a `ws://` connection, or whoever has the link) can deny pairing on
+   that code without burning it, by opening channels on it and holding all five attempts in
+   flight until each times out. This is accepted: the code id travels with the code, so it
+   cannot be kept from those who see the code travel, and the relay can stop any pairing
+   anyway by not forwarding it. The primary opens a new code.
+6. The primary refuses a `pairing` it cannot serve with `pairEnd`, and a relay can stream
+   such `pairing`s, so neither answers nor events are one per message:
+   - for a code it issued (now closed, expired, used or out of attempts, remembered for the
+     last 1024 codes closed), a `pairEnd` for the first refusal on each pairing channel, and
+     for repeats on that channel at most once a second per code and channel; an event for its
+     application at most once a second per code and reason. These are kept apart from the
+     budget below, and the repeats are counted per channel, not per code, so that neither
+     made-up ids nor anyone else holding the code id can use up the answer an honest newcomer
+     with a mistyped or expired code is owed (it would otherwise wait out the relay's 60
+     seconds);
+   - for a code id it never issued, which only a relay can make up, a `pairEnd` within one
+     budget of 32 a second with a burst of 64, and never an event.
+7. Setting up a pairing channel costs the primary a SPAKE2 setup, and a `pairEnd` refunds the
+   attempt it reserved (section 5.1), so the five attempts do not bound how often a relay (or a
+   holder of the link) can set channels up and end them. Each open code therefore has a budget
+   of channel setups, 4 a second with a burst of 8; a `pairing` beyond it is refused as for a
+   code out of attempts (item 6), with the same reason code, but any text that goes with it says
+   to try again: the code is not spent, and an honest newcomer caught by it can retry. A channel
+   that ends without a failed attempt (the newcomer left, the relay or the primary timed it out,
+   the primary's connection dropped, the newcomer is already a member) tells the application at
+   most once a second per code and reason, as a refusal does. Failed attempts are bounded by the
+   five already, and each is told.
 
 ### 5.3 The exchange
 
@@ -232,9 +298,11 @@ ChaCha20-Poly1305, nonce = 4 zero bytes || u64le(counter), counter starting at 0
 empty associated data. Plaintext is UTF-8 JSON.
 ```
 
-After P6 the primary burns the code, pushes the new roster to the relay and its members, and
-sends `pairEnd`. The newcomer pins `primary.ed25519` from the roster, checks it lists itself, and
-reconnects to register as a member.
+After P6 the primary burns the code, pushes the new roster to the relay and its members (all but
+the newcomer, which holds it already from P6 and is not yet connected as a member, so a push to
+it would only fail and be tried again, section 8), and sends `pairEnd`. The newcomer pins
+`primary.ed25519` from the roster, checks it lists itself, and reconnects to register as a
+member.
 
 ## 6. Routed frames
 
@@ -282,7 +350,48 @@ the channel id, unchanged.
 roster.
 
 - Prologue: `UTF-8("frontier-link/1/session") || UTF-8(network id)`.
-- Message 1 payload and message 2 payload: `u64be(roster version the sender holds)`.
+- Message 1 payload: `u64be(roster version the sender holds) || u64be(stamp)`, 16 bytes.
+  Message 2 payload: `u64be(roster version the sender holds)`, 8 bytes.
+- **Stamps.** `stamp` is milliseconds since the Unix epoch, greater than every stamp this node
+  has sent before, to any peer, since it started: `stamp = max(wall clock now, last stamp + 1)`.
+  The last stamp is kept in memory only; after a restart a node's stamps come from its wall
+  clock alone. The stamp is the one use of the wall clock in a handshake, so that it outlasts a
+  restart.
+  Let `W` be 10 minutes. The relay refuses a registration whose `ts` is more than 5 minutes from
+  its own clock (section 4.1), so any two registered members' clocks are within 10 minutes of
+  each other: `W` covers every honest difference, slow or fast.
+  The responder keeps, per member id, the stamp of the last init it accepted from it. When an id
+  leaves the roster its stamp is kept, among the last 1024 ids to leave, and restored if the id
+  is admitted again, so inits from before a revocation stay refused exactly, whatever the clocks
+  say. An init must be stamped after the greater of that stamp (if any) and `F = S - W`, where
+  `S` is the later of the responder's start and the moment the id joined its roster, taken on
+  the monotonic clock and read as wall time when used (`wall now - (monotonic now - instant)`),
+  so a correction of the wall clock after it does not move `F`. `F` is what refuses old
+  recordings after a responder restarts, when no stamp is stored; with a stamp kept across a
+  removal, it still refuses an init recorded but never delivered before the removal once the
+  re-admission is more than `W` after it. A registered member is never refused by `F`: its clock
+  is at most `W` behind. The responder also refuses an init stamped more than `W` ahead of its
+  own wall clock, and stores nothing for it. A refused init is dropped unanswered, counts as a
+  failed init (section 7.4), and changes nothing (no session, no stamp, and its version is
+  ignored). An init that passes the key check and is accepted stores its stamp as it is; nothing
+  else changes the stored stamp. The table outlives every session with a member: it changes only
+  as above, never when sessions end or go idle, or a replay of a member's last init would be
+  accepted again. A message 1 whose payload is not 16 bytes is malformed, a failed init too.
+  This closes IK's replay gap: message 1 has no replay protection of its own, so before stamps a
+  relay or a `ws://` observer that recorded one genuine init could send it again at will, to
+  evict a live session, cost the responder a full handshake, or draw a roster push. What
+  remains, and is accepted:
+  - after a responder restarts, an init recorded in the `W` (10 minutes) before the restart can
+    be replayed, each at most once and in ascending order: the table is not persisted, and `F`
+    bounds how far back it reaches;
+  - an initiator whose clock runs more than `W` ahead of a responder's is refused, visibly, for
+    as long as it does (the relay refuses its registration then anyway), and accepted again as
+    soon as its clock is right: nothing it sent while ahead was stored;
+  - an initiator whose clock steps back below a stamp a responder stored for it (corrected, or a
+    different device restored from the same seed) is refused by that responder until its clock
+    passes that stamp again, for at most `W` when the stamp was within `W` of the responder's
+    clock. A browser member restarts on every page load, which by itself costs nothing: its
+    stamps come from its wall clock again, still ahead of every stamp it sent before.
 - **Indices.** Each side picks a random non-zero 32-bit index for the session and sends it as
   `sender index`. A data frame names the **receiver's** index, so a receiver can tell sessions
   apart during rekeying.
@@ -303,9 +412,19 @@ roster.
   64-bit counter nonce, never transmitted. Frames for one pair arrive in order, so a frame that
   fails to decrypt ends the session; the next send starts a new one.
 - A Noise message is at most 65535 bytes, so one transport plaintext is at most 65519 bytes.
+  A receiver checks this before decrypting: a data frame whose ciphertext is longer ends the
+  session, as a frame that fails to decrypt does.
 - **Unknown sessions.** A data frame naming a receiver index the receiver does not hold is
-  answered with `reset`. The sender drops that session, and its next send starts a new handshake.
+  answered with `reset` (within the rates of section 7.4). The sender drops that session, and
+  its next send starts a new handshake.
   The message in that frame is lost.
+- **What the relay can do to sessions.** The relay cannot read, forge or alter a session
+  message, but it routes every frame, so it can drop, delay or replay frames and forge `reset`,
+  `refused` and `unreachable` naming any peer. Each of these ends sessions or the handshakes
+  behind them, and the next send starts again. This is inherent in routing through it and
+  accepted: it denies service, as a relay that stops forwarding does anyway, and never yields
+  content, keys or membership. The rates of section 7.4 keep it from turning such frames into
+  unbounded work.
 - **Delivery is at most once.** `send` completing means the message was handed to the relay.
   Applications that need confirmation build it on top. A client ends all its sessions when its
   own relay connection drops.
@@ -331,10 +450,17 @@ Each decrypted plaintext starts with a type byte:
 
 - **Messages** larger than one fragment (65517 bytes of `bytes`) are split, joined by the
   receiver, and delivered to the application whole and in order. Maximum message size: 64 MiB.
+  A fragment with flag bit 0 set carries at least one byte. A session message that breaks the
+  table (an empty fragment saying more follow, a `credit` not of 4 bytes, an unknown type) ends
+  the session; so does a message over 64 MiB.
 - **Credit (flow control).**
   - Every session starts with **1 MiB** of credit in each direction. A sender may only send
     message bytes (the `bytes` of `message` plaintexts) up to the credit it holds, and waits
     otherwise.
+  - The receiver enforces it. Per session it counts the credit it has granted (the initial
+    1 MiB and every `credit` it sent) less the message bytes received; a peer that sends message
+    bytes beyond that ends the session. Credit still on its way only leaves the sender holding
+    less than the receiver counts, never more.
   - The receiver returns credit with `credit` messages: for complete messages as its application
     takes them, and for fragments of a message still arriving while the application has
     nothing waiting, so a message larger than the window cannot deadlock.
@@ -344,17 +470,113 @@ Each decrypted plaintext starts with a type byte:
   - A receiver that wants a larger window (a client setting) simply grants extra credit at any
     time. Nothing is negotiated.
   - Credit and reassembly belong to one session.
-- **Rosters.** Any member answers `roster-request` with the newest roster it holds. A member
-  that receives a `roster` applies the acceptance rules of section 3.
+- **Per-peer bounds.** Whatever a peer does, a receiver keeps for it, over all its sessions with
+  that peer: at most `2 × 64 MiB + 4 × window` message bytes in reassembly or waiting for the
+  application (`window`: the credit this receiver grants each session, 1 MiB by default); at
+  most 65536 whole messages waiting for the application; at most 8 sessions. A fragment that
+  would take the peer past either message bound ends its session, and the message is lost
+  (delivery is at most once); a ninth session ends the oldest that is not current. An honest
+  sender stays within them: credit is returned for fragments only while nothing waits on that
+  session, so at most one whole message waits on a session while the next arrives on the
+  session a rekey made, and a reassembly buffer never holds more than its message's bytes.
+- **Reassembly memory.** These bounds count payload bytes, so an implementation must also keep
+  the memory reassembly takes in proportion to them, however the message was cut. A peer may
+  send one-byte fragments, and storing each as its own buffer or list entry multiplies the
+  bounds by that per-fragment overhead, many times over; joining fragments into one buffer as
+  they arrive keeps it within twice the payload.
+- **Rosters.** Any member answers `roster-request` with the newest roster it holds, within the
+  rates of section 7.4. A member that receives a `roster` applies the acceptance rules of
+  section 3.
 - **Resigning.** `sig` = Ed25519 by the member over
   `lenStr("frontier-link/1/resign") || lenStr(network) || lenStr(node) || u64be(ts)`. The primary
   accepts it only from that member's own session and with `ts` within 5 minutes of its clock,
   then publishes a roster without the member.
 
+### 7.4 Rates
+
+What a peer (or a relay forging frames, which it can) gets a member to do in return is bounded,
+so that small frames cannot buy large or costly answers. Every budget belongs to one id: a peer
+that floods spends only its own, and can never use up what another peer is owed. A budget
+shared between peers would let one starve the others (a single bucket for all resets let one
+member's flood cost another peer the resets it was owed; one bucket for all ids off the roster
+let forged ids drop a newly added member's handshakes). A limit over many ids together exists
+only as a backstop on memory or work that a relay forging ids could otherwise reach; members
+never share a rate budget.
+
+- **Rosters to a peer.** A member sends one peer its roster, whether answering a
+  `roster-request` or pushing it because a handshake showed the peer behind (section 7.1), at
+  most once per 250 ms; offers within that interval are coalesced into one at its end. A roster
+  can be 65000 bytes; the routed frame asking for it is 39. A push needs no request at all: a
+  peer that sends handshakes showing an old roster version draws one each time, so pushes are
+  coalesced like answers. (A replayed init no longer can: its stamp refuses it, section 7.1.)
+- **One roster in flight.** A member does not queue a roster to a peer while one at least as
+  new is still waiting, unsent, in its connection's send buffer: that one already says as much.
+  This holds for every roster sent, answered, pushed or published.
+- **Resets.** A `reset` for one peer and receiver index goes out at most once per second, and to
+  one peer at most 32 a second with a burst of 64. Resets to ids off the roster also draw on a
+  ceiling for all of them together, 128 a second with a burst of 256, which only forged ids
+  reach. A frame beyond that is dropped unanswered.
+- **Handshakes.** A responder does the Diffie-Hellman work of a `handshake-init` from one roster
+  member at most 16 times a second with a burst of 32. An id off its roster gets its own budget
+  of 4 a second with a burst of 8, and its own reset budget; budgets are kept for the 256 most
+  recently seen such ids, the least recently seen forgotten first. Beyond those, inits from all
+  ids off the roster together are processed at most 128 a second with a burst of 256: a
+  ceiling on work, which only a relay forging ids can reach, since a member always arrives
+  under its own id. An init beyond a budget is dropped unanswered; its sender times out and
+  retries (section 7.1).
+- **Failed inits.** A relay can label inits built on its own key with a roster member's id, and
+  a member can send inits under its own id with a bogus static key, so per-member init budgets
+  alone leave the Diffie-Hellman work of failures to anyone who wants it. Each member id
+  therefore also has a failure budget, 2 a second with a burst of 4, apart from its init budget.
+  An init labelled with that id fails when it does not read, when its static key is not that
+  member's, when it is on the member's key but its payload is not the 16 bytes of section 7.1
+  (malformed), or when its stamp is not later than the last accepted (a replay); each failure
+  spends the budget, and while it is spent that id's inits are dropped before any Diffie-Hellman
+  work. An init on another key is answered `refused`; the other failures are dropped unanswered.
+  The version a failed init claims is ignored: it says nothing about the member named, so it
+  triggers neither a roster push nor a `roster-request` to that member (a forged one could
+  otherwise steer full rosters at any member). The budget is per id, never shared: a shared one
+  (tried, and proven exploitable) let a few members sending bad inits under their own ids block
+  every honest member's handshakes. Per id, a member sending bad inits starves only itself, a
+  relay forging an id silences only that id (which it can do anyway by not forwarding its
+  frames), and the work all failures cause stays within the roster's size times 2 a second.
+- **Ids off the roster.** An id off the roster may be one a roster the member has not seen lists
+  (a newcomer, say). Two things hint at that: any init from an id off the roster that a budget
+  drops, whatever it carries (its version is never read), and an init from such an id that is
+  read and refused, if the version it carries is newer than the member's. On a hint the member
+  asks the primary for its roster, then waits before the next: 1 second at first, doubled after
+  each hint that brought no newer roster, up to 5 minutes, and back to 1 second once a newer
+  roster arrives. A relay can provoke hints on every node at once, and each answer is a full
+  roster from the primary, so a fixed once a second would cost the primary as many rosters a
+  second as there are members. A hint that comes within the wait is deferred, not dropped: one
+  request goes when the wait ends, however many hints came, so a node at the longest wait still
+  learns of a newer roster (one that revokes someone, say) within it. No other init prompts that
+  request, and a failed init labelled with a member's id never does.
+- **Reconnecting.** Budgets carry across relay connections and refill only with time, from
+  their last use: a relay that forces reconnects gains no budget by it. An offer coalesced for
+  the end of an interval is dropped with the old connection, but when the last roster went to
+  each peer is kept.
+
+Every rate, interval and timeout of this section and of sections 5.2, 7.2 and 11 is measured on
+a monotonic clock, one that never goes back. The wall clock serves only for times that are
+signed or shown (`ts`, `issuedAt`, a code's expiry as displayed): a wall clock stepped back (by
+NTP, or a restored virtual machine) would otherwise strand a budget, or hold back a roster
+offer, for as long as the step, and budgets now carry across reconnects, so nothing else would
+reset them.
+
+The rates are token buckets: a burst's worth to begin with, refilled at the rate. They are
+maxima: an implementation may answer, push or process less (a separate budget for `refused`
+answers, say), never more. A peer must not rely on any answer a rate may drop; each has a
+timeout or a retry behind it. The same holds for the limits of sections 5.2 and 11.
+
 ## 8. Revocation
 
 - The primary publishes a roster without the member, pushes it to the relay (section 4.2) and to
-  every member.
+  every member. A push to a member that fails (the member unreachable, the primary's own
+  connection down) is tried again after 1 second, doubling to at most 10 minutes, until it goes,
+  the member leaves the roster, or a newer roster replaces it (which is then pushed in its
+  stead). Without that, a member with no traffic of its own would keep the old roster, still
+  trusting the revoked member, until its next handshake.
 - Members drop sessions with peers no longer on the roster, and refuse their handshakes. A
   member that was offline learns the new roster from the relay at registration, or from the
   first up-to-date member it meets (section 7.1), so revocation reaches it with the primary
@@ -363,8 +585,10 @@ Each decrypted plaintext starts with a type byte:
 - A primary whose seed is lost cannot change the roster again: there is no second key that could
   sign one, by design, since any such key could also admit or revoke. The way back is a new
   network, with every node paired again.
-- A client whose registration is closed `4008`, or that accepts a roster no longer listing it,
-  enters a terminal `revoked` state and stops retrying.
+- A client whose registration is closed `4008`, or that accepts a roster no longer listing it
+  (in `registered`, from the primary or from a peer), enters a terminal `revoked` state and
+  stops retrying. It is never `registered` (connected) after that, not even for the
+  `registered` message that carried the roster.
 
 ## 9. Relay limits and flow control
 
@@ -400,10 +624,22 @@ A self-hosted relay defaults every limit to off; the values below are the public
   or anything behind it, until the network's bucket allows (one second of burst). A network
   over its quota is shaped at `LINK_TRICKLE_BPS`. Frames are never dropped.
 - **Control ahead of shaping.** Text control messages, WebSocket pings and pongs, and routed
-  frames of types `0x01`, `0x02`, `0x05`, `0x06`, `0x07` and `0x08`, each sent as one unfragmented
-  WebSocket frame, are read at once while the network's control budget allows: 4096 bytes per
-  second, with 131072 bytes of burst. Beyond the budget, and for any fragmented message,
-  control waits like data. It is charged like data either way.
+  frames of types `0x01`, `0x02`, `0x05`, `0x06`, `0x07` and `0x08`, each sent as one
+  unfragmented WebSocket frame, are read at once while the sending member's own control budget
+  allows: 4096 bytes per second, with 131072 bytes of burst. Beyond the budget, and for any
+  fragmented message, control waits like data. It is charged like data either way. The budget is
+  each member's, never the network's: one budget for the network let one member spend it and
+  hold back every other member's handshakes and control. It belongs to the member, kept by node
+  id across its connections, so reconnecting buys no fresh burst. A ceiling for the whole
+  network bounds them all together, and is tied to the rate in force: 64 members' budgets
+  (262144 bytes per second), but never more than half the network's rate, and half the trickle
+  rate once its quota is spent; its burst is four members' bursts, or a second of the ceiling if
+  more, up to 64 members'. Control read ahead is charged but not held back, so a ceiling above
+  the rate in force would let members, each within its own budget, carry ordinary traffic past
+  the network's rate or quota in `0x08` frames. At half of it, control read ahead moves no more
+  than half the rate in force over time, beyond its burst (512 KiB, or a second of the ceiling
+  if more): a one-off allowance that then refills at half the rate. No one member's burst
+  empties the ceiling.
 - **Back-pressure.** A sender that hands a frame to a recipient whose queue in the relay then
   holds more than `LINK_QUEUE_BYTES` (0: anything at all) stops being read until that queue
   drains. With the default, each sender has at most one frame waiting for a recipient, the
@@ -458,10 +694,25 @@ A self-hosted relay defaults every limit to off; the values below are the public
 - A send to a peer that answers `unreachable` fails at once with a typed error. Nothing is queued
   for absent peers.
 - On `4009`, look the network up again and reconnect.
+- **Relay errors.** `error` messages from the relay reach the application at most 16 a second
+  with a burst of 64; the rest are dropped. A relay's messages never raise an event each without
+  a bound.
+- **Send buffer.** A client holds at most 64 MiB (67108864 bytes) handed to its connection and
+  not yet sent. Message fragments wait in the client's own queue (section 7.3), but control
+  (handshakes, `credit`, `reset`, rosters, control messages) is handed over at once; a send that
+  would pass the bound drops the connection, which reconnects as after any close, rather than
+  growing behind a relay that has stopped reading. The bound is set by the largest honest
+  burst: a primary publishing a full roster to about 400 members queues some 26 MB at once, and
+  must never be cut off for it, with room left for the handshakes and messages around it and a
+  slow link. A bound much nearer 26 MB would drop a primary for doing its job.
 
 ## 12. Vectors
 
 `spec/vectors/` holds JSON vectors for: key and id derivation; roster signing and validation
 (valid and invalid cases); the registration signature; SPAKE2 (RFC 9382's, plus this
 profile's); the Noise IK handshake and first transport messages; frame encoding; session message
-encoding. Every implementation runs all that apply to it.
+encoding; rosters given as text (`rosterTexts` in `relay.json`), whose validity turns on the
+bytes themselves: repeated names, `12.0`, `1.2e1`, `-0` and `1e309`, escaped lone surrogates,
+nesting; Ed25519 verification (`ed25519` in `relay.json`): small-order, non-canonical and
+mixed-order keys and `R`, `S >= L`, and the order-4 forgery. Every implementation runs all that
+apply to it.

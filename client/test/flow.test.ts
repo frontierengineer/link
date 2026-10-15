@@ -20,6 +20,8 @@ interface Node {
   auto: boolean;
   /** Bytes "in the socket": the test drains it. */
   buffered: number;
+  /** Bytes handed to the socket in all. */
+  queued: number;
   drainWaiters: (() => void)[];
   control: SessionMessage[];
 }
@@ -42,16 +44,18 @@ function mesh(count: number): { nodes: Node[]; drain(n: Node): void } {
   const nodes: Node[] = [];
   const byId = new Map<string, Node>();
   for (const identity of ids) {
-    const node: Node = { id: identity.id, mgr: undefined as never, wire: [], inbox: [], auto: true, buffered: 0, drainWaiters: [], control: [] };
+    const node: Node = { id: identity.id, mgr: undefined as never, wire: [], inbox: [], auto: true, buffered: 0, queued: 0, drainWaiters: [], control: [] };
     node.mgr = new SessionManager({
       identity,
       roster: () => roster,
       now: () => Date.now(),
+      wallNow: () => Date.now(),
       creditWindow: INITIAL_CREDIT,
       timing: DEFAULT_SESSION_TIMING,
       sendFrame: (type, peer, body) => {
         node.wire.push({ type, to: peer, size: 18 + body.length });
         node.buffered += 18 + body.length;
+        node.queued += 18 + body.length;
         const to = byId.get(peer)!;
         queueMicrotask(() => to.mgr.handleFrame({ type, peer: new Uint8Array(16), body }, node.id));
         return true;
@@ -59,6 +63,7 @@ function mesh(count: number): { nodes: Node[]; drain(n: Node): void } {
       writable: () => node.buffered <= SOCKET_LOW_WATER,
       whenWritable: (f) => (node.buffered <= SOCKET_LOW_WATER ? f() : node.drainWaiters.push(f)),
       bufferedAmount: () => node.buffered,
+      wirePosition: () => ({ conn: 1, queued: node.queued, written: node.queued - node.buffered }),
       note: () => undefined,
       deliver: (from, bytes, release) => {
         if (node.auto) release();
@@ -66,6 +71,7 @@ function mesh(count: number): { nodes: Node[]; drain(n: Node): void } {
       },
       control: (_from, msg) => node.control.push(msg),
       peerVersion: () => undefined,
+      rosterHint: () => undefined,
     });
     nodes.push(node);
     byId.set(node.id, node);

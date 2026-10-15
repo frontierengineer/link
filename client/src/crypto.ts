@@ -5,7 +5,7 @@
 import { ed25519, x25519 } from '@noble/curves/ed25519.js';
 import { p256 } from '@noble/curves/nist.js';
 import { chacha20poly1305 } from '@noble/ciphers/chacha.js';
-import { sha256 as nobleSha256 } from '@noble/hashes/sha2.js';
+import { sha256 as nobleSha256, sha512 } from '@noble/hashes/sha2.js';
 import { hmac } from '@noble/hashes/hmac.js';
 import { hkdf as nobleHkdf } from '@noble/hashes/hkdf.js';
 import { concat } from './bytes.js';
@@ -89,10 +89,46 @@ export function ed25519Sign(seed: Uint8Array, message: Uint8Array): Uint8Array {
   return ed25519.sign(message, seed);
 }
 
-/** Strict RFC 8032 verification (canonical encodings only), as Go's crypto/ed25519 does. */
+// Verification as section 1 fixes it, identical in every implementation:
+// - A (the public key) and R are canonical encodings: y < p, and x = 0 never with the sign bit;
+// - neither A nor R is a point of small order;
+// - S < L;
+// - the equation is cofactorless: [S]B = R + [k]A, with k = SHA-512(R || A || M) mod L.
+// noble's own `verify` checks the cofactored equation (and refuses small-order A), so the rule
+// is written out here on noble's point arithmetic.
+
+const Ed = ed25519.Point;
+const ED_P = Ed.Fp.ORDER;
+const ED_L = Ed.Fn.ORDER;
+
+function leInt(b: Uint8Array): bigint {
+  let v = 0n;
+  for (let i = b.length - 1; i >= 0; i--) v = (v << 8n) | BigInt(b[i]!);
+  return v;
+}
+
+/** y < p, and the sign bit never set for x = 0 (y = 1 or y = p - 1). */
+function canonicalPoint(enc: Uint8Array): boolean {
+  const sign = enc[31]! >> 7;
+  const last = enc[31]! & 0x7f;
+  const y = leInt(Uint8Array.of(...enc.subarray(0, 31), last));
+  if (y >= ED_P) return false;
+  return !(sign === 1 && (y === 1n || y === ED_P - 1n));
+}
+
+/** Section 1's Ed25519 verification: the only one the client uses. */
 export function ed25519Verify(sig: Uint8Array, message: Uint8Array, pub: Uint8Array): boolean {
+  if (sig.length !== 64 || pub.length !== 32) return false;
+  const rEnc = sig.subarray(0, 32);
+  if (!canonicalPoint(pub) || !canonicalPoint(rEnc)) return false;
+  const s = leInt(sig.subarray(32));
+  if (s >= ED_L) return false;
   try {
-    return ed25519.verify(sig, message, pub, { zip215: false });
+    const A = Ed.fromBytes(pub);
+    const R = Ed.fromBytes(rEnc);
+    if (A.isSmallOrder() || R.isSmallOrder()) return false;
+    const k = leInt(sha512(concat(rEnc, pub, message))) % ED_L;
+    return Ed.BASE.multiplyUnsafe(s).equals(R.add(A.multiplyUnsafe(k)));
   } catch {
     return false;
   }

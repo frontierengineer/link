@@ -5,6 +5,7 @@ import { b64u, concat, equalBytes, fromB64uLen, utf8 } from './bytes.js';
 import { ed25519Verify } from './crypto.js';
 import { isNodeId, nodeIdFromEd25519, type Identity } from './identity.js';
 import { canonicalize } from './jcs.js';
+import { integerMember } from './json.js';
 
 export type MemberKind = 'primary' | 'worker' | 'surface' | 'mcp';
 export type PairingKind = Exclude<MemberKind, 'primary'>;
@@ -91,17 +92,17 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-function isNonNegInt(v: unknown): v is number {
-  return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
-}
-
 /** Why `value` is not a valid roster, or `null` when it is (section 3, "Valid"). */
 export function rosterProblem(value: unknown): string | null {
   if (!isPlainObject(value)) return 'not an object';
   const r = value;
   if (!isNodeId(r.network)) return 'network is not a node id';
-  if (!isNonNegInt(r.version) || r.version < 1) return 'version is not a positive integer';
-  if (!isNonNegInt(r.issuedAt)) return 'issuedAt is not a non-negative integer';
+  // Integer literals only (section 3): `12.0` and `1.2e1` are not versions, though JSON.parse
+  // makes 12 of them.
+  const version = integerMember(r, 'version');
+  if (version === undefined || version < 1) return 'version is not a positive integer';
+  const issuedAt = integerMember(r, 'issuedAt');
+  if (issuedAt === undefined || issuedAt < 0) return 'issuedAt is not a non-negative integer';
   if (typeof r.relay !== 'string') return 'relay is not a string';
   if (!isPlainObject(r.primary)) return 'primary is not an object';
   let primaryKey: Uint8Array;

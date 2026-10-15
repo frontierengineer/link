@@ -2,7 +2,6 @@ package relay
 
 import (
 	"crypto/rand"
-	"encoding/json"
 	"time"
 
 	"github.com/frontierengineer/link/relay/internal/link"
@@ -33,7 +32,7 @@ func (c *conn) pair(data []byte) bool {
 		Network *string `json:"network"`
 		Code    *string `json:"code"`
 	}
-	if json.Unmarshal(data, &m) != nil || m.Network == nil || m.Code == nil {
+	if decodeControl(data, &m) != nil || m.Network == nil || m.Code == nil {
 		c.closeWith(closeBadRequest, "malformed pair", false)
 		return false
 	}
@@ -86,7 +85,7 @@ func (c *conn) channelOf(data []byte) (*channel, bool) {
 	var m struct {
 		Channel string `json:"channel"`
 	}
-	if json.Unmarshal(data, &m) != nil {
+	if decodeControl(data, &m) != nil {
 		return nil, false
 	}
 	raw, ok := link.DecodeKey(m.Channel, link.IDLen)

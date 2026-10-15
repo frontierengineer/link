@@ -616,7 +616,7 @@ test('a responder keeps an expired session while a message is still crossing it,
     const worker = await net.add('worker', { timing: { ...FAST, rekeyIntervalMs: 3_600_000 } });
     const surface = await net.add('surface', {
       timing: { ...FAST, rekeyIntervalMs: 1000, retireGraceMs: 500 },
-      now: () => Date.now() + skew,
+      monotonicNow: () => performance.now() + skew,
     });
     const sessions = (m: Member) => (m as unknown as { sessions: { sessionInfo(p: string): { localIndex: number }[] } }).sessions;
 
@@ -642,7 +642,7 @@ test('a responder keeps an expired session while a message is still crossing it,
     let backSkew = 0;
     const back = await net.add('mcp', {
       timing: { ...FAST, rekeyIntervalMs: 1000, retireGraceMs: 500 },
-      now: () => Date.now() + backSkew,
+      monotonicNow: () => performance.now() + backSkew,
     });
     const wReader = worker.messages;
     await worker.send(back.id, new Uint8Array(1)); // the worker initiates; back is the responder
@@ -729,7 +729,7 @@ test('a responder that sends on an expired session lets a message still arriving
   try {
     let skew = 0;
     const worker = await net.add('worker', { timing: { ...FAST, rekeyIntervalMs: 3_600_000 } });
-    const surface = await net.add('surface', { timing: { ...FAST, rekeyIntervalMs: 1000, retireGraceMs: 500 }, now: () => Date.now() + skew });
+    const surface = await net.add('surface', { timing: { ...FAST, rekeyIntervalMs: 1000, retireGraceMs: 500 }, monotonicNow: () => performance.now() + skew });
     const sReader = surface.messages;
     const wIn = inbox(worker);
     const first = new Uint8Array(700 * 1024).fill(1);

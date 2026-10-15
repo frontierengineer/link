@@ -3,6 +3,7 @@
 
 import { b64u, fromB64uLen, fromUtf8, utf8 } from './bytes.js';
 import { hkdf, open, seal } from './crypto.js';
+import { parseJson } from './json.js';
 import { deriveW, scalarFromRandom, Spake2, verifyConfirmation, type Spake2Keys } from './spake2.js';
 
 export interface PairTransportKeys {
@@ -32,7 +33,7 @@ class Sealer {
   open(ciphertext: Uint8Array): unknown {
     const pt = open(this.recvKey, this.recvN, new Uint8Array(0), ciphertext);
     this.recvN++;
-    return JSON.parse(fromUtf8(pt)) as unknown;
+    return parseJson(fromUtf8(pt));
   }
 }
 

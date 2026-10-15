@@ -92,6 +92,51 @@ func TestParseJSONRefusesDuplicatesAndTrailingData(t *testing.T) {
 	}
 }
 
+func TestParseJSONRefusesEscapedLoneSurrogates(t *testing.T) {
+	for _, in := range []string{`"\ud800"`, `"\udc00"`, `"a\ud800b"`, `"\ud800\u0041"`, `"\ud800\ud800"`, `"\udbff"`,
+		`{"\ud83d":1}`, `["\ude00\ud83d"]`, `"\uD800"`} {
+		if _, err := ParseJSON([]byte(in)); err == nil {
+			t.Errorf("accepted %s", in)
+		}
+	}
+	for in, want := range map[string]string{`"\ud83d\ude00"`: "\U0001F600", `"\uD83D\uDE00x"`: "\U0001F600x",
+		`"\\ud800"`: `\ud800`, `"\ufffd\u00e9"`: "\ufffd\u00e9", `"\"\\\ud83d\ude00"`: "\"\\\U0001F600"} {
+		v, err := ParseJSON([]byte(in))
+		if err != nil || v != want {
+			t.Errorf("%s: got %q, %v; want %q", in, v, err, want)
+		}
+	}
+}
+
+func TestParseJSONRefusesNumbersOutOfRange(t *testing.T) {
+	for _, in := range []string{`1e309`, `-1e309`, `[1e400]`, `{"a":123456789e400}`} {
+		if _, err := ParseJSON([]byte(in)); err == nil {
+			t.Errorf("accepted %s", in)
+		}
+	}
+	for _, in := range []string{`1.7976931348623157e308`, `5e-324`, `1e-400`, `0`, `-0.0`} {
+		if _, err := ParseJSON([]byte(in)); err != nil {
+			t.Errorf("%s refused: %v", in, err)
+		}
+	}
+}
+
+func TestParseJSONNestingLimit(t *testing.T) {
+	deep := func(n int, inner string) string { return strings.Repeat("[", n) + inner + strings.Repeat("]", n) }
+	for _, in := range []string{deep(MaxJSONDepth, ""), deep(MaxJSONDepth, "1"), deep(MaxJSONDepth-1, "{}"),
+		`{"a":` + deep(MaxJSONDepth-1, `"x"`) + `}`} {
+		if _, err := ParseJSON([]byte(in)); err != nil {
+			t.Errorf("%d bytes refused: %v", len(in), err)
+		}
+	}
+	for _, in := range []string{deep(MaxJSONDepth+1, ""), deep(MaxJSONDepth, "{}"), `{"a":` + deep(MaxJSONDepth, "1") + `}`,
+		deep(100000, "")} {
+		if _, err := ParseJSON([]byte(in)); err == nil {
+			t.Errorf("%d bytes accepted", len(in))
+		}
+	}
+}
+
 func TestIDs(t *testing.T) {
 	k, err := DeriveKeys(bytes.Repeat([]byte{7}, 32))
 	if err != nil {

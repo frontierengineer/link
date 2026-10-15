@@ -12,6 +12,11 @@ export type JsonValue = null | boolean | number | string | JsonValue[] | { [k: s
 
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
+/** A UTF-16 surrogate without its pair: not Unicode text, so not I-JSON. */
+export function hasLoneSurrogate(s: string): boolean {
+  return LONE_SURROGATE.test(s);
+}
+
 function compareUtf16(a: string, b: string): number {
   const n = Math.min(a.length, b.length);
   for (let i = 0; i < n; i++) {
@@ -22,7 +27,7 @@ function compareUtf16(a: string, b: string): number {
 }
 
 function str(s: string): string {
-  if (LONE_SURROGATE.test(s)) throw new Error('jcs: string contains a lone surrogate');
+  if (hasLoneSurrogate(s)) throw new Error('jcs: string contains a lone surrogate');
   return JSON.stringify(s);
 }
 

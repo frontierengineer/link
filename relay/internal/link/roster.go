@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // RosterContext prefixes the bytes a primary signs for a roster.
@@ -170,7 +171,7 @@ func ParseRoster(raw []byte) (*Roster, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !ed25519.Verify(r.Primary, msg, sig) {
+	if !VerifyEd25519(r.Primary, msg, sig) {
 		return nil, errors.New("roster: signature does not verify")
 	}
 	return r, nil
@@ -185,11 +186,15 @@ func keyField(m map[string]any, name string) (ed25519.PublicKey, error) {
 	return ed25519.PublicKey(k), nil
 }
 
-// integer accepts a JSON number written as an integer within the IEEE-754 safe range.
+// integer accepts a JSON number written as a non-negative integer literal (digits only: no
+// sign, fraction or exponent, so not -0 either) within the IEEE-754 safe range (section 1).
 func integer(v any) (int64, error) {
 	n, ok := v.(json.Number)
 	if !ok {
 		return 0, errors.New("not a number")
+	}
+	if strings.HasPrefix(string(n), "-") {
+		return 0, errors.New("not a non-negative integer literal")
 	}
 	i, err := strconv.ParseInt(string(n), 10, 64)
 	if err != nil || i > maxSafeInteger || i < -maxSafeInteger {

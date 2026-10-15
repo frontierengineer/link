@@ -30,7 +30,7 @@ import {
   type Roster,
 } from '../src/roster.js';
 import { originOf, registerSigningBytes, resignSigningBytes } from '../src/signed.js';
-import { sessionPrologue } from '../src/sessions.js';
+import { initPayload, nextStamp, sessionPrologue } from '../src/sessions.js';
 import { bytesToBigint, deriveW, scalarFromRandom, scalarTo32, Spake2 } from '../src/spake2.js';
 import rfc9382 from '../test/vectors/rfc9382.json' with { type: 'json' };
 
@@ -234,7 +234,8 @@ export function buildVectors(): unknown {
   const resp = new HandshakeState({ pattern: PATTERNS.IK, initiator: false, prologue, s: surface.x25519, fixedEphemeral: rEph });
   const initIndex = 0x0badcafe;
   const respIndex = 0x00c0ffee;
-  const m1 = init.writeMessage(u64be(12));
+  const stamp1 = 1790000000000n;
+  const m1 = init.writeMessage(initPayload(12, stamp1));
   const r1 = resp.readMessage(m1.message);
   const m2 = resp.writeMessage(u64be(13));
   const r2 = init.readMessage(m2.message);
@@ -253,7 +254,9 @@ export function buildVectors(): unknown {
     initiator: { node: worker.id, seed: seeds.worker, staticPrivate: toHex(worker.x25519.priv), ephemeralPrivate: toHex(iEph), index: initIndex },
     responder: { node: surface.id, seed: seeds.surface, staticPrivate: toHex(surface.x25519.priv), ephemeralPrivate: toHex(rEph), index: respIndex },
     message1: {
-      payload: toHex(u64be(12)),
+      payload: toHex(initPayload(12, stamp1)),
+      rosterVersion: 12,
+      stamp: Number(stamp1),
       noise: toHex(m1.message),
       frameSent: toHex(encodeFrame(FrameType.HandshakeInit, surfacePeer, handshakeInitBody(initIndex, m1.message))),
       frameDelivered: toHex(encodeFrame(FrameType.HandshakeInit, workerPeer, handshakeInitBody(initIndex, m1.message))),
@@ -282,9 +285,60 @@ export function buildVectors(): unknown {
       },
     ],
   };
-  if (toHex(r1.payload) !== toHex(u64be(12)) || toHex(tr.handshakeHash) !== toHex(ti.handshakeHash)) {
+  if (toHex(r1.payload) !== toHex(initPayload(12, stamp1)) || toHex(tr.handshakeHash) !== toHex(ti.handshakeHash)) {
     throw new Error('noise vector does not round-trip');
   }
+
+  // ── Handshake stamps (section 7.1) ──
+  // The worker's inits to the surface, in order, each with its own ephemeral; the surface,
+  // starting with no stamp for the worker, accepts or refuses each as recorded.
+  const stampInit = (stamp: bigint, eph: number, payload = initPayload(12, stamp)) => {
+    const hs = new HandshakeState({ pattern: PATTERNS.IK, initiator: true, prologue, s: worker.x25519, rs: surface.x25519.pub, fixedEphemeral: fromHex(seedHex(eph)) });
+    return { ephemeralPrivate: seedHex(eph), payload: toHex(payload), noise: toHex(hs.writeMessage(payload).message) };
+  };
+  const T = 1790000000000n;
+  const W = 600000n;
+  const first = stampInit(T, 7);
+  const far = T + 10n * 365n * 86_400_000n;
+  // Step k (from 1) comes 10 s after the last, on both of the responder's clocks.
+  const at = (k: number) => Number(T) + 10_000 * k;
+  type Step =
+    | { description: string; stamp: number | null; ephemeralPrivate: string; payload: string; noise: string; accepted: boolean; stored?: number }
+    | { description: string; event: 'removed' | 'readmitted'; stored?: number };
+  const tenAhead = stampInit(BigInt(at(10)) + W, 15);
+  const steps: Step[] = [
+    { description: 'stamp T - W, recorded W before the responder started: refused', stamp: Number(T - W), ...stampInit(T - W, 12), accepted: false },
+    { description: 'a member 9 minutes slow, right after the restart: accepted', stamp: Number(T - 540000n), ...stampInit(T - 540000n, 13), accepted: true, stored: Number(T - 540000n) },
+    { description: 'stamp T: accepted', stamp: Number(T), ...first, accepted: true, stored: Number(T) },
+    { description: 'the same bytes again, a replay: refused', stamp: Number(T), ...first, accepted: false, stored: Number(T) },
+    { description: 'an older stamp, T - 1: refused', stamp: Number(T - 1n), ...stampInit(T - 1n, 8), accepted: false },
+    { description: 'stamp T again from a new ephemeral: refused', stamp: Number(T), ...stampInit(T, 9), accepted: false },
+    { description: 'a newer stamp, T + 1: accepted', stamp: Number(T + 1n), ...stampInit(T + 1n, 10), accepted: true, stored: Number(T + 1n) },
+    { description: 'an 8-byte payload, the roster version alone: refused as malformed', stamp: null, ...stampInit(0n, 11, u64be(12)), accepted: false },
+    { description: 'a stamp ten years ahead: refused, and nothing stored', stamp: Number(far), ...stampInit(far, 14), accepted: false, stored: Number(T + 1n) },
+    { description: 'a stamp exactly W ahead of the responder: accepted, and stored as it is', stamp: at(10) + Number(W), ...tenAhead, accepted: true, stored: at(10) + Number(W) },
+    { description: 'a stamp W + 1 ahead of the responder: refused', stamp: at(11) + Number(W) + 1, ...stampInit(BigInt(at(11)) + W + 1n, 16), accepted: false, stored: at(10) + Number(W) },
+    { description: 'the initiator leaves the roster: its stamp is retained', event: 'removed' },
+    { description: 'and is admitted again: its stamp is restored', event: 'readmitted', stored: at(10) + Number(W) },
+    { description: 'a replay of an init from before its removal: refused', stamp: at(10) + Number(W), ...tenAhead, accepted: false },
+    { description: 'a fresh init after its return, stamped after the restored stamp: accepted', stamp: at(10) + Number(W) + 1, ...stampInit(BigInt(at(10)) + W + 1n, 17), accepted: true, stored: at(10) + Number(W) + 1 },
+  ];
+  const handshakeStamps = {
+    encoding: [
+      { wallNowMs: 1790000000000, lastStamp: 0, stamp: Number(nextStamp(1790000000000, 0n)) },
+      { wallNowMs: 1790000000000, lastStamp: 1790000000000, stamp: Number(nextStamp(1790000000000, 1790000000000n)) },
+      { wallNowMs: 1789999999000, lastStamp: 1790000000005, stamp: Number(nextStamp(1789999999000, 1790000000005n)) },
+      { wallNowMs: 1790000001000, lastStamp: 1790000000005, stamp: Number(nextStamp(1790000001000, 1790000000005n)) },
+    ],
+    initiator: worker.id,
+    responder: surface.id,
+    windowMs: Number(W),
+    // The responder started at wall time T with the worker on its roster; step k comes 10 s
+    // after the one before (both its clocks advance together), at responderWallNowMs, so no
+    // budget is in play. stored is the responder's stamp for the worker after the step.
+    responderStartedMs: Number(T),
+    steps: steps.map((st, k) => ({ ...st, responderWallNowMs: at(k + 1) })),
+  };
 
   // ── Frames and session messages ──
   const peer = nodeIdToBytes(worker.id);
@@ -352,6 +406,7 @@ export function buildVectors(): unknown {
     },
     spake2: { rfc9382: rfc, profile },
     noise,
+    handshakeStamps,
     frames,
     sessionMessages,
   };

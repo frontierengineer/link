@@ -1,15 +1,17 @@
 // spec/vectors/relay.json is written by the Go relay. The client checks every item in it
 // that the client itself understands: keys and ids, roster JCS bytes, signatures and
-// validity, registration signatures and origins, and routed frames.
+// validity, rosters given as text, registration signatures and origins, and routed frames.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { b64u, fromB64u, toHex } from '../src/bytes.js';
+import { ed25519 } from '@noble/curves/ed25519.js';
 import { ed25519Verify } from '../src/crypto.js';
 import { decodeFrame, FrameType } from '../src/frames.js';
 import { identityFromSeed, nodeIdFromBytes } from '../src/identity.js';
 import { canonicalize } from '../src/jcs.js';
+import { parseJson } from '../src/json.js';
 import { rosterProblem, rosterSigningBytes } from '../src/roster.js';
 import { originOf, registerSigningBytes } from '../src/signed.js';
 
@@ -45,6 +47,45 @@ test('relay vectors: rosters canonicalise, sign and validate as the relay says',
     assert.ok(ed25519Verify(fromB64u(c.signature), input, fromB64u(c.roster.primary.ed25519)), `${c.description}: signature`);
   }
   assert.ok(valid > 0 && valid < v.rosters.length, 'both valid and invalid cases');
+});
+
+test('relay vectors: rosters given as text are valid exactly as the relay says', () => {
+  assert.ok(v.rosterTexts.length > 0);
+  for (const c of v.rosterTexts as { description: string; text: string; valid: boolean }[]) {
+    let problem: string | null;
+    try {
+      problem = rosterProblem(parseJson(c.text));
+    } catch (e) {
+      problem = (e as Error).message;
+    }
+    assert.equal(problem === null, c.valid, `${c.description}: client says ${problem ?? 'valid'}`);
+    // A number out of range is invalid to any parser that keeps finite numbers only; the rest
+    // are traps for a lenient one.
+    if (c.valid || /1e309/.test(c.text)) continue;
+    // Each invalid text is a trap: a lenient parser (last name wins, 12.0 is 12, -0 is 0, a
+    // lone surrogate becomes U+FFFD as Go's encoding/json makes it, any nesting) reads a valid
+    // roster from it.
+    const lenient = JSON.parse(c.text.replace(/\\u[dD][89a-fA-F][0-9a-fA-F]{2}/g, '\\ufffd').replace(/:-0([,}])/g, ':0$1'));
+    assert.equal(rosterProblem(lenient), null, `${c.description}: a lenient parser finds it valid`);
+  }
+});
+
+test("relay vectors: Ed25519 verification accepts exactly what section 1's rule does", () => {
+  assert.ok(v.ed25519.length > 0);
+  let differs = 0;
+  for (const c of v.ed25519 as { description: string; pub: string; msg: string; sig: string; valid: boolean }[]) {
+    const [sig, msg, pub] = [fromB64u(c.sig), fromB64u(c.msg), fromB64u(c.pub)];
+    assert.equal(ed25519Verify(sig, msg, pub), c.valid, c.description);
+    // noble's own verify (cofactored, ZIP 215 off) answers some otherwise: the rule is ours.
+    let lax: boolean;
+    try {
+      lax = ed25519.verify(sig, msg, pub, { zip215: false });
+    } catch {
+      lax = false;
+    }
+    if (lax !== c.valid) differs++;
+  }
+  assert.ok(differs > 0, 'the vectors test more than a stock verifier');
 });
 
 test('relay vectors: registration signatures and origins', () => {

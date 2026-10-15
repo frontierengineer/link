@@ -5,6 +5,7 @@ import (
 	"container/list"
 	"crypto/ed25519"
 	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"strconv"
 	"sync"
 	"time"
@@ -30,12 +31,20 @@ const (
 
 const maxClockSkewMs = 300000
 
-// Budgets per network (sections 4.3 and 9).
+// Budgets (sections 4.3 and 9).
 const (
-	ctlRate    = 4096      // bytes per second of control read ahead of shaping
-	ctlBurst   = 128 << 10 // and its burst
-	usageEvery = 10 * time.Second
-	usageBurst = 3
+	// Control read ahead of shaping, per member (kept by node id, across its connections): one
+	// member using up its budget delays no other member's handshakes or control.
+	ctlRate  = 4096      // bytes per second
+	ctlBurst = 128 << 10 // and its burst
+	// And per network, a ceiling as a backstop: 64 members' worth, but never more than half the
+	// rate in force (the trickle rate once the quota is spent), so that control frames are no
+	// way around the network's rate or quota. Its burst is four members' bursts (so no one
+	// member's burst empties it), or a second of the ceiling if more, up to 64 members' bursts.
+	netCtlRate  = 64 * ctlRate
+	netCtlBurst = 64 * ctlBurst
+	usageEvery  = 10 * time.Second
+	usageBurst  = 3
 )
 
 // network is what the relay holds for one network: its newest valid roster, its connected
@@ -50,18 +59,47 @@ type network struct {
 	idleAt     *list.Element // in Server.idle while nobody is connected
 	idleOwner  *idleOwner
 	idleSize   int64
-	hour       hourWindow // bytes charged over the last hour
-	rateTAT    int64      // the rate bucket, as a theoretical arrival time
-	ctlTAT     int64      // the control budget
-	usageTAT   int64      // the usage-ask budget
+	hour       hourWindow        // bytes charged over the last hour
+	rateTAT    int64             // the rate bucket, as a theoretical arrival time
+	ctlTAT     int64             // the ceiling on control read ahead of shaping, all members together
+	memberCtl  map[link.ID]int64 // each member's control budget, by node id, across its connections
+	usageTAT   int64             // the usage-ask budget
 }
 
-// allowControl spends size bytes of the network's control budget, if it has them.
-func (n *network) allowControl(s *Server, size int) bool {
-	now := s.mono()
+// allowControl spends size bytes of member id's control budget and of the network's ceiling,
+// if both have them (section 9).
+func (s *Server) allowControl(n *network, id link.ID, now int64, size int) bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	return allow(&n.ctlTAT, now, int64(size)*int64(time.Second)/ctlRate, ctlBurst*int64(time.Second)/ctlRate)
+	own := n.memberCtl[id]
+	t := max(own, now) + int64(size)*int64(time.Second)/ctlRate
+	if t-now > ctlBurst*int64(time.Second)/ctlRate {
+		return false
+	}
+	rate, burst := s.controlCeilingLocked(n, now)
+	if !allow(&n.ctlTAT, now, int64(size)*int64(time.Second)/rate, burst*int64(time.Second)/rate) {
+		return false
+	}
+	if n.memberCtl == nil {
+		n.memberCtl = map[link.ID]int64{}
+	}
+	n.memberCtl[id] = t
+	return true
+}
+
+// controlCeilingLocked is the network's ceiling on control read ahead of shaping: 64 members'
+// budgets, but at most half the rate in force; its burst at least four members'.
+func (s *Server) controlCeilingLocked(n *network, now int64) (rate, burst int64) {
+	inForce := s.cfg.RateBps
+	if _, slowed := s.quotaLocked(n, now); slowed {
+		inForce = s.cfg.TrickleBps
+	}
+	rate, burst = int64(netCtlRate), int64(netCtlBurst)
+	if inForce > 0 {
+		rate = max(1, min(rate, inForce/2))
+		burst = min(burst, max(4*ctlBurst, rate))
+	}
+	return rate, burst
 }
 
 type registeredMsg struct {
@@ -71,6 +109,13 @@ type registeredMsg struct {
 	Roster        json.RawMessage `json:"roster,omitempty"` // the relay's, when newer than the node's
 }
 
+// decodeControl reads a control message into v, matching member names exactly: encoding/json
+// would also take `"TYPE"` or `"Node"` for `type` or `node`, and the protocol's names are
+// case-sensitive (section 1). Duplicate names are refused here too.
+func decodeControl(data []byte, v any) error {
+	return jsonv2.Unmarshal(data, v)
+}
+
 // handleText handles a control message of wire bytes.
 func (c *conn) handleText(data []byte, wire int) bool {
 	c.charge(wire)
@@ -78,7 +123,9 @@ func (c *conn) handleText(data []byte, wire int) bool {
 		Type string `json:"type"`
 		ID   any    `json:"id"`
 	}
-	if json.Unmarshal(data, &env) != nil || env.Type == "" {
+	// Every JSON document of the protocol is I-JSON (section 1): a repeated name or an escaped
+	// lone surrogate, which encoding/json would resolve quietly, makes the message malformed.
+	if _, err := link.ParseJSON(data); err != nil || decodeControl(data, &env) != nil || env.Type == "" {
 		c.closeWith(closeBadRequest, "malformed message", false)
 		return false
 	}
@@ -145,7 +192,7 @@ func (c *conn) register(data []byte) bool {
 		Sig     *string         `json:"sig"`
 		Roster  json.RawMessage `json:"roster"`
 	}
-	if json.Unmarshal(data, &m) != nil || m.Network == nil || m.Node == nil || m.Ed25519 == nil ||
+	if decodeControl(data, &m) != nil || m.Network == nil || m.Node == nil || m.Ed25519 == nil ||
 		m.Sig == nil || len(m.Roster) == 0 || m.Roster[0] != '{' {
 		return fail(closeBadRequest, "malformed register")
 	}
@@ -163,7 +210,7 @@ func (c *conn) register(data []byte) bool {
 	}
 	// 3. The signature, over our origin and our challenge.
 	msg := link.RegisterMessage(*m.Network, *m.Node, c.challenge[:], ts, c.origin)
-	if !ed25519.Verify(pub, msg, sig) {
+	if !link.VerifyEd25519(pub, msg, sig) {
 		return fail(closeAuth, "bad signature")
 	}
 	// 4. The time.
@@ -291,7 +338,7 @@ func (c *conn) pushRoster(data []byte) {
 	var m struct {
 		Roster json.RawMessage `json:"roster"`
 	}
-	if json.Unmarshal(data, &m) != nil || len(m.Roster) == 0 {
+	if decodeControl(data, &m) != nil || len(m.Roster) == 0 {
 		c.sendError("bad_request", "roster missing", "")
 		return
 	}
@@ -441,7 +488,7 @@ func (c *conn) usageRequest(data []byte) {
 	var m struct {
 		ID *string `json:"id"`
 	}
-	if json.Unmarshal(data, &m) != nil || m.ID == nil {
+	if decodeControl(data, &m) != nil || m.ID == nil {
 		c.sendError("bad_request", "usage needs a string id", "")
 		return
 	}

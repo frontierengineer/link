@@ -3,10 +3,12 @@ package relay
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"net/http"
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -655,5 +657,249 @@ func TestCompactRecordKeepsRevocation(t *testing.T) {
 	h.register(p, p, r2)
 	if got := h.s.held(p.ID); got != "full" {
 		t.Fatalf("held %s after the primary came back", got)
+	}
+}
+
+// Control messages are I-JSON (section 1): a repeated name or an escaped lone surrogate, which
+// encoding/json would resolve quietly (last wins, U+FFFD), makes a message malformed, before
+// registration and after it.
+func TestControlMessagesMustBeIJSON(t *testing.T) {
+	h := start(t, nil)
+	p, w := keys(t, 1), keys(t, 2)
+	r := roster(t, 3, p, w)
+	raw := func(c *client, text string) {
+		t.Helper()
+		if err := c.ws.WriteMessage(websocket.TextMessage, []byte(text)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marshal := func(m map[string]any) string {
+		b, err := json.Marshal(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+
+	// A register whose `node` is named twice: the first (a stranger's id) is what a last-wins
+	// parser would never see.
+	c := h.dial()
+	raw(c, `{"node":"`+keys(t, 9).ID.String()+`",`+marshal(h.registerMsg(c, w, p.ID.String(), r))[1:])
+	c.expectClose(closeBadRequest)
+
+	// A register carrying an escaped lone surrogate in a member it does not even check.
+	c = h.dial()
+	raw(c, `{"x":"\ud800",`+marshal(h.registerMsg(c, w, p.ID.String(), r))[1:])
+	c.expectClose(closeBadRequest)
+
+	// A register carrying a number out of range, which encoding/json reads without complaint.
+	c = h.dial()
+	raw(c, `{"x":1e309,`+marshal(h.registerMsg(c, w, p.ID.String(), r))[1:])
+	c.expectClose(closeBadRequest)
+
+	// The same register, well formed, is taken.
+	c = h.dial()
+	raw(c, marshal(h.registerMsg(c, w, p.ID.String(), r)))
+	if m := c.json(); m["type"] != "registered" {
+		t.Fatalf("registered: %v", m)
+	}
+
+	// After registration: a usage request whose id is named twice.
+	pc := h.register(p, p, r)
+	raw(pc, `{"type":"usage","id":"a","id":"b"}`)
+	pc.expectClose(closeBadRequest)
+}
+
+// Member names match exactly (section 1): encoding/json would take "TYPE" for "type" and
+// "Node" for "node", so a relay decoding with it reads messages no client wrote that way.
+func TestControlMessageNamesAreCaseSensitive(t *testing.T) {
+	h := start(t, nil)
+	p, w := keys(t, 1), keys(t, 2)
+	r := roster(t, 3, p, w)
+	raw := func(c *client, text string) {
+		t.Helper()
+		if err := c.ws.WriteMessage(websocket.TextMessage, []byte(text)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, rename := range [][2]string{{`"type":`, `"TYPE":`}, {`"node":`, `"Node":`}, {`"roster":`, `"Roster":`}} {
+		c := h.dial()
+		b, err := json.Marshal(h.registerMsg(c, w, p.ID.String(), r))
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := strings.Replace(string(b), rename[0], rename[1], 1)
+		if text == string(b) {
+			t.Fatalf("no %s in %s", rename[0], b)
+		}
+		raw(c, text)
+		c.expectClose(closeBadRequest)
+	}
+	// Registered, a usage request whose id is named "ID" has no id.
+	pc := h.register(p, p, r)
+	raw(pc, `{"type":"usage","ID":"a"}`)
+	if m := pc.json(); m["type"] != "error" || m["code"] != "bad_request" {
+		t.Fatalf("usage with ID: %v", m)
+	}
+}
+
+// The control budget is each member's own (section 9): while the network is at its rate, one
+// member spending all of its control budget leaves another member's handshakes and control
+// prompt. With one budget for the network, the second member's 30 kB control frames waited
+// behind the network's debt.
+func TestControlBudgetIsPerMember(t *testing.T) {
+	h := start(t, func(c *Config) { c.RateBps = 100_000 })
+	p, z, w, x := keys(t, 1), keys(t, 2), keys(t, 3), keys(t, 4)
+	r := roster(t, 1, p, z, w, x)
+	pc, zc, wc, xc := h.register(p, p, r), h.register(z, p, r), h.register(w, p, r), h.register(x, p, r)
+	pc.ws.SetReadDeadline(time.Time{})
+	pFrames := readFrames(pc)
+	stop := make(chan struct{})
+	defer close(stop)
+	flood := func(c *client, typ byte, size int) {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if c.ws.WriteMessage(websocket.BinaryMessage, frame(typ, p.ID, make([]byte, size))) != nil {
+				return
+			}
+		}
+	}
+	go flood(zc, typeData, 64<<10-18) // keeps the network at its rate
+	time.Sleep(500 * time.Millisecond)
+	go flood(wc, typeControl, 30_000) // spends its control budget, and keeps it spent
+	time.Sleep(time.Second)
+	// The honest member is in the network's debt like anyone (a little data first); then its
+	// handshakes and 30 kB control frames (a roster, say) go ahead within its own budget.
+	xc.sendBinary(frame(typeData, p.ID, make([]byte, 40)))
+	sends := []struct {
+		typ  byte
+		size int
+	}{{typeInit, 100}, {typeControl, 30_000}, {typeInit, 100}, {typeControl, 30_000}, {typeControl, 30_000}}
+	for i, m := range sends {
+		body := make([]byte, m.size)
+		body[3] = byte(i + 1)
+		xc.sendBinary(frame(m.typ, p.ID, body))
+		for {
+			f, took := awaitFrom(t, pFrames, x.ID, 10*time.Second)
+			if f[1] == typeData && len(f) == 18+40 {
+				continue
+			}
+			if took > 300*time.Millisecond {
+				t.Fatalf("frame %d (type %d, %d bytes) arrived after %v", i, m.typ, m.size, took)
+			}
+			break
+		}
+	}
+}
+
+// A network slowed to its trickle rate cannot get past it through control frames (section 9).
+// Members of a modified client pace control frames to stay just within their own budgets, so
+// none is ever refused and held back; without a network ceiling tied to the rate in force,
+// together they moved 128 kB a second through a network slowed to 16 kB.
+func TestSlowedNetworkControlStaysUnderTrickle(t *testing.T) {
+	const trickle = 16384
+	h := start(t, func(c *Config) {
+		c.RateBps = 1 << 20
+		c.QuotaBytesHour = 10_000
+		c.TrickleBps = trickle
+	})
+	p := keys(t, 1)
+	others := make([]*link.Keys, 32)
+	for i := range others {
+		others[i] = keys(t, byte(10+i))
+	}
+	r := roster(t, 1, p, others...)
+	pc := h.register(p, p, r)
+	var got atomic.Int64
+	pc.ws.SetReadDeadline(time.Time{}) // the test runs past registration's read deadline
+	frames := readFrames(pc)
+	go func() {
+		for f := range frames {
+			if len(f) > 18 && f[1] == typeData {
+				got.Add(int64(len(f)))
+			}
+		}
+	}()
+	stop := make(chan struct{})
+	defer close(stop)
+	for _, k := range others {
+		c := h.register(k, p, r)
+		go func() {
+			tick := time.NewTicker(time.Second)
+			defer tick.Stop()
+			for {
+				// 4000 bytes on the wire a second: within the member's own 4096.
+				if c.ws.WriteMessage(websocket.BinaryMessage, frame(typeControl, p.ID, make([]byte, 4000-18-6))) != nil {
+					return
+				}
+				select {
+				case <-stop:
+					return
+				case <-tick.C:
+				}
+			}
+		}()
+	}
+	// Past the network ceiling's burst, then a steady window.
+	time.Sleep(6 * time.Second)
+	from := got.Load()
+	const window = 4 * time.Second
+	time.Sleep(window)
+	rate := float64(got.Load()-from) / window.Seconds()
+	if rate > 1.25*trickle {
+		t.Fatalf("%.0f bytes a second through a network slowed to %d", rate, trickle)
+	}
+}
+
+// A member's control budget is its own, kept across its connections: reconnecting does not
+// buy a fresh burst (section 9).
+func TestControlBudgetCarriesAcrossConnections(t *testing.T) {
+	h := start(t, func(c *Config) { c.RateBps = 100_000 })
+	p, z, w := keys(t, 1), keys(t, 2), keys(t, 3)
+	r := roster(t, 1, p, z, w)
+	pc, zc := h.register(p, p, r), h.register(z, p, r)
+	pc.ws.SetReadDeadline(time.Time{})
+	pFrames := readFrames(pc)
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if zc.ws.WriteMessage(websocket.BinaryMessage, frame(typeData, p.ID, make([]byte, 64<<10-18))) != nil {
+				return
+			}
+		}
+	}()
+	time.Sleep(500 * time.Millisecond) // the network is at its rate
+	send := func(c *client, size int) time.Duration {
+		c.sendBinary(frame(typeControl, p.ID, make([]byte, size)))
+		for {
+			f, took := awaitFrom(t, pFrames, w.ID, 10*time.Second)
+			if len(f) == 18+size {
+				return took
+			}
+		}
+	}
+	// The first connection: a little data puts it in the network's debt, then its burst goes.
+	wc := h.register(w, p, r)
+	wc.sendBinary(frame(typeData, p.ID, make([]byte, 40)))
+	for i := range 4 {
+		if took := send(wc, 30_000); took > 300*time.Millisecond {
+			t.Fatalf("control %d of the first burst after %v", i, took)
+		}
+	}
+	// A new connection for the same member gets no new burst: its control waits like data.
+	wc2 := h.register(w, p, r)
+	wc2.sendBinary(frame(typeData, p.ID, make([]byte, 40)))
+	if took := send(wc2, 30_000); took < 500*time.Millisecond {
+		t.Fatalf("a reconnect bought a fresh burst: control after %v", took)
 	}
 }

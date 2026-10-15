@@ -5,6 +5,8 @@
 // tells the sender how much it has handed the socket that is not yet on the
 // network, so data waits in the client's own queue rather than in the socket.
 
+import { parseJson } from './json.js';
+
 /** The subset of the WHATWG WebSocket this package uses. */
 export interface WebSocketLike {
   binaryType: string;
@@ -34,6 +36,13 @@ export const MAX_CONTROL_BYTES = 131072;
 
 /** Data is handed to a socket only while at most this much is waiting in it. */
 export const SOCKET_LOW_WATER = 65536;
+
+/** The most a connection's socket may hold not yet sent (section 11). Control is handed over at
+ * once, so this bounds it: the largest honest burst is a primary publishing a full roster
+ * (65000 bytes) to every member (about 400), some 26 MB, so the bound leaves room for that and
+ * more besides. A send past it drops the connection, which then reconnects, rather than grow
+ * without limit behind a relay that stopped reading. */
+export const MAX_SOCKET_BYTES = 64 * 1024 * 1024;
 
 /** How often a classic WebSocket's bufferedAmount is looked at while data waits on it. */
 const DRAIN_POLL_MS = 10;
@@ -177,6 +186,8 @@ export class Channel {
   private closed = false;
   private drainWaiters: (() => void)[] = [];
   private drainTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Bytes handed to the socket since it opened. */
+  queued = 0;
 
   constructor(url: string, WS: WebSocketConstructor, private readonly h: ChannelHandlers) {
     this.ws = new WS(url);
@@ -222,13 +233,16 @@ export class Channel {
     const text = JSON.stringify(msg);
     const size = utf8Length(text);
     if (size > MAX_CONTROL_BYTES) throw new Error('control message exceeds 128 KiB');
+    if (!this.room(size)) return 0;
     this.ws.send(text);
+    this.queued += size;
     return size;
   }
 
   sendBinary(bytes: Uint8Array): boolean {
-    if (!this.isOpen) return false;
+    if (!this.isOpen || !this.room(bytes.length)) return false;
     this.ws.send(bytes);
+    this.queued += bytes.length;
     return true;
   }
 
@@ -241,6 +255,13 @@ export class Channel {
     }
     // Report the close now; the socket's own close event is ignored afterwards.
     this.finish(code, reason);
+  }
+
+  /** Whether `size` more bytes fit under MAX_SOCKET_BYTES; if not, the connection is dropped. */
+  private room(size: number): boolean {
+    if (this.ws.bufferedAmount + size <= MAX_SOCKET_BYTES) return true;
+    this.close(1000, 'the socket held more unsent than this node keeps');
+    return false;
   }
 
   private poll(): void {
@@ -261,7 +282,8 @@ export class Channel {
     if (typeof data === 'string') {
       let msg: unknown;
       try {
-        msg = JSON.parse(data);
+        // Strict (section 1): a repeated name or a lone surrogate makes it malformed.
+        msg = parseJson(data);
       } catch {
         return;
       }

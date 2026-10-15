@@ -63,12 +63,15 @@ The relay is meant to be thin: bandwidth should be the only thing that limits it
   Payload buffers grow as bytes arrive: a frame's declared length is never allocated up front.
 - **Per network:** the roster, the connected members, and three counters: twelve five-minute
   slots of charged bytes (the hourly quota), and three theoretical arrival times (the rate
-  bucket, the control budget, the usage-ask budget). No per-member figures; members count their
-  own traffic.
+  bucket, the ceiling on control read ahead of shaping, the usage-ask budget), and each member's
+  control budget, by node id across its connections. The ceiling is at most half the rate in
+  force (the trickle rate once the quota is spent), so control is no way around either. No
+  per-member traffic figures; members count their own traffic.
 - **Shaping** is deferred to the body of the next data frame: the relay reads a frame, charges
   it, and holds the sender's next data body back until the network's bucket allows. Control
   (text, pings, handshakes, `refused`, `reset`, `control`) in one unfragmented frame goes ahead
-  within the network's control budget. Frames are never dropped.
+  within the sender's own control budget (and the network's backstop ceiling), so one member
+  cannot hold back another's handshakes. Frames are never dropped.
 - **Back-pressure** is TCP's: a sender whose frame a recipient's socket did not take is not read
   again until that frame is written (`LINK_QUEUE_BYTES`, default 0). A connection's own answers
   pause it beyond 64 KiB. Pongs are coalesced to the latest ping.

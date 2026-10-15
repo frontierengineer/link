@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"slices"
+	"strings"
 
 	"github.com/frontierengineer/link/relay/internal/link"
 )
@@ -29,6 +30,22 @@ type rosterVector struct {
 	SigningInput string          `json:"signingInput,omitempty"`
 	Signature    string          `json:"signature,omitempty"`
 	Valid        bool            `json:"valid"`
+}
+
+// ed25519Vector is a signature check and its verdict under section 1's rule.
+type ed25519Vector struct {
+	Description string `json:"description"`
+	Pub         string `json:"pub"`
+	Msg         string `json:"msg"`
+	Sig         string `json:"sig"`
+	Valid       bool   `json:"valid"`
+}
+
+// rosterTextVector is a roster as the bytes a parser reads, for rules about the text itself.
+type rosterTextVector struct {
+	Description string `json:"description"`
+	Text        string `json:"text"`
+	Valid       bool   `json:"valid"`
 }
 
 type registrationVector struct {
@@ -53,6 +70,8 @@ type file struct {
 	About         []string             `json:"about"`
 	Keys          []keyVector          `json:"keys"`
 	Rosters       []rosterVector       `json:"rosters"`
+	RosterTexts   []rosterTextVector   `json:"rosterTexts"`
+	Ed25519       []ed25519Vector      `json:"ed25519"`
 	Registrations []registrationVector `json:"registrations"`
 	Frames        []frameVector        `json:"frames"`
 }
@@ -127,6 +146,54 @@ func signedVector(desc string, r map[string]any, signer ed25519.PrivateKey) rost
 	}
 }
 
+// rosterTexts are rosters given as text: each invalid one is a signed roster written so that a
+// lenient parser (last name wins, a lone surrogate becomes U+FFFD, 12.0 is 12) reads the
+// signed roster back.
+func rosterTexts(a *link.Keys, all []rosterMember) []rosterTextVector {
+	signedWith := func(edit func(map[string]any)) string {
+		r := rosterObject(a, 12, all...)
+		edit(r)
+		return string(signedVector("", r, a.Ed25519).Roster)
+	}
+	signedText := func(relay string) string { return signedWith(func(r map[string]any) { r["relay"] = relay }) }
+	// An extra member holding n arrays, one inside the next: the roster object is one more.
+	nested := func(n int) any {
+		var v any = []any{}
+		for i := 1; i < n; i++ {
+			v = []any{v}
+		}
+		return v
+	}
+	zeroIssued := signedWith(func(r map[string]any) { r["issuedAt"] = int64(0) })
+	base := signedText("wss://eu.frontierengineer.link/v1")
+	once := func(s, old, new string) string {
+		if !strings.Contains(s, old) {
+			panic("rosterTexts: no " + old)
+		}
+		return strings.Replace(s, old, new, 1)
+	}
+	replacement := signedText("wss://eu.frontierengineer.link/v1?\uFFFD")
+	pair := signedText("wss://eu.frontierengineer.link/v1?\U0001F600")
+	return []rosterTextVector{
+		{"the JCS text of a valid roster", base, true},
+		{"the same roster with whitespace between tokens", " \n" + strings.ReplaceAll(strings.ReplaceAll(base, ",\"", ",\n  \""), "\":", "\" : ") + "\n", true},
+		{"version named twice, the signed value last", `{"version":999,` + base[1:], false},
+		{"a member's kind named twice, the signed value last", once(base, `"kind":`, `"kind":"worker","kind":`), false},
+		{"version written 12.0", once(base, `"version":12`, `"version":12.0`), false},
+		{"version written 1.2e1", once(base, `"version":12`, `"version":1.2e1`), false},
+		{"issuedAt written 1.79e12", once(base, `"issuedAt":1790000000000`, `"issuedAt":1.79e12`), false},
+		{"U+FFFD in relay, escaped", once(replacement, "\uFFFD", `\ufffd`), true},
+		{"an escaped lone high surrogate where the primary signed U+FFFD", once(replacement, "\uFFFD", `\ud800`), false},
+		{"an escaped lone low surrogate where the primary signed U+FFFD", once(replacement, "\uFFFD", `\udfff`), false},
+		{"U+1F600 in relay, escaped as a surrogate pair", once(pair, "\U0001F600", `\ud83d\ude00`), true},
+		{"issuedAt 0", zeroIssued, true},
+		{"issuedAt written -0", once(zeroIssued, `"issuedAt":0`, `"issuedAt":-0`), false},
+		{"nested 32 deep (an extra member of 31 arrays)", signedWith(func(r map[string]any) { r["x"] = nested(31) }), true},
+		{"nested 33 deep (an extra member of 32 arrays)", signedWith(func(r map[string]any) { r["x"] = nested(32) }), false},
+		{"an extra member 1e309, a number out of range", `{"x":1e309,` + base[1:], false},
+	}
+}
+
 // Generate returns the file's bytes.
 func Generate() ([]byte, error) {
 	var ks []*link.Keys
@@ -135,6 +202,8 @@ func Generate() ([]byte, error) {
 		"Binary values are b64u (base64url, no padding) unless named hex.",
 		"keys: seed -> HKDF-derived Ed25519 seed and key, clamped X25519 private key and its public key, node id (b32 of the first 16 bytes of SHA-256(ed25519)) and its raw bytes in hex.",
 		"rosters: roster is the full signed roster in JCS form. For signed cases jcs is JCS(roster without signature), signingInput is UTF-8(\"frontier-link/1/roster\") || jcs, signature is the Ed25519 signature. valid is whether a relay or member must find it valid (section 3).",
+		"rosterTexts: text is a roster exactly as a parser reads it (UTF-8, escapes as written); valid is whether a relay or member must find it valid. Every JSON document is I-JSON (section 1): a repeated name, an escaped lone surrogate, a number out of range (1e309) or more than 32 arrays and objects open at once makes it invalid, as does a version or issuedAt not written as a non-negative integer literal, digits only (section 3), whatever a lenient parser would make of it.",
+		"ed25519: pub, msg and sig (b64u) and whether section 1's verification accepts them: A and R canonical (y < p, no x = 0 with the sign bit set), neither of small order, S < L, and the cofactorless equation [S]B = R + [k]A. Cases where a lax or cofactored verifier would answer otherwise say so.",
 		"registrations: message is lenStr(\"frontier-link/1/register\") || lenStr(network) || lenStr(node) || challenge || u64be(ts) || lenStr(origin); sig is the node's Ed25519 signature over it.",
 		"frames: a routed frame (hex) as a member sends it and as the relay delivers it, with the peer field rewritten to the sender's raw id (and control, type 8, delivered as data, type 3).",
 	}}
@@ -203,6 +272,9 @@ func Generate() ([]byte, error) {
 		r["version"] = int64(14)
 		f.Rosters = append(f.Rosters, rosterVector{Description: v.Description, Roster: canonical(r)})
 	}
+
+	f.RosterTexts = rosterTexts(a, all)
+	f.Ed25519 = ed25519Vectors(a, b)
 
 	challenge := make([]byte, 32)
 	for i := range challenge {

@@ -861,18 +861,20 @@
       "index": 12648430
     },
     "message1": {
-      "payload": "000000000000000c",
-      "noise": "392d174a38b3b1beafaf1fe824870841c5fa531bc6eafdb6402c124664488c1ce7be90c6319b7ce8fe2f5ad6b2720d7fd09030d3f7c8aa50158288d8a02df49d6459f21d9e8f0c9ec6794bbcf5110519094a20bb2b0bbe01c3cd0e6e864fb9972ec2e29107033c76",
-      "frameSent": "010107a19895b54c726500151005766dda2c0badcafe392d174a38b3b1beafaf1fe824870841c5fa531bc6eafdb6402c124664488c1ce7be90c6319b7ce8fe2f5ad6b2720d7fd09030d3f7c8aa50158288d8a02df49d6459f21d9e8f0c9ec6794bbcf5110519094a20bb2b0bbe01c3cd0e6e864fb9972ec2e29107033c76",
-      "frameDelivered": "0101dbc38fcadfccbe069645dfe24a247b820badcafe392d174a38b3b1beafaf1fe824870841c5fa531bc6eafdb6402c124664488c1ce7be90c6319b7ce8fe2f5ad6b2720d7fd09030d3f7c8aa50158288d8a02df49d6459f21d9e8f0c9ec6794bbcf5110519094a20bb2b0bbe01c3cd0e6e864fb9972ec2e29107033c76"
+      "payload": "000000000000000c000001a0c4506c00",
+      "rosterVersion": 12,
+      "stamp": 1790000000000,
+      "noise": "392d174a38b3b1beafaf1fe824870841c5fa531bc6eafdb6402c124664488c1ce7be90c6319b7ce8fe2f5ad6b2720d7fd09030d3f7c8aa50158288d8a02df49d6459f21d9e8f0c9ec6794bbcf5110519094a20bb2b0bbe019e8689e3121033ca7970e9e6163609b7d2293acadb1cc991",
+      "frameSent": "010107a19895b54c726500151005766dda2c0badcafe392d174a38b3b1beafaf1fe824870841c5fa531bc6eafdb6402c124664488c1ce7be90c6319b7ce8fe2f5ad6b2720d7fd09030d3f7c8aa50158288d8a02df49d6459f21d9e8f0c9ec6794bbcf5110519094a20bb2b0bbe019e8689e3121033ca7970e9e6163609b7d2293acadb1cc991",
+      "frameDelivered": "0101dbc38fcadfccbe069645dfe24a247b820badcafe392d174a38b3b1beafaf1fe824870841c5fa531bc6eafdb6402c124664488c1ce7be90c6319b7ce8fe2f5ad6b2720d7fd09030d3f7c8aa50158288d8a02df49d6459f21d9e8f0c9ec6794bbcf5110519094a20bb2b0bbe019e8689e3121033ca7970e9e6163609b7d2293acadb1cc991"
     },
     "message2": {
       "payload": "000000000000000d",
-      "noise": "675dd574ed7789310b3d2e7681f3790b466c773b1521fecf36577958371ea52f4b9a6c905816c151b200db75945521abd8c11f22a5b79656",
-      "frameSent": "0102dbc38fcadfccbe069645dfe24a247b8200c0ffee0badcafe675dd574ed7789310b3d2e7681f3790b466c773b1521fecf36577958371ea52f4b9a6c905816c151b200db75945521abd8c11f22a5b79656",
-      "frameDelivered": "010207a19895b54c726500151005766dda2c00c0ffee0badcafe675dd574ed7789310b3d2e7681f3790b466c773b1521fecf36577958371ea52f4b9a6c905816c151b200db75945521abd8c11f22a5b79656"
+      "noise": "675dd574ed7789310b3d2e7681f3790b466c773b1521fecf36577958371ea52f4b9a6c905816c151d566ac611cc97d16e4252a5d473b868a",
+      "frameSent": "0102dbc38fcadfccbe069645dfe24a247b8200c0ffee0badcafe675dd574ed7789310b3d2e7681f3790b466c773b1521fecf36577958371ea52f4b9a6c905816c151d566ac611cc97d16e4252a5d473b868a",
+      "frameDelivered": "010207a19895b54c726500151005766dda2c00c0ffee0badcafe675dd574ed7789310b3d2e7681f3790b466c773b1521fecf36577958371ea52f4b9a6c905816c151d566ac611cc97d16e4252a5d473b868a"
     },
-    "handshakeHash": "2a34ac176bc8446d1e3a0367a4934e2f42a9a4d09f6299c55e23e52f01f37838",
+    "handshakeHash": "3ecadb4962d719b049a18ba6b8d189589cad64333d77b76dbd375ffea4defe52",
     "transport": [
       {
         "direction": "initiator->responder",
@@ -887,6 +889,172 @@
         "plaintext": "020000000d",
         "ciphertext": "fb295424730204171bac2fc3164c9c1c3255b821ff",
         "frameSent": "0103dbc38fcadfccbe069645dfe24a247b820badcafefb295424730204171bac2fc3164c9c1c3255b821ff"
+      }
+    ]
+  },
+  "handshakeStamps": {
+    "encoding": [
+      {
+        "wallNowMs": 1790000000000,
+        "lastStamp": 0,
+        "stamp": 1790000000000
+      },
+      {
+        "wallNowMs": 1790000000000,
+        "lastStamp": 1790000000000,
+        "stamp": 1790000000001
+      },
+      {
+        "wallNowMs": 1789999999000,
+        "lastStamp": 1790000000005,
+        "stamp": 1790000000006
+      },
+      {
+        "wallNowMs": 1790000001000,
+        "lastStamp": 1790000000005,
+        "stamp": 1790000001000
+      }
+    ],
+    "initiator": "3pby7sw7zs7anfsf37reujd3qi",
+    "responder": "a6qzrfnvjrzgkaavcacxm3o2fq",
+    "windowMs": 600000,
+    "responderStartedMs": 1790000000000,
+    "steps": [
+      {
+        "description": "stamp T - W, recorded W before the responder started: refused",
+        "stamp": 1789999400000,
+        "ephemeralPrivate": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+        "payload": "000000000000000c000001a0c4474440",
+        "noise": "dc2cca31e8e43bbd91dff7e475cca3347eb478107d5bd765aba4ae4a30c35d4465a2f6749165d1e115fed783e5f959bb499b753757f521cc0ca3cd4a9ffbfaa293d3e735f3f41c4f31cd05bc58ebbfa0373fdb5c09d86f70df0a34d2697df4b4fc221c6adfb248f56be3f187f701cbdc",
+        "accepted": false,
+        "responderWallNowMs": 1790000010000
+      },
+      {
+        "description": "a member 9 minutes slow, right after the restart: accepted",
+        "stamp": 1789999460000,
+        "ephemeralPrivate": "d0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeef",
+        "payload": "000000000000000c000001a0c4482ea0",
+        "noise": "6b3ee67463583cbe3dc08fe9d0765c2666ff5210dd527c9d8705e44927c80d55ab513cd20af26e99e037a5b350c83b6c304cec7e92ff083ee646e8a6bf94f090f498481cb57dbb1715f1957f2282dd287f6f382fd9d4eec19e59f85ea3f9359609322bd4588b2411f6ff2e2ddf0986c8",
+        "accepted": true,
+        "stored": 1789999460000,
+        "responderWallNowMs": 1790000020000
+      },
+      {
+        "description": "stamp T: accepted",
+        "stamp": 1790000000000,
+        "ephemeralPrivate": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+        "payload": "000000000000000c000001a0c4506c00",
+        "noise": "23b7bb8c91ae008711fb12846780bcdf1e065f821bdfec49f57e7c7dcd4c4823d4435e7b3f4b27f9696944b4166a85ab70519ee0a431ef1f9dc12aa342b50e43877a3d09edc57d4e554c0911f82fc791663960998d16a1244ed8c2bd7f47ca80914cfaedc2581dcf07e80832be48a94d",
+        "accepted": true,
+        "stored": 1790000000000,
+        "responderWallNowMs": 1790000030000
+      },
+      {
+        "description": "the same bytes again, a replay: refused",
+        "stamp": 1790000000000,
+        "ephemeralPrivate": "707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f",
+        "payload": "000000000000000c000001a0c4506c00",
+        "noise": "23b7bb8c91ae008711fb12846780bcdf1e065f821bdfec49f57e7c7dcd4c4823d4435e7b3f4b27f9696944b4166a85ab70519ee0a431ef1f9dc12aa342b50e43877a3d09edc57d4e554c0911f82fc791663960998d16a1244ed8c2bd7f47ca80914cfaedc2581dcf07e80832be48a94d",
+        "accepted": false,
+        "stored": 1790000000000,
+        "responderWallNowMs": 1790000040000
+      },
+      {
+        "description": "an older stamp, T - 1: refused",
+        "stamp": 1789999999999,
+        "ephemeralPrivate": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+        "payload": "000000000000000c000001a0c4506bff",
+        "noise": "493e82fc74464a59268817623d2053c5eb8e2cc4a988b4fee179ec6b010d531d41faa89e1c1394c54c535f1e42d1e82ca60aa1856451f3016ce0d246a4e4355458e045fab07fa2746bfa3277e917ab2826c165f3e7bfa5dba78697da2da8d0190f0a93499c1fb63458bd769f3d523076",
+        "accepted": false,
+        "responderWallNowMs": 1790000050000
+      },
+      {
+        "description": "stamp T again from a new ephemeral: refused",
+        "stamp": 1790000000000,
+        "ephemeralPrivate": "909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeaf",
+        "payload": "000000000000000c000001a0c4506c00",
+        "noise": "9fd7ad6dcff4298dd3f96d5b1b2af910a0535b1488d7f8fabb349a982880b6150b6128d29b9a91d82717f7d48cc2ef6f8b8130b49034500127d0d7c4b62949a788eb77f35180e7b83f06e6ad61e44c965f662cb41cbddf6d4aac8e2a6c35d6dc14a167541e9820c04da840ab6f72e7cb",
+        "accepted": false,
+        "responderWallNowMs": 1790000060000
+      },
+      {
+        "description": "a newer stamp, T + 1: accepted",
+        "stamp": 1790000000001,
+        "ephemeralPrivate": "a0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebf",
+        "payload": "000000000000000c000001a0c4506c01",
+        "noise": "605a725d2a4adfeeb1a29e17edd621c1b7593ee8cdbc44ac6c4ab6e2f805d23c6cda0736b46cc969d71d447967352a35251c39c98a49fc20ced3d32b387d00ef4a9f525ab8a8f80ed4258265ec2619dfe19af33280073ebc263f0045f24792c95784eb0c16d3ab84d8984e646a8df50d",
+        "accepted": true,
+        "stored": 1790000000001,
+        "responderWallNowMs": 1790000070000
+      },
+      {
+        "description": "an 8-byte payload, the roster version alone: refused as malformed",
+        "stamp": null,
+        "ephemeralPrivate": "b0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecf",
+        "payload": "000000000000000c",
+        "noise": "3f3e5f6d86926c9c128cf84581574f96840d98ee5ab53b1ec3b76e2bb25b945ee7419aed8093cf00e32f003735dff8a99f3e42c2dbec948752561f70c04bf020b126c94bb656ef6d37930ab6036a25a9fbee7a706979b33b16a8be62cd42d506d3e396d63a2d32c6",
+        "accepted": false,
+        "responderWallNowMs": 1790000080000
+      },
+      {
+        "description": "a stamp ten years ahead: refused, and nothing stored",
+        "stamp": 2105360000000,
+        "ephemeralPrivate": "e0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        "payload": "000000000000000c000001ea313c2400",
+        "noise": "736845d54e87de09d6bb114aa7042c50a4a015bd9901d1a0026f5956533a151905e806a05c928f02ea93cc0a59006abd905e9ba3db065ea48d620f69eedc54ecb116e5d503af3cc9e0807caa8b20cd4387244870fd989ec770f63de8b0e83484a159f22bdd4941b4116cd9a50f95cf4a",
+        "accepted": false,
+        "stored": 1790000000001,
+        "responderWallNowMs": 1790000090000
+      },
+      {
+        "description": "a stamp exactly W ahead of the responder: accepted, and stored as it is",
+        "stamp": 1790000700000,
+        "ephemeralPrivate": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f",
+        "payload": "000000000000000c000001a0c45b1a60",
+        "noise": "3e73ce162827a32ff92378fcf4f36464d8cf0a8113638690a775f2b699abd66e758795cc62e1a7eaa5aa8cbd7cd321446821ec903d4cc1aca7165e85a326adb38c2249cdb7d4300527fc97b5bcf1eb61d2b7b3c4cdeda50025e35ec35aac0ffa0e9bd232d3a7ce9cea608ac2ce43a35c",
+        "accepted": true,
+        "stored": 1790000700000,
+        "responderWallNowMs": 1790000100000
+      },
+      {
+        "description": "a stamp W + 1 ahead of the responder: refused",
+        "stamp": 1790000710001,
+        "ephemeralPrivate": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "payload": "000000000000000c000001a0c45b4171",
+        "noise": "8f40c5adb68f25624ae5b214ea767a6ec94d829d3d7b5e1ad1ba6f3e2138285f9d09ba040f6f1dd0ac342c7156e3ed7d50520befafaa32c6c943296d99b60b01f920b981d25c157a989b88bb68059164f2ea4a0f879e95c63e48e6d1255c802e40dfe908d2901c5d1a4a2d293f080808",
+        "accepted": false,
+        "stored": 1790000700000,
+        "responderWallNowMs": 1790000110000
+      },
+      {
+        "description": "the initiator leaves the roster: its stamp is retained",
+        "event": "removed",
+        "responderWallNowMs": 1790000120000
+      },
+      {
+        "description": "and is admitted again: its stamp is restored",
+        "event": "readmitted",
+        "stored": 1790000700000,
+        "responderWallNowMs": 1790000130000
+      },
+      {
+        "description": "a replay of an init from before its removal: refused",
+        "stamp": 1790000700000,
+        "ephemeralPrivate": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f",
+        "payload": "000000000000000c000001a0c45b1a60",
+        "noise": "3e73ce162827a32ff92378fcf4f36464d8cf0a8113638690a775f2b699abd66e758795cc62e1a7eaa5aa8cbd7cd321446821ec903d4cc1aca7165e85a326adb38c2249cdb7d4300527fc97b5bcf1eb61d2b7b3c4cdeda50025e35ec35aac0ffa0e9bd232d3a7ce9cea608ac2ce43a35c",
+        "accepted": false,
+        "responderWallNowMs": 1790000140000
+      },
+      {
+        "description": "a fresh init after its return, stamped after the restored stamp: accepted",
+        "stamp": 1790000700001,
+        "ephemeralPrivate": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+        "payload": "000000000000000c000001a0c45b1a61",
+        "noise": "d89e3bad79437dbed9f843418304f460ff05c7fe81fe4a9577a804cb9367ff663b7aea50a0d88c115a4e2c6f12470f2efefb64e8044d37a626866058b365111956a94528e5d7ffd9acb887cf26fd94e870e00dc3821491b114730b0fca9c322cea730bc0987c4eab38bea23d00fc4f65",
+        "accepted": true,
+        "stored": 1790000700001,
+        "responderWallNowMs": 1790000150000
       }
     ]
   },

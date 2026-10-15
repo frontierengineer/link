@@ -101,31 +101,49 @@ export function parseDirectory(v: unknown): RelayDirectory {
  * `network` in the closest. Throws when no region answers in time; the caller
  * then falls back to a relay of its own choosing.
  */
+// An abort signal that fires after `ms`. Unlike AbortSignal.timeout, its timer keeps Node's event
+// loop alive, so a probe that never answers still ends in the timeout rather than in the process
+// exiting with the promise unsettled. Call the returned function once done with it.
+function deadline(ms: number): [AbortSignal, () => void] {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(new DOMException('The operation timed out.', 'TimeoutError')), ms);
+  return [ac.signal, () => clearTimeout(t)];
+}
+
 export async function pickRelay(opts: PickRelayOptions): Promise<PickedRelay> {
   const doFetch = opts.fetch ?? globalThis.fetch;
   const probes = Math.max(1, opts.probes ?? 3);
   const timeoutMs = opts.timeoutMs ?? 3000;
   let dir: RelayDirectory;
   if (typeof opts.directory === 'string') {
-    const resp = await doFetch(opts.directory, { cache: 'no-store', signal: AbortSignal.timeout(timeoutMs) });
-    if (!resp.ok) throw new Error(`relay directory: ${opts.directory} answered ${resp.status}`);
-    dir = parseDirectory(await resp.json());
+    const [signal, done] = deadline(timeoutMs);
+    try {
+      const resp = await doFetch(opts.directory, { cache: 'no-store', signal });
+      if (!resp.ok) throw new Error(`relay directory: ${opts.directory} answered ${resp.status}`);
+      dir = parseDirectory(await resp.json());
+    } finally {
+      done();
+    }
   } else {
     dir = parseDirectory(opts.directory);
   }
 
   const time = async (region: DirectoryRegion): Promise<number> => {
-    const signal = AbortSignal.timeout(timeoutMs);
+    const [signal, done] = deadline(timeoutMs);
     let best = Infinity;
-    for (let i = 0; i < probes; i++) {
-      const t0 = performance.now();
-      try {
-        const resp = await doFetch(region.probe, { cache: 'no-store', signal });
-        await resp.arrayBuffer();
-        if (resp.ok) best = Math.min(best, performance.now() - t0);
-      } catch {
-        break; // timed out or unreachable: what was measured stands
+    try {
+      for (let i = 0; i < probes; i++) {
+        const t0 = performance.now();
+        try {
+          const resp = await doFetch(region.probe, { cache: 'no-store', signal });
+          await resp.arrayBuffer();
+          if (resp.ok) best = Math.min(best, performance.now() - t0);
+        } catch {
+          break; // timed out or unreachable: what was measured stands
+        }
       }
+    } finally {
+      done();
     }
     return best;
   };

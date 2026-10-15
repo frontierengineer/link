@@ -32,12 +32,15 @@ The environment variables of section 9. Unset, every limit is off (a self-hosted
 | `LINK_NETWORK_TTL` | `168h` | forget a network's roster after this long with nobody connected (Go duration or seconds) |
 | `LINK_IDLE_ROSTERS_BYTES` | off | memory for the rosters of networks nobody is connected to; beyond it, the address holding the most has its longest idle cut to a compact record (still refusing revoked members), then forgotten |
 | `LINK_PARK_IDLE` | `true` | on Linux, an idle connection holds no goroutine (its socket waits in epoll); `false` keeps a reader goroutine per connection. Not used with `LINK_TLS_CERT` |
+| `LINK_LIMITS_FILE` | unset | a JSON file of limits by origin, reloaded on SIGHUP or `POST /reload` ([deploy](../deploy/README.md#limits-by-origin)) |
+| `LINK_ADMIN_ADDR` | unset | listen address of the operator's API: `/metrics`, `/drain`, `/reload` ([deploy](../deploy/README.md#the-admin-api)). No authentication: bind it privately |
 
 Three timings are fixed by the spec and settable only so tests can shorten them (Go duration
 or seconds): `LINK_PING_INTERVAL` (`30s`, section 9), `LINK_PAIR_TIMEOUT` (`60s`, section 5.2)
 and `LINK_HELLO_TIMEOUT` (`30s`, section 4.1). Leave them unset in production.
 
-SIGTERM closes every connection `1001` (after writing what is queued for it) and exits.
+SIGTERM closes every connection `1001` (after writing what is queued for it) and exits. SIGHUP
+reloads `LINK_LIMITS_FILE`; a file that does not parse leaves the limits in force.
 
 ## Shape
 

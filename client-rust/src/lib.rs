@@ -27,8 +27,10 @@ mod bytes;
 mod code;
 mod core;
 mod crypto;
+mod directory;
 mod errors;
 mod frames;
+mod http;
 mod identity;
 mod json;
 mod member;
@@ -46,6 +48,10 @@ pub use crate::code::{
 };
 pub use crate::core::sessions::SessionInfo;
 pub use crate::core::{Observation, close_code};
+pub use crate::directory::{
+    DirectoryRegion, DirectorySource, Fetch, FetchResponse, MAX_SHARDS, PickRelayOptions, PickedRelay, RelayDirectory,
+    parse_directory, pick_relay, shard_of,
+};
 pub use crate::errors::{ErrorCode, LinkError};
 pub use crate::identity::{Identity, is_node_id, node_id_from_ed25519};
 pub use crate::json::{Json, JsonError};

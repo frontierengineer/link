@@ -36,6 +36,11 @@ tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 bytes = "1"
+# The GETs of the relay directory (http:// and https://): the TLS, roots and HTTP/1.1 parser
+# tokio-tungstenite already builds on, so no new crate.
+tokio-rustls = { version = "0.26", default-features = false }
+webpki-roots = "1"
+httparse = "1"
 
 # The tests move many MiB through ChaCha20-Poly1305 and SHA-256; optimise the dependencies
 # even in debug builds so they run in seconds.

@@ -349,7 +349,7 @@ func checkSpake(t *testing.T, name string, v rfcVector, aad []byte) {
 
 func TestRFC9382Vectors(t *testing.T) {
 	var file struct{ Vectors []rfcVector }
-	loadJSON(t, "client/test/vectors/rfc9382.json", &file)
+	loadJSON(t, "client-typescript/test/vectors/rfc9382.json", &file)
 	if len(file.Vectors) != 4 {
 		t.Fatalf("%d RFC 9382 vectors", len(file.Vectors))
 	}
@@ -736,7 +736,7 @@ func TestCacophonyNoiseVectors(t *testing.T) {
 			Messages         []struct{ Payload, Ciphertext string }
 		}
 	}
-	loadJSON(t, "client/test/vectors/noise-cacophony.json", &file)
+	loadJSON(t, "client-typescript/test/vectors/noise-cacophony.json", &file)
 	patterns := map[string]noise.HandshakePattern{
 		"IK": noise.HandshakeIK, "KK": noise.HandshakeKK, "XX": noise.HandshakeXX, "NN": noise.HandshakeNN,
 	}

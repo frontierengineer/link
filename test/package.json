@@ -7,15 +7,15 @@
     "node": ">=22"
   },
   "scripts": {
-    "pretypecheck": "npm --prefix ../client run build",
-    "pretest": "npm --prefix ../client run build",
+    "pretypecheck": "npm --prefix ../client-typescript run build",
+    "pretest": "npm --prefix ../client-typescript run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test --test-concurrency=2 \"*.test.ts\"",
-    "pretest:interop": "npm --prefix ../client run build",
+    "pretest:interop": "npm --prefix ../client-typescript run build",
     "test:interop": "node --import tsx --test interop.test.ts"
   },
   "dependencies": {
-    "@frontierengineer/link-client": "file:../client"
+    "@frontierengineer/link-client": "file:../client-typescript"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",

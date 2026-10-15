@@ -22,13 +22,14 @@ on a port, and the relay never sees content.
 ```sh
 (cd relay && go vet ./... && go test -race -count=1 ./...)
 (cd relay && LINK_TEST_NO_PARK=1 go test -race -count=1 ./internal/relay)   # a goroutine per connection
-(cd client && npm ci && npm run typecheck && npm test && npm run build)
+(cd client-typescript && npm ci && npm run typecheck && npm test && npm run build)
 (cd client-go && go vet ./... && go test -race -count=1 ./...)
 (cd client-rust && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test)
 (cd test && npm ci && LINK_REQUIRE_DRIVERS=go,rust npm test)   # builds the clients and the relay first
-(cd client/scripts/check-vectors-go && go run .)   # the client's vectors, checked in Go
+(cd client-typescript/scripts/check-vectors-go && go run .)   # the client's vectors, checked in Go
 (cd relay/npm && npm run build && npm test)        # cross-compile, pack, run the launcher
 ```
 
 CI runs all of these on every pull request and push to master. Tags publish: `client-v<version>`
-publishes the client and `server-v<version>` the relay package, each with npm provenance.
+publishes the client and `server-v<version>` the relay package, each with npm provenance, and
+the relay image `ghcr.io/frontierengineer/link-relay:<version>` (linux/amd64 and linux/arm64).

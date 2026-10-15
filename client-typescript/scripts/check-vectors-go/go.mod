@@ -1,4 +1,4 @@
-module github.com/frontierengineer/link/client/scripts/check-vectors-go
+module github.com/frontierengineer/link/client-typescript/scripts/check-vectors-go
 
 go 1.27.1
 

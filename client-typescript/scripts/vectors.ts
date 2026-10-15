@@ -374,7 +374,7 @@ export function buildVectors(): unknown {
 
   return {
     description:
-      'Link protocol v1 vectors produced by the TypeScript client (client/scripts/vectors.ts). Byte strings are lowercase hex unless the field name ends in B64u or the spec puts them in JSON as b64u.',
+      'Link protocol v1 vectors produced by the TypeScript client (client-typescript/scripts/vectors.ts). Byte strings are lowercase hex unless the field name ends in B64u or the spec puts them in JSON as b64u.',
     keys: [keyVector(seeds.primary), keyVector(seeds.worker), keyVector(seeds.surface), keyVector(seedHex(4))],
     roster: {
       signing: {

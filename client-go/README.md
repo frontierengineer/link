@@ -1,7 +1,7 @@
 # github.com/frontierengineer/link/client-go
 
 The Go client for Link, protocol version 1 ([`spec/protocol.md`](../spec/protocol.md)), the
-equal of the TypeScript client in [`client/`](../client/README.md). It does everything a member
+equal of the TypeScript client in [`client-typescript/`](../client-typescript/README.md). It does everything a member
 needs: keys, signed rosters, pairing with a short code (SPAKE2), and end-to-end encrypted
 sessions (Noise IK) over one outbound WebSocket to a relay that only routes.
 
@@ -120,6 +120,29 @@ events: `PairedEvent`, `PairingFailedEvent` (its `Code` one of the `Fail*` const
 connected) or `timeout`. Codes: `GenerateCode`, `NormalizeCode`, `FormatCode`; links:
 `BuildPairingLink`, `ParsePairingLink`.
 
+## Choosing a relay
+
+A relay operator can publish a **directory**: regions, each with a URL to time and a relay URL
+template over its own number of shards (default 1), so one region can grow without the others.
+
+```json
+{ "version": 1, "regions": [
+  { "id": "eu1", "name": "Europe", "probe": "https://eu1.relay.example.com/health",
+    "relay": "wss://{shard}.eu1.relay.example.com/v1", "shards": 256, "accepting": true } ] }
+```
+
+When a primary creates its network, `PickRelay(ctx, PickRelayOptions{Network, DirectoryURL})`
+(or `Directory` for one already in hand) times every accepting region (the fastest of `Probes`
+requests each, default 3, within `Timeout`, default 3 s), takes the closest, and puts the
+network's shard into that region's template; `Client` replaces `http.DefaultClient`. The shard is
+`ShardOf(network, shards)` with that region's `Shards`: the first four bytes of SHA-256 of the
+network id, big-endian, modulo `shards`, in lowercase hex padded to the width of `shards - 1`
+(`00` to `ff` for 256). Pass the `URL` of the `PickedRelay` it returns to
+`CreateNetwork(identity, relay, now)`; the roster carries it from then on, so the directory is
+consulted once, at creation, and never on reconnect. It fails `unreachable` when no region
+answers (or the directory cannot be fetched) and `invalid` on a directory it cannot use
+(`ParseDirectory` checks one); fall back to a relay of your own.
+
 ## Sessions in brief
 
 - Every session starts with 1 MiB of credit each way; a larger `CreditWindow` is granted as
@@ -206,5 +229,5 @@ go test -short -count=1 ./...         # without building and running the relay
 LINK_RELAY_BIN=/path/to/link-relay go test ./...   # with a relay built elsewhere
 ```
 
-The tests read the vectors from `../spec/vectors/` and `../client/test/vectors/`, and build
+The tests read the vectors from `../spec/vectors/` and `../client-typescript/test/vectors/`, and build
 `../relay/cmd/link-relay` (and the driver) into temporary directories with `go build`.

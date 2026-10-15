@@ -3,7 +3,7 @@
 The Rust client for Link, protocol version 1 ([`spec/protocol.md`](../spec/protocol.md)). It does
 everything a member needs: keys, signed rosters, pairing with a short code (SPAKE2), and
 end-to-end encrypted sessions (Noise IK) over one outbound WebSocket to a relay that only routes.
-It behaves as the TypeScript client ([`client/`](../client/README.md)) does, and passes the same
+It behaves as the TypeScript client ([`client-typescript/`](../client-typescript/README.md)) does, and passes the same
 vectors.
 
 Edition 2024, async on tokio. `ws://` and `wss://` (rustls with ring, Mozilla's roots from
@@ -118,6 +118,32 @@ or fails with `Pairing`, `Unreachable` (the primary is not connected) or `Timeou
 `link_client::wire` exposes the building blocks (encodings, frames, the Noise engine, SPAKE2,
 the pairing state machines) for the vector tests and for tools; applications need none of it.
 
+## Choosing a relay
+
+A relay operator can publish a **directory**: regions, each with a URL to time and a relay URL
+template over its own number of shards (default 1), so one region can grow without the others.
+
+```json
+{ "version": 1, "regions": [
+  { "id": "eu1", "name": "Europe", "probe": "https://eu1.relay.example.com/health",
+    "relay": "wss://{shard}.eu1.relay.example.com/v1", "shards": 256, "accepting": true } ] }
+```
+
+When a primary creates its network, `pick_relay(PickRelayOptions::new(network, directory))`
+(`directory` a URL, or a `RelayDirectory` already in hand) times every accepting region (the
+fastest of `probes` requests each, default 3, within `timeout`, default 3 s), takes the closest,
+and puts the network's shard into that region's template. The shard is `shard_of(network,
+shards)` with that region's `shards`: the first four bytes of SHA-256 of the network id,
+big-endian, modulo `shards`, in lowercase hex padded to the width of `shards - 1` (`00` to `ff`
+for 256). Pass the `url` of the `PickedRelay` it returns to `create_network(&identity, relay,
+now_ms)`; the roster carries it from then on, so the directory is consulted once, at creation,
+and never on reconnect. It fails with `Unreachable` when no region answers (or the directory
+cannot be fetched) and `Invalid` on a directory it cannot use (`parse_directory` checks one);
+fall back to a relay of your own. The requests are the client's own HTTP/1.1 GETs (http:// and
+https://, on the rustls and webpki roots the WebSocket already uses); `fetch` replaces them with
+any `Fetch` (`Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Result<FetchResponse, String>>
++ Send>>>`), for tests or another HTTP stack.
+
 ## Sessions in brief
 
 - Every session starts with 1 MiB of credit each way; a larger `credit_window` is granted as
@@ -202,7 +228,7 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test                                  # unit, vector and integration tests
 cargo test --lib                            # the state machines on a fake relay and clock
-cargo test --test vectors                   # spec/vectors and client/test/vectors
+cargo test --test vectors                   # spec/vectors and client-typescript/test/vectors
 cargo build --release --bin link-driver     # the driver for test/drivers/PROTOCOL.md
 ```
 

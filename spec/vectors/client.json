@@ -1,5 +1,5 @@
 {
-  "description": "Link protocol v1 vectors produced by the TypeScript client (client/scripts/vectors.ts). Byte strings are lowercase hex unless the field name ends in B64u or the spec puts them in JSON as b64u.",
+  "description": "Link protocol v1 vectors produced by the TypeScript client (client-typescript/scripts/vectors.ts). Byte strings are lowercase hex unless the field name ends in B64u or the spec puts them in JSON as b64u.",
   "keys": [
     {
       "seed": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",

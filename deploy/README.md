@@ -24,9 +24,11 @@ right one with arguments, environment and signals passed through:
 LINK_ADDR=:8080 npx @frontierengineer/link-server
 ```
 
-**Docker.** A distroless image with the static binary, running as a non-root user:
+**Docker.** A distroless image with the static binary, running as a non-root user. Each release
+is published as `ghcr.io/frontierengineer/link-relay:<version>` (and `:latest`), or build it:
 
 ```sh
+docker run -d --name link-relay -p 8080:8080 ghcr.io/frontierengineer/link-relay:latest
 docker build -t link-relay relay/
 docker run -d --name link-relay -p 8080:8080 link-relay
 docker run -d -p 9000:9000 -e LINK_ADDR=:9000 -e LINK_RATE_BPS=1048576 link-relay
@@ -73,10 +75,65 @@ serves one install; the "public" column is what the shared relay runs with.
 | `LINK_NETWORK_TTL` | `168h` | `168h` | forget a network's roster after this long with nobody connected |
 | `LINK_IDLE_ROSTERS_BYTES` | off | 1073741824 | memory for the rosters of networks nobody is connected to; beyond it, the address holding the most has its longest idle cut to a compact record (still refusing revoked members), then forgotten |
 | `LINK_PARK_IDLE` | `true` | `true` | on Linux, an idle connection holds no goroutine (its socket waits in epoll); `false` keeps a reader goroutine per connection. Not used with `LINK_TLS_CERT` |
+| `LINK_LIMITS_FILE` | unset | | limits by origin, reloaded without a restart (below) |
+| `LINK_ADMIN_ADDR` | unset | | listen address of the admin API (below); never expose it publicly |
 
 Durations take a Go duration (`168h`, `30s`) or a number of seconds. `LINK_PING_INTERVAL`,
 `LINK_PAIR_TIMEOUT` and `LINK_HELLO_TIMEOUT` exist only so tests can shorten timings the spec
 fixes; leave them unset.
+
+### Limits by origin
+
+A relay can answer under several hostnames, its **origins**: the host a member dialled, which it
+signs at registration (section 4.1 of [the spec](../spec/protocol.md)). `LINK_LIMITS_FILE` names
+origins and sets the per-network limits, for all networks or per origin, without a restart:
+
+```json
+{
+  "rateBps": 1048576,
+  "trickleBps": 16384,
+  "origins": {
+    "a.relay.example.com": { "rateBps": 524288, "quotaBytesHour": 2147483648 },
+    "b.relay.example.com": {}
+  }
+}
+```
+
+- The top-level `rateBps`, `quotaBytesHour` and `trickleBps` replace `LINK_RATE_BPS`,
+  `LINK_QUOTA_BYTES_HOUR` and `LINK_TRICKLE_BPS`; a field left out keeps the environment's value.
+- Each origin may override any of the three; `{}` takes the defaults. A key is the host as
+  members sign it: lowercase, with `:port` only when the port is not 80 or 443.
+- A network is charged the limits of the origin its first member registered through, or the
+  defaults when that origin is not named.
+- SIGHUP or `POST /reload` re-reads the file and applies it to live networks as well. A file that
+  does not parse, has an unknown or repeated field, or a negative limit is refused whole, and the
+  limits in force stay. At start, such a file stops the relay.
+- A primary sees the limits its network is under in its usage answer (section 4.3).
+
+### The admin API
+
+With `LINK_ADMIN_ADDR` set (for example `127.0.0.1:9090`, or a private address), the relay
+serves a second, plain-HTTP listener. It has no authentication: bind it where only the operator
+reaches it.
+
+| Request | Answer |
+|---|---|
+| `GET /health` | `ok` |
+| `GET /metrics` | the relay's state in the Prometheus text format |
+| `POST /drain?origin=<host>` | closes, `1001`, every connection that dialled `<host>`, registered or not, and answers `{"closed": n}`; `404` for an origin the limits file does not name |
+| `POST /reload` | re-reads `LINK_LIMITS_FILE`: `{"ok": true}`, or `400` with `{"error": ...}` and nothing changed |
+
+Metrics: `link_connections{state="pending"|"registered"}`, `link_networks{state="connected"|"idle"}`,
+`link_bytes_hour` (charged over the last hour to networks with a member connected),
+`link_closes_total{code}` (connections the relay closed, by close code), and per named origin
+`link_origin_connections` (registered connections that dialled it), `link_origin_networks`,
+`link_origin_bytes_hour` and `link_origin_slowed_networks` (networks on the trickle rate), plus
+`go_goroutines` and `go_memstats_heap_inuse_bytes`. No network or node id is ever reported.
+
+Draining an origin is how a relay hands it to another: once whatever routes that hostname leads
+to the other relay, a drain closes the connections still here, and members reconnect (section
+11) to wherever the origin now leads. The relay keeps nothing a member needs, so nothing else
+moves.
 
 ### Operating it
 

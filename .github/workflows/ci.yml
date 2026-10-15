@@ -34,14 +34,14 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: client
+        working-directory: client-typescript
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: client/package-lock.json
+          cache-dependency-path: client-typescript/package-lock.json
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
@@ -62,10 +62,10 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: |
-            client/package-lock.json
+            client-typescript/package-lock.json
             test/package-lock.json
       - run: npm ci
-        working-directory: client
+        working-directory: client-typescript
       - run: npm ci
         working-directory: test
       # The browser test runs the client in headless Chromium, at the playwright version test/ pins.
@@ -88,13 +88,13 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: client/scripts/check-vectors-go
+        working-directory: client-typescript/scripts/check-vectors-go
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version-file: client/scripts/check-vectors-go/go.mod
-          cache-dependency-path: client/scripts/check-vectors-go/go.sum
+          go-version-file: client-typescript/scripts/check-vectors-go/go.mod
+          cache-dependency-path: client-typescript/scripts/check-vectors-go/go.sum
       - run: go run .
 
   client-go:

@@ -1,6 +1,6 @@
 # Cross-implementation tests
 
-The TypeScript client (`../client`, as a `file:` dependency) driven against the real Go relay,
+The TypeScript client (`../client-typescript`, as a `file:` dependency) driven against the real Go relay,
 and every client implementation (TypeScript, Go, Rust) driven against the others through its
 driver.
 No mocks: each test file builds the relay with `go build` into a temporary directory, and each

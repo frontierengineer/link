@@ -1,6 +1,6 @@
 name: Publish @frontierengineer/link-client
 
-# TRIGGER: push a tag `client-v<version>` that matches client/package.json "version"
+# TRIGGER: push a tag `client-v<version>` that matches client-typescript/package.json "version"
 # (e.g. client-v1.0.0-alpha.1), or run this workflow manually.
 #
 # AUTH: OIDC Trusted Publishing — NO token, nothing to rotate. GitHub mints a
@@ -21,7 +21,7 @@ jobs:
       contents: read
     defaults:
       run:
-        working-directory: client
+        working-directory: client-typescript
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -34,7 +34,7 @@ jobs:
         run: |
           version="$(node -p 'require("./package.json").version')"
           if [ "${GITHUB_REF_NAME}" != "client-v${version}" ]; then
-            echo "tag ${GITHUB_REF_NAME} does not match client/package.json version ${version}" >&2
+            echo "tag ${GITHUB_REF_NAME} does not match client-typescript/package.json version ${version}" >&2
             exit 1
           fi
       - run: npm ci

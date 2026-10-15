@@ -46,6 +46,11 @@ type Server struct {
 
 	ipRegister, ipPair, ipNetworks *ipLimiter
 
+	limits   atomic.Pointer[netLimits]          // the defaults (limits_file.go)
+	origins  atomic.Pointer[map[string]*origin] // copied on write, under reloadMu
+	reloadMu sync.Mutex
+	closes   [len(closeCodes)]atomic.Uint64
+
 	closing  atomic.Bool
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -77,6 +82,9 @@ func New(cfg Config) *Server {
 		ipConns:    newIPConns(cfg.IPPending, cfg.IPConnections),
 		stop:       make(chan struct{}),
 	}
+	def := s.envLimits()
+	s.limits.Store(&def)
+	s.origins.Store(&map[string]*origin{})
 	for i := range s.shard {
 		s.shard[i].m = map[uint64]*conn{}
 		s.nets[i].m = map[link.ID]*network{}
@@ -224,7 +232,7 @@ func (s *Server) upgrade(w http.ResponseWriter, r *http.Request) {
 		s.ipConns.release(ipc, true)
 		return
 	}
-	c := &conn{s: s, nc: nc, ip: ip, ipc: ipc, ipPending: true, origin: origin, done: make(chan struct{})}
+	c := &conn{s: s, nc: nc, ip: ip, ipc: ipc, ipPending: true, origin: origin, originRef: s.originNamed(origin), done: make(chan struct{})}
 	c.rc = rawConnOf(nc)
 	if rw != nil && rw.Reader.Buffered() > 0 {
 		early, _ := rw.Reader.Peek(rw.Reader.Buffered())
@@ -255,14 +263,7 @@ func (s *Server) originOf(r *http.Request) string {
 	if host == "" {
 		host = r.Host
 	}
-	host = strings.ToLower(host)
-	if h, p, err := net.SplitHostPort(host); err == nil && (p == "80" || p == "443") {
-		if strings.Contains(h, ":") {
-			h = "[" + h + "]"
-		}
-		host = h
-	}
-	return strings.Clone(host)
+	return strings.Clone(normalOrigin(host))
 }
 
 // clientIP is the key the per-IP limits count a request under (section 9): the peer's

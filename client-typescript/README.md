@@ -103,6 +103,26 @@ network; beyond that it refuses and `usage()` rejects with `RateLimitedError` (c
 not connected) or `TimeoutError`. Codes: `generateCode`, `normalizeCode`, `formatCode`;
 links: `buildPairingLink`, `parsePairingLink`.
 
+## Choosing a relay
+
+A relay operator can publish a **directory**: regions, each with a URL to time and a relay URL
+template over its own number of shards (default 1), so one region can grow without the others.
+
+```json
+{ "version": 1, "regions": [
+  { "id": "eu1", "name": "Europe", "probe": "https://eu1.relay.example.com/health",
+    "relay": "wss://{shard}.eu1.relay.example.com/v1", "shards": 256, "accepting": true } ] }
+```
+
+When a primary creates its network, `pickRelay({ network, directory })` times every accepting
+region (the fastest of three requests each, within `timeoutMs`, default 3 s), takes the closest,
+and puts the network's shard into that region's template. The shard is `shardOf(network,
+shards)` with that region's `shards`: the first four bytes of SHA-256 of the network id, big-endian, modulo `shards`, in
+lowercase hex padded to the width of `shards - 1` (`00` to `ff` for 256). Pass the URL it returns
+to `createNetwork({ relay })`; the roster carries it from then on, so the directory is consulted
+once, at creation, and never on reconnect. It throws when no region answers; fall back to a relay
+of your own.
+
 ## Sessions in brief
 
 - Every session starts with 1 MiB of credit each way; a larger `creditWindow` is granted as extra

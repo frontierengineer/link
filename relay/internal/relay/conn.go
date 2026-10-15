@@ -74,6 +74,7 @@ type conn struct {
 	ipc       *ipCount        // its address's connection count (section 9)
 	ipPending bool            // counted there as not registered
 	origin    string          // used once, to check the registration signature
+	originRef *origin         // the origin it dialled, if the limits file names it; fixed
 	challenge [32]byte
 	early     []byte // bytes read past the upgrade request, consumed before the socket
 
@@ -444,6 +445,9 @@ func (c *conn) closeWith(code int, reason string, flush bool) {
 	}
 	if code == 0 {
 		return
+	}
+	if i := closeIndex(code); i >= 0 {
+		c.s.closes[i].Add(1)
 	}
 	c.closeFrame = ws.NewCloseFrameBody(ws.StatusCode(code), reason)
 	// Bounds the frame being written now (if the peer is not reading), the flush and the

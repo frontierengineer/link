@@ -32,22 +32,54 @@ func main() {
 		log.Fatal(err)
 	}
 	s := relay.New(cfg)
+	if cfg.LimitsFile != "" {
+		if err := s.ReloadLimits(); err != nil {
+			log.Fatal(err)
+		}
+	}
 	served := make(chan error, 1)
 	go func() { served <- s.Serve(ln) }()
 	log.Printf("link-relay listening on %s", ln.Addr())
 
+	var admin *http.Server
+	if cfg.AdminAddr != "" {
+		aln, err := net.Listen("tcp", cfg.AdminAddr)
+		if err != nil {
+			log.Fatal(err)
+		}
+		admin = &http.Server{Handler: s.AdminHandler(), ReadHeaderTimeout: 10 * time.Second}
+		go func() { served <- admin.Serve(aln) }()
+		log.Printf("link-relay admin on %s", aln.Addr())
+	}
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, os.Interrupt)
-	select {
-	case <-sig:
-	case err := <-served:
-		if !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal(err)
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+wait:
+	for {
+		select {
+		case <-hup:
+			if err := s.ReloadLimits(); err != nil {
+				log.Printf("reload: %v (the limits in force are unchanged)", err)
+			} else {
+				log.Print("limits reloaded")
+			}
+		case <-sig:
+			break wait
+		case err := <-served:
+			if !errors.Is(err, http.ErrServerClosed) {
+				log.Fatal(err)
+			}
+			break wait
 		}
 	}
 	log.Print("link-relay shutting down")
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
+	if admin != nil {
+		admin.Close()
+	}
 	if err := s.Shutdown(ctx); err != nil {
 		log.Printf("shutdown: %v", err)
 	}

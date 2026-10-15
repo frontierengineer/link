@@ -1,6 +1,6 @@
 //! Every vector that applies to a client, read from the files the other implementations check:
 //! `spec/vectors/client.json` (the TypeScript client's), `spec/vectors/relay.json` (the Go
-//! relay's), and the published RFC 9382 and cacophony vectors in `client/test/vectors/`.
+//! relay's), and the published RFC 9382 and cacophony vectors in `client-typescript/test/vectors/`.
 
 use std::path::PathBuf;
 
@@ -182,7 +182,7 @@ fn check_rfc9382(v: &Json, c_a: &str, c_b: &str) {
 
 #[test]
 fn spake2_rfc9382_appendix_b() {
-    let rfc = load("client/test/vectors/rfc9382.json");
+    let rfc = load("client-typescript/test/vectors/rfc9382.json");
     let vectors = arr(&rfc, "vectors");
     assert_eq!(vectors.len(), 4);
     for v in vectors {
@@ -472,7 +472,7 @@ fn relay_frames() {
 
 #[test]
 fn noise_cacophony_ik_kk_xx_nn() {
-    let v = load("client/test/vectors/noise-cacophony.json");
+    let v = load("client-typescript/test/vectors/noise-cacophony.json");
     let vectors = arr(&v, "vectors");
     let mut names: Vec<&str> = vectors.iter().map(|x| s(x, "protocol_name")).collect();
     names.sort();

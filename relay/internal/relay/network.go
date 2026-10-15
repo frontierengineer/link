@@ -50,7 +50,8 @@ const (
 // network is what the relay holds for one network: its newest valid roster, its connected
 // members, and three small counters of its own (section 9).
 type network struct {
-	id link.ID
+	id     link.ID
+	origin *origin // the origin its first member registered through, if named; fixed
 
 	mu         sync.Mutex
 	roster     *link.Roster
@@ -90,9 +91,10 @@ func (s *Server) allowControl(n *network, id link.ID, now int64, size int) bool 
 // controlCeilingLocked is the network's ceiling on control read ahead of shaping: 64 members'
 // budgets, but at most half the rate in force; its burst at least four members'.
 func (s *Server) controlCeilingLocked(n *network, now int64) (rate, burst int64) {
-	inForce := s.cfg.RateBps
+	lim := s.limitsOf(n)
+	inForce := lim.RateBps
 	if _, slowed := s.quotaLocked(n, now); slowed {
-		inForce = s.cfg.TrickleBps
+		inForce = lim.TrickleBps
 	}
 	rate, burst = int64(netCtlRate), int64(netCtlBurst)
 	if inForce > 0 {
@@ -253,7 +255,7 @@ func (c *conn) admit(r *link.Roster, id link.ID, pub ed25519.PublicKey, now time
 			c.closeWith(closeRateLimited, "rate limited", true)
 			return false
 		}
-		n = &network{id: r.Network, roster: r, members: map[link.ID]*conn{}}
+		n = &network{id: r.Network, origin: c.originRef, roster: r, members: map[link.ID]*conn{}}
 		sh.m[r.Network] = n
 	}
 	n.mu.Lock()
@@ -443,23 +445,26 @@ func (c *conn) route(p []byte, peer link.ID, wire int) {
 }
 
 // chargeLocked counts size bytes against the network and returns how long its senders must
-// wait for its bucket: LINK_RATE_BPS, or LINK_TRICKLE_BPS once the hourly quota is spent.
+// wait for its bucket: its rate, or its trickle rate once the hourly quota is spent (the
+// environment's, or its origin's from LINK_LIMITS_FILE).
 func (s *Server) chargeLocked(n *network, size int, now int64) time.Duration {
 	n.hour.add(uint64(size), now)
-	rate := s.cfg.RateBps
+	lim := s.limitsOf(n)
+	rate := lim.RateBps
 	if _, slowed := s.quotaLocked(n, now); slowed {
-		rate = s.cfg.TrickleBps
+		rate = lim.TrickleBps
 	}
 	return spend(&n.rateTAT, now, size, rate)
 }
 
 func (s *Server) quotaLocked(n *network, now int64) (used float64, slowed bool) {
-	q := s.cfg.QuotaBytesHour
+	lim := s.limitsOf(n)
+	q := lim.QuotaBytesHour
 	if q <= 0 {
 		return 0, false
 	}
 	used = float64(n.hour.total(now)) / float64(q)
-	return used, used >= 1 && s.cfg.TrickleBps > 0
+	return used, used >= 1 && lim.TrickleBps > 0
 }
 
 type usageLimits struct {
@@ -504,9 +509,10 @@ func (c *conn) usageRequest(data []byte) {
 		return
 	}
 	used, slowed := s.quotaLocked(n, now)
+	lim := s.limitsOf(n)
 	resp := usageMsg{Type: "usage", ID: *m.ID, Network: usageNetwork{
 		BytesHour: n.hour.total(now), Connections: len(n.members),
-		Limits:    usageLimits{RateBps: s.cfg.RateBps, QuotaBytesHour: s.cfg.QuotaBytesHour, TrickleBps: s.cfg.TrickleBps},
+		Limits:    usageLimits{RateBps: lim.RateBps, QuotaBytesHour: lim.QuotaBytesHour, TrickleBps: lim.TrickleBps},
 		QuotaUsed: used, Slowed: slowed,
 	}}
 	n.mu.Unlock()

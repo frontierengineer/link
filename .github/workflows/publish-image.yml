@@ -1,0 +1,66 @@
+name: Publish ghcr.io/frontierengineer/link-relay
+
+# The relay as a container image (relay/Dockerfile) for linux/amd64 and linux/arm64, public,
+# so a box pulls it with no credentials: docker pull ghcr.io/frontierengineer/link-relay:1.0.2
+#
+# TRIGGER: the same `server-v<version>` tag as publish-server.yml (it must match
+# relay/npm/package.json "version"), or run this workflow manually with a version.
+#
+# AUTH: the workflow's own GITHUB_TOKEN with `packages: write`. No repo secret needed.
+on:
+  push:
+    tags: ["server-v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to tag the image with (relay/npm/package.json's, normally)"
+        required: true
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: version
+        id: v
+        run: |
+          version="$(node -p 'require("./relay/npm/package.json").version')"
+          if [ "${GITHUB_REF_TYPE}" = tag ] && [ "${GITHUB_REF_NAME}" != "server-v${version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match relay/npm/package.json version ${version}" >&2
+            exit 1
+          fi
+          if [ -n "${{ inputs.version }}" ]; then version="${{ inputs.version }}"; fi
+          tags="ghcr.io/frontierengineer/link-relay:${version}"
+          # A prerelease (1.1.0-alpha.1) never moves :latest.
+          case "$version" in *-*) ;; *) tags="${tags},ghcr.io/frontierengineer/link-relay:latest" ;; esac
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: relay
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.v.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/frontierengineer/link
+            org.opencontainers.image.description=The Link relay
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ steps.v.outputs.version }}
+      # Prove the pushed image runs: /health on the admin listener, and the relay's /health.
+      - name: smoke
+        run: |
+          docker run -d --name relay -e LINK_ADMIN_ADDR=:9090 -p 8080:8080 -p 9090:9090 \
+            "ghcr.io/frontierengineer/link-relay:${{ steps.v.outputs.version }}"
+          for i in $(seq 30); do curl -fsS localhost:9090/health && break; sleep 1; done
+          curl -fsS localhost:9090/health
+          curl -fsS localhost:9090/metrics | grep -q '^link_connections'

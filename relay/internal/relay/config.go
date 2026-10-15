@@ -30,6 +30,8 @@ type Config struct {
 	IdleRostersBytes  int64         // LINK_IDLE_ROSTERS_BYTES: rosters held for networks nobody is connected to
 	NetworkTTL        time.Duration // LINK_NETWORK_TTL
 	ParkIdle          bool          // LINK_PARK_IDLE: idle connections hold no goroutine (Linux, without LINK_TLS_CERT)
+	AdminAddr         string        // LINK_ADMIN_ADDR: the operator's API (admin.go); empty: none
+	LimitsFile        string        // LINK_LIMITS_FILE: limits by origin, reloaded on SIGHUP or POST /reload
 
 	PingInterval time.Duration // 30 s (section 9); LINK_PING_INTERVAL
 	PairTimeout  time.Duration // 60 s (section 5.2); LINK_PAIR_TIMEOUT
@@ -77,6 +79,8 @@ func FromEnv(getenv func(string) string) (Config, error) {
 	str("LINK_ORIGIN", &c.Origin)
 	str("LINK_TLS_CERT", &c.TLSCert)
 	str("LINK_TLS_KEY", &c.TLSKey)
+	str("LINK_ADMIN_ADDR", &c.AdminAddr)
+	str("LINK_LIMITS_FILE", &c.LimitsFile)
 	if v := getenv("LINK_TRUST_PROXY"); v != "" {
 		// A number of proxies; true and false (as before) mean one and none.
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 && n <= 64 {

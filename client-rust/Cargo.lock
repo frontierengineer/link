@@ -551,6 +551,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hkdf",
  "hmac",
+ "httparse",
  "p256",
  "rustls",
  "ryu",
@@ -559,8 +560,10 @@ dependencies = [
  "sha2",
  "subtle",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "url",
+ "webpki-roots 1.0.9",
  "x25519-dalek",
  "zeroize",
 ]

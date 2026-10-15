@@ -22,6 +22,15 @@ export {
 } from './roster.js';
 export { canonicalize, type JsonValue } from './jcs.js';
 export {
+  pickRelay,
+  shardOf,
+  parseDirectory,
+  type RelayDirectory,
+  type DirectoryRegion,
+  type PickRelayOptions,
+  type PickedRelay,
+} from './directory.js';
+export {
   generateCode,
   normalizeCode,
   formatCode,

@@ -4,13 +4,13 @@
 
 use std::sync::{Arc, OnceLock};
 
-use rustls::pki_types::ServerName;
+use rustls::pki_types::{CertificateDer, ServerName};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use url::{Host, Position, Url};
 
-use crate::directory::FetchResponse;
+use crate::directory::{Fetch, FetchResponse};
 
 /// A response (headers and body) larger than this fails; a directory is a few KiB.
 const MAX_RESPONSE: usize = 1024 * 1024;
@@ -18,9 +18,28 @@ const MAX_REDIRECTS: usize = 5;
 
 /// GETs `url` and reads the whole body.
 pub(crate) async fn get(url: &str) -> Result<FetchResponse, String> {
+    get_with(url, &connector()).await
+}
+
+/// This GET as a `Fetch`, trusting only `roots` (DER certificates) for https:// instead of the
+/// webpki roots: for testing the TLS path against a local server.
+#[doc(hidden)]
+pub fn fetch_trusting(roots: &[Vec<u8>]) -> Result<Fetch, String> {
+    let mut store = rustls::RootCertStore::empty();
+    for der in roots {
+        store.add(CertificateDer::from(der.clone())).map_err(|e| e.to_string())?;
+    }
+    let tls = TlsConnector::from(config(store));
+    Ok(Arc::new(move |url: String| {
+        let tls = tls.clone();
+        Box::pin(async move { get_with(&url, &tls).await })
+    }))
+}
+
+async fn get_with(url: &str, connector: &TlsConnector) -> Result<FetchResponse, String> {
     let mut url = Url::parse(url).map_err(|e| format!("not a URL: {e}"))?;
     for _ in 0..=MAX_REDIRECTS {
-        let (response, location) = get_once(&url).await?;
+        let (response, location) = get_once(&url, connector).await?;
         match location {
             Some(to) if matches!(response.status, 301 | 302 | 303 | 307 | 308) => {
                 url = url.join(&to).map_err(|e| format!("redirected to a bad URL: {e}"))?;
@@ -31,7 +50,7 @@ pub(crate) async fn get(url: &str) -> Result<FetchResponse, String> {
     Err("too many redirects".into())
 }
 
-async fn get_once(url: &Url) -> Result<(FetchResponse, Option<String>), String> {
+async fn get_once(url: &Url, connector: &TlsConnector) -> Result<(FetchResponse, Option<String>), String> {
     let tls = match url.scheme() {
         "http" => false,
         "https" => true,
@@ -53,7 +72,7 @@ async fn get_once(url: &Url) -> Result<(FetchResponse, Option<String>), String> 
     let tcp = TcpStream::connect((host.as_str(), port)).await.map_err(|e| e.to_string())?;
     if tls {
         let name = ServerName::try_from(host).map_err(|e| e.to_string())?;
-        exchange(connector().connect(name, tcp).await.map_err(|e| e.to_string())?, &request).await
+        exchange(connector.connect(name, tcp).await.map_err(|e| e.to_string())?, &request).await
     } else {
         exchange(tcp, &request).await
     }
@@ -61,16 +80,18 @@ async fn get_once(url: &Url) -> Result<(FetchResponse, Option<String>), String> 
 
 fn connector() -> TlsConnector {
     static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
-    let config = CONFIG.get_or_init(|| {
-        let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
-        let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .expect("ring supports the default protocol versions")
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        Arc::new(config)
-    });
+    let config =
+        CONFIG.get_or_init(|| config(rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() }));
     TlsConnector::from(Arc::clone(config))
+}
+
+fn config(roots: rustls::RootCertStore) -> Arc<rustls::ClientConfig> {
+    let config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("ring supports the default protocol versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    Arc::new(config)
 }
 
 /// Sends the request and reads until the response is complete: its Content-Length, its last

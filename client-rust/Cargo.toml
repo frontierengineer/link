@@ -53,3 +53,5 @@ tokio = { version = "1", features = ["process"] }
 # The Ed25519 tests build signatures no signer would (small-order R, a mixed-order key); this is
 # the curve ed25519-dalek already uses, no new code.
 curve25519-dalek = "5"
+# The https test makes a self-signed certificate for its local TLS server (ring, as rustls uses).
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }

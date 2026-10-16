@@ -53,6 +53,8 @@ pub use crate::directory::{
     parse_directory, pick_relay, shard_of,
 };
 pub use crate::errors::{ErrorCode, LinkError};
+#[doc(hidden)]
+pub use crate::http::fetch_trusting;
 pub use crate::identity::{Identity, is_node_id, node_id_from_ed25519};
 pub use crate::json::{Json, JsonError};
 pub use crate::member::{CodeOptions, Member, MemberOptions, Primary, ResolveRelay};

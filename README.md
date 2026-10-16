@@ -30,6 +30,6 @@ on a port, and the relay never sees content.
 (cd relay/npm && npm run build && npm test)        # cross-compile, pack, run the launcher
 ```
 
-CI runs all of these on every pull request and push to master. Tags publish: `client-v<version>`
+CI runs all of these on every pull request and push to main. Tags publish: `client-v<version>`
 publishes the client and `server-v<version>` the relay package, each with npm provenance, and
 the relay image `ghcr.io/frontierengineer/link-relay:<version>` (linux/amd64 and linux/arm64).

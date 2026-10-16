@@ -1,13 +1,13 @@
 name: CI
 
-# Every pull request and every push to master: the relay's suite, the TypeScript, Go and Rust
+# Every pull request and every push to main: the relay's suite, the TypeScript, Go and Rust
 # clients' suites, every client driven against the real relay binary and each other (test/),
 # and an independent Go check of the client's vectors. Each side checks the others' vectors
 # inside its own suite.
 on:
   pull_request:
   push:
-    branches: [master]
+    branches: [main]
 
 jobs:
   relay:

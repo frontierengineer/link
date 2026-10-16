@@ -4,7 +4,7 @@ The Link relay as an npm package: the static Go binary for Linux (x64, arm64), m
 arm64) and Windows (x64), and a small launcher that runs the right one. The relay routes
 end-to-end encrypted frames between the members of a network, joins newcomers to their
 primary while they pair, and never sees content. The protocol is
-[`spec/protocol.md`](https://github.com/frontierengineer/link/blob/master/spec/protocol.md).
+[`spec/protocol.md`](https://github.com/frontierengineer/link/blob/main/spec/protocol.md).
 
 ```sh
 npx @frontierengineer/link-server                    # listens on :8080

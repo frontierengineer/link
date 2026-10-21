@@ -33,7 +33,7 @@ func TestRegistered(t *testing.T) {
 	p, w := keys(t, 1), keys(t, 2)
 	r := roster(t, 12, p, w)
 	c := h.dial()
-	c.send(h.registerMsg(c, w, p.ID.String(), r))
+	c.send(h.registerMsg(c, w, netID(p), r))
 	m := c.json()
 	if m["type"] != "registered" || m["node"] != w.ID.String() || m["rosterVersion"] != float64(12) {
 		t.Fatalf("registered: %v", m)
@@ -45,7 +45,7 @@ func TestRegistrationChecks(t *testing.T) {
 	p, w, stranger, dropped := keys(t, 1), keys(t, 2), keys(t, 3), keys(t, 5)
 	other := keys(t, 4) // another network's primary
 	r := roster(t, 5, p, w)
-	net := p.ID.String()
+	net := netID(p)
 
 	resign := func(h *harness, c *client, m map[string]any, k *link.Keys, network, origin string, challenge []byte, ts int64) {
 		m["ts"] = ts
@@ -198,7 +198,7 @@ func TestConfiguredOrigin(t *testing.T) {
 	h.register(p, p, r)
 	h.origin = h.addr // the Host is not used when LINK_ORIGIN is set
 	c := h.dial()
-	c.send(h.registerMsg(c, p, p.ID.String(), r))
+	c.send(h.registerMsg(c, p, netID(p), r))
 	c.expectClose(4007)
 }
 
@@ -228,7 +228,7 @@ func TestIPRegisterLimit(t *testing.T) {
 	h.register(p, p, r)
 	h.register(p, p, r)
 	c := h.dial()
-	c.send(h.registerMsg(c, p, p.ID.String(), r))
+	c.send(h.registerMsg(c, p, netID(p), r))
 	if m := c.json(); m["type"] != "error" || m["code"] != "rate_limited" {
 		t.Fatalf("got %v", m)
 	}
@@ -241,7 +241,7 @@ func TestIPNetworksLimit(t *testing.T) {
 	h.register(a, a, roster(t, 1, a))
 	h.register(a, a, roster(t, 1, a)) // a known network is not new
 	c := h.dial()
-	c.send(h.registerMsg(c, b, b.ID.String(), roster(t, 1, b)))
+	c.send(h.registerMsg(c, b, netID(b), roster(t, 1, b)))
 	if m := c.json(); m["code"] != "rate_limited" {
 		t.Fatalf("got %v", m)
 	}
@@ -309,7 +309,7 @@ func TestEffectiveRoster(t *testing.T) {
 	// A member offline during a change (it holds version 1) is admitted and brought up to
 	// date: registered carries the relay's version 2, exactly as the primary signed it.
 	c := h.dial()
-	c.send(h.registerMsg(c, w, p.ID.String(), roster(t, 1, p, w)))
+	c.send(h.registerMsg(c, w, netID(p), roster(t, 1, p, w)))
 	m := c.json()
 	if m["type"] != "registered" || m["rosterVersion"] != float64(2) {
 		t.Fatalf("got %v", m)
@@ -327,16 +327,16 @@ func TestEffectiveRoster(t *testing.T) {
 
 	// Presenting the relay's own version: no roster in registered.
 	c = h.dial()
-	c.send(h.registerMsg(c, x, p.ID.String(), r2))
+	c.send(h.registerMsg(c, x, netID(p), r2))
 	if m := c.json(); m["type"] != "registered" || m["roster"] != nil {
 		t.Fatalf("got %v", m)
 	}
 
-	// A newer presented roster, delivered by a worker, replaces the relay's: x is no longer
+	// A newer presented roster, delivered by a member, replaces the relay's: x is no longer
 	// listed and its connection is closed 4008.
 	r3 := roster(t, 3, p, w)
 	wc := h.dial()
-	wc.send(h.registerMsg(wc, w, p.ID.String(), r3))
+	wc.send(h.registerMsg(wc, w, netID(p), r3))
 	if m := wc.json(); m["type"] != "registered" || m["rosterVersion"] != float64(3) || m["roster"] != nil {
 		t.Fatalf("got %v", m)
 	}
@@ -344,22 +344,22 @@ func TestEffectiveRoster(t *testing.T) {
 	// The cache now holds version 3: a node presenting version 2 receives it, and x, listed
 	// by version 2 but not by 3, is closed 4008.
 	pc := h.dial()
-	pc.send(h.registerMsg(pc, p, p.ID.String(), r2))
+	pc.send(h.registerMsg(pc, p, netID(p), r2))
 	if m := pc.json(); m["rosterVersion"] != float64(3) || m["roster"] == nil {
 		t.Fatalf("got %v", m)
 	}
 	xc := h.dial()
-	xc.send(h.registerMsg(xc, x, p.ID.String(), r2))
+	xc.send(h.registerMsg(xc, x, netID(p), r2))
 	xc.expectClose(4008)
 
 	// A newer presented roster that does not list the presenter still replaces the relay's
 	// (the primary signed it), and the presenter is closed 4008.
 	r4 := roster(t, 4, p)
 	wc2 := h.dial()
-	wc2.send(h.registerMsg(wc2, w, p.ID.String(), r4))
+	wc2.send(h.registerMsg(wc2, w, netID(p), r4))
 	wc2.expectClose(4008)
 	wc.expectClose(4008) // w's registered connection is not on version 4 either
-	n := h.s.networkOf(p.ID)
+	n := h.s.networkOf(netKeys(t, p).ID)
 	n.mu.Lock()
 	v := n.roster.Version
 	n.mu.Unlock()

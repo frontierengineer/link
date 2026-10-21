@@ -19,10 +19,10 @@ async fn a_member_flooding_requests_and_not_reading_cannot_grow_the_victim() {
     let victim = &net.primary;
     // A realistic roster (each member some 170 bytes).
     for _ in 0..8 {
-        net.pair_only(MemberKind::Worker).await;
+        net.pair_only().await;
     }
-    let (aid, aroster) = net.pair_only(MemberKind::Surface).await;
-    let honest = net.add(MemberKind::Worker, &[]).await;
+    let (aid, aroster) = net.pair_only().await;
+    let honest = net.add(&[]).await;
     let roster_bytes = victim.roster().size() as u64;
     let mut attacker = RawMember::connect(net.relay.port, aid.clone(), aroster).await;
     let (mut send, remote) = attacker.handshake(victim.id(), victim.roster().version()).await;
@@ -93,8 +93,8 @@ async fn a_member_flooding_requests_and_not_reading_cannot_grow_the_victim() {
 async fn one_members_reset_flood_does_not_starve_an_honest_peers_resets() {
     let net = Net::start(&[], fast()).await;
     let victim = net.primary.id().to_owned();
-    let (hid, hroster) = net.pair_only(MemberKind::Worker).await;
-    let (aid, aroster) = net.pair_only(MemberKind::Worker).await;
+    let (hid, hroster) = net.pair_only().await;
+    let (aid, aroster) = net.pair_only().await;
     sleep_ms(300).await;
     let mut honest = RawMember::connect(net.relay.port, hid, hroster).await;
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -162,10 +162,10 @@ async fn one_members_reset_flood_does_not_starve_an_honest_peers_resets() {
 async fn members_failing_their_own_inits_cannot_block_an_honest_members_handshakes() {
     let net = Net::start(&[], fast()).await;
     let victim = net.primary.id().to_owned();
-    let (hid, hroster) = net.pair_only(MemberKind::Worker).await;
+    let (hid, hroster) = net.pair_only().await;
     let mut attackers = Vec::new();
     for _ in 0..8 {
-        attackers.push(net.pair_only(MemberKind::Worker).await);
+        attackers.push(net.pair_only().await);
     }
     sleep_ms(300).await;
     let version = net.primary.roster().version();
@@ -254,8 +254,8 @@ async fn members_failing_their_own_inits_cannot_block_an_honest_members_handshak
 async fn a_version_claimed_by_an_init_on_the_wrong_key_pushes_no_roster() {
     let net = Net::start(&[], fast()).await;
     let victim = net.primary.id().to_owned();
-    let (aid, aroster) = net.pair_only(MemberKind::Worker).await;
-    net.pair_only(MemberKind::Worker).await;
+    let (aid, aroster) = net.pair_only().await;
+    net.pair_only().await;
     // A first comes as a library member, takes the newest roster, and shows the primary it holds
     // it (a handshake carries the version), so no push to it is owed: one owed would rightly be
     // made again, and show up below.

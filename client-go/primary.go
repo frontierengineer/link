@@ -11,10 +11,13 @@ import (
 	"time"
 )
 
-// The primary: the member that signs the roster. It opens pairing codes and runs the B side
-// of pairing (section 5), revokes (section 8), accepts resignations (section 7.3), pushes
-// every new roster to the relay and the members, and asks the relay for its usage figures
-// (section 4.3: request-only, within the relay's budget).
+// The primary: the member that holds the network seed and that the roster names primary
+// (section 3.1). It signs the roster, opens pairing codes and runs the B side of pairing
+// (section 5), revokes (section 8), accepts resignations (section 7.3), pushes every new
+// roster to the relay and the members, and asks the relay for its usage figures (section
+// 4.3: request-only, within the relay's budget). Being primary is a trait of a member: a node
+// started with the seed claims it (role.go), and one whose roster names another member stops
+// being the primary in place.
 
 const (
 	// CodeLifetime is how long a pairing code admits a node by default.
@@ -33,7 +36,6 @@ const (
 type PairingCode struct {
 	Code      string // display form, XXXX-XXXX
 	CodeID    string // b64u of the 8-byte code id
-	Kind      MemberKind
 	Link      string // frontier://pair?... carrying network, code, code id and relay
 	ExpiresAt time.Time
 }
@@ -72,7 +74,6 @@ type UsageReport struct {
 type openCode struct {
 	code      string
 	codeID    string
-	kind      MemberKind
 	expiresAt time.Time // monotonic (Member.mono)
 	failed    int
 	inFlight  int
@@ -159,25 +160,35 @@ func (ic *issuedCode) answer(channel string, now time.Time) bool {
 // closedCodes: refusals name the last 1024 codes closed (section 5.2).
 const closedCodes = 1024
 
-// Primary is the member that signs the roster.
+// Primary is a member started as the network's primary. Every primary capability is the
+// Member's, and works while the member is the primary: a Primary whose roster comes to name
+// another member goes on as an ordinary member.
 type Primary struct {
 	*Member
 }
 
-// NewPrimary creates the primary and starts connecting; see also ConnectPrimary.
+// NewPrimary creates the primary and starts connecting; see also ConnectPrimary. It needs the
+// network seed (MemberOptions.NetworkSeed). When the roster names another member primary, it
+// claims the primary once registered (section 3.1).
 func NewPrimary(opts MemberOptions) (*Primary, error) {
 	m, err := newMember(opts)
 	if err != nil {
 		return nil, err
 	}
-	if opts.Identity.ID() != opts.Roster.Network {
-		return nil, invalidError("this identity is not the network primary")
+	if m.netKey == nil {
+		return nil, invalidError("the primary needs the network seed")
 	}
-	m.prim = &primaryState{m: m, codes: map[string]*openCode{}, channels: map[string]*pairChannel{}, usage: map[string]chan usageResult{},
-		issued: map[string]*issuedCode{}, retries: map[string]*pushRetry{}}
 	m.start()
 	return &Primary{Member: m}, nil
 }
+
+func newPrimaryState(m *Member) *primaryState {
+	return &primaryState{m: m, codes: map[string]*openCode{}, channels: map[string]*pairChannel{}, usage: map[string]chan usageResult{},
+		issued: map[string]*issuedCode{}, retries: map[string]*pushRetry{}}
+}
+
+// notPrimary is the error of a primary capability asked of a member that is not the primary.
+func notPrimary() error { return invalidError("this node is not the primary") }
 
 // ConnectPrimary creates the primary and returns once it is registered with the relay.
 func ConnectPrimary(ctx context.Context, opts MemberOptions) (*Primary, error) {
@@ -192,21 +203,20 @@ func ConnectPrimary(ctx context.Context, opts MemberOptions) (*Primary, error) {
 	return p, nil
 }
 
-// placeholderMember is an entry of kind with every field at its fixed length, which
-// measures the next roster before the newcomer's keys are known.
-func placeholderMember(kind MemberKind) RosterMember {
-	return RosterMember{ID: strings.Repeat("a", 26), Ed25519: strings.Repeat("A", 43), X25519: strings.Repeat("A", 43), Kind: kind}
+// placeholderMember is an entry with every field at its fixed length, which measures the next
+// roster before the newcomer's keys are known.
+func placeholderMember() RosterMember {
+	return RosterMember{ID: strings.Repeat("a", 26), Ed25519: strings.Repeat("A", 43), X25519: strings.Repeat("A", 43)}
 }
 
-// OpenPairingCode opens a code that admits one node of kind for 15 minutes. When no further
-// member fits under the roster limit it fails with roster-full.
-func (p *Primary) OpenPairingCode(kind MemberKind, opts PairingCodeOptions) (PairingCode, error) {
-	m := p.Member
+// OpenPairingCode opens a code that admits one node for 15 minutes. When no further member
+// fits under the roster limit it fails with roster-full.
+func (m *Member) OpenPairingCode(opts PairingCodeOptions) (PairingCode, error) {
 	m.lock()
 	defer m.unlock()
 	ps := m.prim
-	if !slices.Contains(PairingKinds, kind) {
-		return PairingCode{}, invalidError("kind must be one of worker, surface, mcp")
+	if ps == nil {
+		return PairingCode{}, notPrimary()
 	}
 	var chosen string
 	if opts.Code != "" {
@@ -216,8 +226,8 @@ func (p *Primary) OpenPairingCode(kind MemberKind, opts PairingCodeOptions) (Pai
 		}
 		chosen = c
 	}
-	// Every entry has the same shape, so a placeholder of this kind measures the next roster.
-	size, err := ps.sizeWith(append(slices.Clone(m.roster.Members), placeholderMember(kind)))
+	// Every entry has the same shape, so a placeholder measures the next roster.
+	size, err := m.sizeWith(append(slices.Clone(m.roster.Members), placeholderMember()))
 	if err != nil {
 		return PairingCode{}, err
 	}
@@ -243,17 +253,20 @@ func (p *Primary) OpenPairingCode(kind MemberKind, opts PairingCodeOptions) (Pai
 	if err != nil {
 		return PairingCode{}, err
 	}
-	ps.codes[codeID] = &openCode{code: code, codeID: codeID, kind: kind, expiresAt: m.mono().Add(lifetime)}
+	ps.codes[codeID] = &openCode{code: code, codeID: codeID, expiresAt: m.mono().Add(lifetime)}
 	ps.issued[codeID] = &issuedCode{told: map[string]time.Time{}}
 	display, _ := FormatCode(code)
-	return PairingCode{Code: display, CodeID: codeID, Kind: kind, Link: link, ExpiresAt: expires}, nil
+	return PairingCode{Code: display, CodeID: codeID, Link: link, ExpiresAt: expires}, nil
 }
 
-// CancelPairingCode withdraws an open code.
-func (p *Primary) CancelPairingCode(codeID string) {
-	m := p.Member
+// CancelPairingCode withdraws an open code. On a member that is not the primary it does
+// nothing: it holds no codes.
+func (m *Member) CancelPairingCode(codeID string) {
 	m.lock()
 	defer m.unlock()
+	if m.prim == nil {
+		return
+	}
 	if e := m.prim.codes[codeID]; e != nil {
 		e.burned = true
 	}
@@ -261,21 +274,23 @@ func (p *Primary) CancelPairingCode(codeID string) {
 }
 
 // Revoke removes a member and publishes the roster. It returns the new roster.
-func (p *Primary) Revoke(nodeID string) (*Roster, error) {
-	m := p.Member
+func (m *Member) Revoke(nodeID string) (*Roster, error) {
 	m.lock()
 	defer m.unlock()
+	if m.prim == nil {
+		return nil, notPrimary()
+	}
 	if nodeID == m.identity.ID() {
 		return nil, invalidError("the primary cannot revoke itself")
 	}
 	if m.roster.member(nodeID) == nil {
 		return nil, invalidError(nodeID + " is not on the roster")
 	}
-	next, err := m.prim.nextRoster(withoutMember(m.roster.Members, nodeID))
+	next, err := m.nextRoster(withoutMember(m.roster.Members, nodeID))
 	if err != nil {
 		return nil, err
 	}
-	m.prim.publish(next, "")
+	m.publish(next, "")
 	return next.Clone(), nil
 }
 
@@ -292,8 +307,13 @@ func withoutMember(members []RosterMember, id string) []RosterMember {
 // Usage asks the relay for this network's usage. The relay allows UsageBurst asks at once
 // and then one per UsageInterval per network; beyond that it refuses, and Usage fails with
 // rate-limited. Ask rarely, and keep the answer.
-func (p *Primary) Usage(ctx context.Context) (UsageReport, error) {
-	m := p.Member
+func (m *Member) Usage(ctx context.Context) (UsageReport, error) {
+	m.lock()
+	primary := m.prim != nil
+	m.unlock()
+	if !primary {
+		return UsageReport{}, notPrimary()
+	}
 	idBytes := make([]byte, 9)
 	if _, err := rand.Read(idBytes); err != nil {
 		return UsageReport{}, err
@@ -305,6 +325,10 @@ func (p *Primary) Usage(ctx context.Context) (UsageReport, error) {
 	}
 	done := make(chan usageResult, 1)
 	m.lock()
+	if m.prim == nil {
+		m.unlock()
+		return UsageReport{}, notPrimary()
+	}
 	msg, _ := json.Marshal(map[string]string{"type": "usage", "id": id})
 	if !m.relay.sendControl(msg) {
 		m.unlock()
@@ -317,12 +341,16 @@ func (p *Primary) Usage(ctx context.Context) (UsageReport, error) {
 		return r.report, r.err
 	case <-timeout:
 		m.lock()
-		delete(m.prim.usage, id)
+		if m.prim != nil {
+			delete(m.prim.usage, id)
+		}
 		m.unlock()
 		return UsageReport{}, timeoutError("usage request")
 	case <-ctx.Done():
 		m.lock()
-		delete(m.prim.usage, id)
+		if m.prim != nil {
+			delete(m.prim.usage, id)
+		}
 		m.unlock()
 		return UsageReport{}, ctx.Err()
 	}
@@ -376,37 +404,41 @@ func usageFromTree(v any) (UsageReport, bool) {
 // ── Roster publication ──
 
 // nextUnsigned is the next roster version with members.
-func (ps *primaryState) nextUnsigned(members []RosterMember) UnsignedRoster {
-	prev := ps.m.roster
+func (m *Member) nextUnsigned(members []RosterMember) UnsignedRoster {
+	prev := m.roster
 	members = slices.Clone(members)
 	slices.SortFunc(members, func(a, b RosterMember) int { return cmp.Compare(a.ID, b.ID) })
 	return UnsignedRoster{
-		Network:  prev.Network,
-		Version:  prev.Version + 1,
-		IssuedAt: max(ps.m.clock.Now().UnixMilli(), prev.IssuedAt),
-		Relay:    prev.Relay,
-		Primary:  prev.Primary,
-		Members:  members,
+		Network:    prev.Network,
+		Version:    prev.Version + 1,
+		IssuedAt:   max(m.clock.Now().UnixMilli(), prev.IssuedAt),
+		Relay:      prev.Relay,
+		NetworkKey: prev.NetworkKey,
+		Primary:    prev.Primary,
+		Members:    members,
 	}
 }
 
 // sizeWith is the JCS size the next roster with members would have once signed.
-func (ps *primaryState) sizeWith(members []RosterMember) (int, error) {
-	r := &Roster{UnsignedRoster: ps.nextUnsigned(members), Signature: strings.Repeat("A", 86)}
+func (m *Member) sizeWith(members []RosterMember) (int, error) {
+	r := &Roster{UnsignedRoster: m.nextUnsigned(members), Signature: strings.Repeat("A", 86)}
 	return r.Size()
 }
 
-// nextRoster signs the next roster version with members; over 65000 bytes it fails
-// roster-full.
-func (ps *primaryState) nextRoster(members []RosterMember) (*Roster, error) {
-	size, err := ps.sizeWith(members)
+// nextRoster signs the next roster version with members, with the network key this member
+// holds; over 65000 bytes it fails roster-full.
+func (m *Member) nextRoster(members []RosterMember) (*Roster, error) {
+	if m.netKey == nil {
+		return nil, invalidError("this node does not hold the network seed")
+	}
+	size, err := m.sizeWith(members)
 	if err != nil {
 		return nil, err
 	}
 	if size > MaxRosterBytes {
 		return nil, rosterFullError(size)
 	}
-	return SignRoster(ps.nextUnsigned(members), ps.m.identity)
+	return SignRoster(m.nextUnsigned(members), m.netKey)
 }
 
 // A push of a new roster to a member that fails (the member unreachable, the handshake timed
@@ -456,13 +488,18 @@ func (ps *primaryState) pushed(peer string, version int64, err error) {
 	})
 }
 
-// publish adopts a roster this primary signed and pushes it to the relay and every member.
+// publish adopts a roster this member signed and pushes it to the relay and every member.
 // except, when set, is a newcomer that has the roster already (sealed in P6) and is not
 // connected yet: a push to it would fail and be retried into the middle of its first traffic
-// (section 5.3).
-func (ps *primaryState) publish(r *Roster, except string) {
-	m := ps.m
+// (section 5.3). Pushes that fail are tried again while this member is the primary.
+func (m *Member) publish(r *Roster, except string) {
 	m.adoptRoster(r)
+	m.pushHeld(except)
+}
+
+// pushHeld pushes the roster held to the relay and to every member but except.
+func (m *Member) pushHeld(except string) {
+	r := m.roster
 	rj, err := r.MarshalJSON()
 	if err == nil {
 		m.relay.sendControl(append(append([]byte(`{"type":"roster","roster":`), rj...), '}'))
@@ -485,18 +522,18 @@ func (ps *primaryState) onResign(from string, body []byte) {
 		return
 	}
 	member := m.roster.member(from)
-	if member == nil || member.Kind == KindPrimary {
+	if member == nil || from == m.roster.Primary {
 		return
 	}
 	pub, err := fromB64uLen(member.Ed25519, 32, "ed25519")
 	if err != nil || !verifyResignation(r, m.roster.Network, pub) {
 		return
 	}
-	next, err := ps.nextRoster(withoutMember(m.roster.Members, from))
+	next, err := m.nextRoster(withoutMember(m.roster.Members, from))
 	if err != nil {
 		return
 	}
-	ps.publish(next, "")
+	m.publish(next, "")
 }
 
 // ── Relay control ──
@@ -542,6 +579,27 @@ func (ps *primaryState) onControl(msg controlMessage) bool {
 		return true
 	}
 	return false
+}
+
+// stop ends being the primary, in place (section 3.1): every open code closes, every pairing
+// channel ends (pairEnd to the relay), push retries stop, and usage asks waiting fail. The
+// relay connection stays as it is.
+func (ps *primaryState) stop() {
+	for key := range ps.channels {
+		ps.endChannel(key, FailDemoted, "this node is no longer the primary", true)
+	}
+	for id, c := range ps.codes {
+		c.burned = true
+		ps.closeCode(id)
+	}
+	for id, r := range ps.retries {
+		r.timer.cancel()
+		delete(ps.retries, id)
+	}
+	for id, done := range ps.usage {
+		done <- usageResult{err: invalidError("this node is no longer the primary")}
+		delete(ps.usage, id)
+	}
 }
 
 func (ps *primaryState) onConnectionState(s State) {
@@ -727,8 +785,8 @@ func (ps *primaryState) completePairing(ch *pairChannel, body []byte) error {
 		ps.endChannel(ch.key, FailAlreadyMember, id+" is already a member", true)
 		return nil
 	}
-	member := RosterMember{ID: id, Ed25519: b64u(keys.ed25519), X25519: b64u(keys.x25519), Kind: ch.entry.kind}
-	next, err := ps.nextRoster(append(slices.Clone(m.roster.Members), member))
+	member := RosterMember{ID: id, Ed25519: b64u(keys.ed25519), X25519: b64u(keys.x25519)}
+	next, err := m.nextRoster(append(slices.Clone(m.roster.Members), member))
 	if err != nil {
 		if CodeOf(err) == CodeRosterFull {
 			ps.endChannel(ch.key, FailRosterFull, err.Error(), true)
@@ -747,9 +805,9 @@ func (ps *primaryState) completePairing(ch *pairChannel, body []byte) error {
 	ch.entry.burned = true
 	ps.closeCode(ch.entry.codeID)
 	ps.sendPair(ch, p6)
-	ps.publish(next, id)
+	m.publish(next, id)
 	m.relay.sendControl(pairEndMessage(ch.key))
-	m.emit(PairedEvent{Member: member, Roster: next.Clone()})
+	m.emit(PairedEvent{Member: member, CodeID: ch.entry.codeID, Roster: next.Clone()})
 	return nil
 }
 

@@ -19,9 +19,9 @@ test('a sender that floods a shaped network still has its usage ask answered wit
   // Now about 1.5 s of what the receiver takes (a little more just after the relay's burst).
   const net = await startNet({ env: { LINK_RATE_BPS: '65536' }, member: { timing: { ...FAST, requestTimeoutMs: 10_000 } } });
   try {
-    const worker = await net.add('worker');
-    inbox(worker);
-    const sends = Array.from({ length: 64 }, () => net.primary.send(worker.id, new Uint8Array(65536)).catch(() => undefined));
+    const alice = await net.add();
+    inbox(alice);
+    const sends = Array.from({ length: 64 }, () => net.primary.send(alice.id, new Uint8Array(65536)).catch(() => undefined));
     await new Promise((r) => setTimeout(r, 1500)); // the network is deep in its bucket by now
     const began = Date.now();
     const u = await net.primary.usage();
@@ -52,16 +52,16 @@ test('usage asks: three at once, then refused with RateLimitedError until the bu
 test('credit is batched: bulk small messages bring back few credit frames', async () => {
   const net = await startNet();
   try {
-    const worker = await net.add('worker');
-    const surface = await net.add('surface');
-    const sIn = inbox(surface);
-    worker.resetTraffic();
-    surface.resetTraffic();
+    const alice = await net.add();
+    const bob = await net.add();
+    const sIn = inbox(bob);
+    alice.resetTraffic();
+    bob.resetTraffic();
     const n = 2000;
-    for (let i = 0; i < n; i++) await worker.send(surface.id, new Uint8Array(200).fill(i & 0xff));
+    for (let i = 0; i < n; i++) await alice.send(bob.id, new Uint8Array(200).fill(i & 0xff));
     await sIn.next(n, 30_000);
     await new Promise((r) => setTimeout(r, 400)); // the last batch's timer
-    const back = surface.traffic().peers[worker.id]!.sent;
+    const back = bob.traffic().peers[alice.id]!.sent;
     assert.equal(back.messages, 0);
     assert.ok(back.frames / n < 0.1, `${back.frames} credit frames for ${n} messages`);
   } finally {
@@ -72,23 +72,23 @@ test('credit is batched: bulk small messages bring back few credit frames', asyn
 test('diagnostics in count mode: what the library itself sends trips no rule', async () => {
   const net = await startNet();
   try {
-    const worker = await net.add('worker');
-    const surface = await net.add('surface');
-    const members = [net.primary, worker, surface];
+    const alice = await net.add();
+    const bob = await net.add();
+    const members = [net.primary, alice, bob];
     for (const m of members) enableDiagnostics(m, { mode: 'count', sample: 1 });
-    const sIn = inbox(surface);
-    const wIn = inbox(worker);
+    const sIn = inbox(bob);
+    const wIn = inbox(alice);
     // Raw binary of every size, a few at a time, as an application following the rules sends.
     const random = (n: number) => crypto.getRandomValues(new Uint8Array(n));
     for (let i = 0; i < 20; i++) {
-      await worker.send(surface.id, random(i * 3000 + 1));
-      await surface.send(worker.id, random(500));
+      await alice.send(bob.id, random(i * 3000 + 1));
+      await bob.send(alice.id, random(500));
       await new Promise((r) => setTimeout(r, 50));
     }
-    await worker.send(surface.id, bytesOf('hello'));
+    await alice.send(bob.id, bytesOf('hello'));
     await sIn.next(21);
     await wIn.next(20);
-    await worker.syncRoster();
+    await alice.syncRoster();
     await net.primary.usage();
     for (const m of members) {
       const d = m.diagnostics()!;
@@ -98,7 +98,7 @@ test('diagnostics in count mode: what the library itself sends trips no rule', a
         `${m.id === net.primary.id ? 'primary' : m.id}: ${JSON.stringify(d.counts)}`,
       );
     }
-    assert.ok(surface.diagnostics()!.findings.credits.sentPerMessageReceived < 0.5);
+    assert.ok(bob.diagnostics()!.findings.credits.sentPerMessageReceived < 0.5);
   } finally {
     await net.close();
   }

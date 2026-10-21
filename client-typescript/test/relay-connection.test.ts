@@ -45,7 +45,7 @@ class ScriptedSocket implements WebSocketLike {
 }
 
 const id = identityFromSeed(new Uint8Array(32).fill(4));
-const roster = createNetwork({ identity: id, relay: 'wss://Relay.Example:443/v1', now: 1 });
+const { roster } = createNetwork({ identity: id, relay: 'wss://Relay.Example:443/v1', now: 1 });
 
 function connection(opts: Partial<ConstructorParameters<typeof RelayConnection>[0]> = {}) {
   ScriptedSocket.all = [];
@@ -82,10 +82,11 @@ test('hello -> signed register -> registered; nothing else is sent before regist
   assert.deepEqual(Object.keys(reg).sort(), ['ed25519', 'network', 'node', 'roster', 'sig', 'ts', 'type']);
   assert.equal(reg.type, 'register');
   assert.equal(reg.node, id.id);
-  assert.equal(reg.network, id.id);
+  assert.equal(reg.network, roster.network);
+  assert.notEqual(roster.network, id.id);
   assert.equal(reg.ts, 1790000000000);
   assert.deepEqual(reg.roster, roster);
-  const signed = registerSigningBytes({ network: id.id, node: id.id, challenge, ts: reg.ts, origin: 'relay.example' });
+  const signed = registerSigningBytes({ network: roster.network, node: id.id, challenge, ts: reg.ts, origin: 'relay.example' });
   assert.ok(ed25519Verify(fromB64u(reg.sig), signed, id.ed25519.pub));
   ws.text({ type: 'registered', node: id.id, rosterVersion: 1 });
   assert.equal(rc.state, 'registered');
@@ -156,7 +157,7 @@ test('4009 emits moved, asks for the new location, and dials it', async () => {
   rc.start();
   ScriptedSocket.all[0]!.serverClose(4009);
   await tick(60);
-  assert.deepEqual(moved, [id.id]);
+  assert.deepEqual(moved, [roster.network]);
   assert.equal(ScriptedSocket.all[1]!.url, 'wss://other.example/v1');
   assert.equal(rc.relayUrl, 'wss://other.example/v1');
   rc.close();

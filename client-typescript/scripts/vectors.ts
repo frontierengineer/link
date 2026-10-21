@@ -17,7 +17,7 @@ import {
   handshakeRespBody,
   type SessionMessage,
 } from '../src/frames.js';
-import { identityFromSeed, nodeIdToBytes, type Identity } from '../src/identity.js';
+import { identityFromSeed, networkKeyFromSeed, nodeIdToBytes, type NetworkKey } from '../src/identity.js';
 import { canonicalize } from '../src/jcs.js';
 import { HandshakeState, PATTERNS } from '../src/noise.js';
 import { NewcomerExchange, pairTransportKeys, PrimaryExchange } from '../src/pairing.js';
@@ -53,33 +53,46 @@ function keyVector(seed: string) {
   };
 }
 
-function resign(r: Roster, primary: Identity): Roster {
+function networkKeyVector(networkSeed: string) {
+  const k = networkKeyFromSeed(fromHex(networkSeed));
+  return {
+    networkSeed,
+    ed25519Seed: toHex(k.ed25519.seed),
+    ed25519Public: toHex(k.ed25519.pub),
+    ed25519PublicB64u: b64u(k.ed25519.pub),
+    networkIdBytes: toHex(nodeIdToBytes(k.id)),
+    networkId: k.id,
+  };
+}
+
+function resign(r: Roster, key: NetworkKey): Roster {
   const { signature: _s, ...rest } = r;
-  return { ...rest, signature: b64u(primary.sign(rosterSigningBytes(rest as Roster))) };
+  return { ...rest, signature: b64u(key.sign(rosterSigningBytes(rest as Roster))) };
 }
 
 export function buildVectors(): unknown {
-  const seeds = { primary: seedHex(1), worker: seedHex(2), surface: seedHex(3) };
+  const seeds = { primary: seedHex(1), second: seedHex(2), third: seedHex(3) };
   const primary = identityFromSeed(fromHex(seeds.primary));
-  const worker = identityFromSeed(fromHex(seeds.worker));
-  const surface = identityFromSeed(fromHex(seeds.surface));
+  const second = identityFromSeed(fromHex(seeds.second));
+  const third = identityFromSeed(fromHex(seeds.third));
+  // Network seeds, apart from every node's (section 2).
+  const networkSeeds = { network: seedHex(8), other: '77'.repeat(32) };
+  const net = networkKeyFromSeed(fromHex(networkSeeds.network));
+  const otherNet = networkKeyFromSeed(fromHex(networkSeeds.other));
   const relay = 'wss://eu.frontierengineer.link/v1';
 
   // ── Rosters ──
   const roster = signRoster(
     {
-      network: primary.id,
+      network: net.id,
       version: 12,
       issuedAt: 1790000000000,
       relay,
-      primary: { ed25519: b64u(primary.ed25519.pub) },
-      members: [
-        memberFromIdentity(primary, 'primary'),
-        memberFromIdentity(worker, 'worker'),
-        memberFromIdentity(surface, 'surface'),
-      ],
+      networkKey: b64u(net.ed25519.pub),
+      primary: primary.id,
+      members: [memberFromIdentity(primary), memberFromIdentity(second), memberFromIdentity(third)],
     },
-    primary,
+    net,
   );
   const { signature: _sig, ...unsigned } = roster;
   const clone = () => JSON.parse(JSON.stringify(roster)) as Roster;
@@ -87,43 +100,49 @@ export function buildVectors(): unknown {
   const bad = (name: string, f: (r: Roster) => void, reSign = true) => {
     const r = clone();
     f(r);
-    invalid.push({ name, roster: reSign ? resign(r, primary) : r });
+    invalid.push({ name, roster: reSign ? resign(r, net) : r });
   };
   bad('body changed after signing', (r) => (r.version = 13), false);
-  bad('signature by another key', (r) => (r.signature = b64u(worker.sign(rosterSigningBytes(r)))), false);
-  bad('network not derived from primary.ed25519', (r) => (r.network = worker.id));
+  bad('signature by another key', (r) => (r.signature = b64u(second.sign(rosterSigningBytes(r)))), false);
+  bad("signature by the primary's own node key, not the network key", (r) => (r.signature = b64u(primary.sign(rosterSigningBytes(r)))), false);
+  bad('network not derived from networkKey', (r) => (r.network = otherNet.id));
+  bad("network is the primary's node id (the old rule)", (r) => (r.network = primary.id));
+  bad('networkKey missing', (r) => delete (r as Partial<Roster>).networkKey);
   bad('members not sorted by id', (r) => r.members.reverse());
-  bad('member id not derived from its ed25519', (r) => (r.members.find((m) => m.kind === 'worker')!.id = surface.id));
-  bad('two primary members', (r) => (r.members.find((m) => m.kind === 'worker')!.kind = 'primary'));
-  bad('no primary member', (r) => (r.members = r.members.filter((m) => m.kind !== 'primary')));
-  bad('primary member key differs from primary.ed25519', (r) => {
-    const p = r.members.find((m) => m.kind === 'primary')!;
-    p.kind = 'worker';
-    r.members.find((m) => m.id === worker.id)!.kind = 'primary';
-  });
-  bad('unknown kind', (r) => ((r.members.find((m) => m.kind === 'surface') as { kind: string }).kind = 'admin'));
+  bad('member id not derived from its ed25519', (r) => (r.members.find((m) => m.id === second.id)!.id = third.id));
+  bad('primary missing', (r) => delete (r as Partial<Roster>).primary);
+  bad('primary is not a node id', (r) => (r.primary = 'PRIMARY'));
+  bad('primary is not a member (the network id)', (r) => (r.primary = r.network));
+  bad('primary is not a member (a member removed)', (r) => (r.members = r.members.filter((m) => m.id !== r.primary)));
   bad('version zero', (r) => (r.version = 0));
   for (const v of invalid) {
     if (rosterProblem(v.roster) === null) throw new Error(`invalid roster case passes: ${v.name}`);
   }
-  const unicodeRoster = signRoster({ ...unsigned, relay: 'wss://relé.example/v1?q=ü€😀' }, primary);
+  const unicodeRoster = signRoster({ ...unsigned, relay: 'wss://relé.example/v1?q=ü€😀' }, net);
+  // The same network once the second member claimed the primary (section 3.1): the node that
+  // created the network is an ordinary member; the network key signs it as before.
+  const claimed = signRoster({ ...unsigned, version: 13, primary: second.id }, net);
+  // A field the protocol does not define, on a member: signed like the rest, otherwise ignored.
+  const withLabel = signRoster({ ...unsigned, members: roster.members.map((m) => (m.id === third.id ? { ...m, kind: 'label' } : m)) }, net);
   const otherNetwork = signRoster(
     {
-      network: worker.id,
+      network: otherNet.id,
       version: 20,
       issuedAt: 1790000000000,
       relay,
-      primary: { ed25519: b64u(worker.ed25519.pub) },
-      members: [memberFromIdentity(worker, 'primary')],
+      networkKey: b64u(otherNet.ed25519.pub),
+      primary: second.id,
+      members: [memberFromIdentity(second)],
     },
-    worker,
+    otherNet,
   );
   const acceptance = [
-    { name: 'newer, pinned primary', roster, pinnedPrimary: roster.primary.ed25519, heldVersion: 11 },
-    { name: 'same version', roster, pinnedPrimary: roster.primary.ed25519, heldVersion: 12 },
-    { name: 'older version', roster, pinnedPrimary: roster.primary.ed25519, heldVersion: 13 },
-    { name: 'valid but signed by another primary', roster: otherNetwork, pinnedPrimary: roster.primary.ed25519, heldVersion: 1 },
-  ].map((c) => ({ ...c, accept: acceptanceProblem(c.roster, c.pinnedPrimary, c.heldVersion) === null }));
+    { name: 'newer, pinned network key', roster, pinnedNetworkKey: roster.networkKey, heldVersion: 11 },
+    { name: 'same version', roster, pinnedNetworkKey: roster.networkKey, heldVersion: 12 },
+    { name: 'older version', roster, pinnedNetworkKey: roster.networkKey, heldVersion: 13 },
+    { name: 'another primary, the same network key', roster: claimed, pinnedNetworkKey: roster.networkKey, heldVersion: 12 },
+    { name: 'valid but signed by another network key', roster: otherNetwork, pinnedNetworkKey: roster.networkKey, heldVersion: 1 },
+  ].map((c) => ({ ...c, accept: acceptanceProblem(c.roster, c.pinnedNetworkKey, c.heldVersion) === null }));
 
   // ── Registration and resignation ──
   const challenge = fromHex('9f'.repeat(16) + '01'.repeat(16));
@@ -131,29 +150,29 @@ export function buildVectors(): unknown {
     (url) => {
       const origin = originOf(url);
       const ts = 1790000000123;
-      const bytes = registerSigningBytes({ network: primary.id, node: worker.id, challenge, ts, origin });
+      const bytes = registerSigningBytes({ network: net.id, node: second.id, challenge, ts, origin });
       return {
-        seed: seeds.worker,
+        seed: seeds.second,
         url,
         origin,
-        network: primary.id,
-        node: worker.id,
+        network: net.id,
+        node: second.id,
         challenge: b64u(challenge),
         ts,
         signedBytes: toHex(bytes),
-        sig: b64u(worker.sign(bytes)),
+        sig: b64u(second.sign(bytes)),
       };
     },
   );
   const resignTs = 1790000000456;
-  const resignBytes = resignSigningBytes({ network: primary.id, node: worker.id, ts: resignTs });
+  const resignBytes = resignSigningBytes({ network: net.id, node: second.id, ts: resignTs });
   const resignation = {
-    seed: seeds.worker,
-    network: primary.id,
-    node: worker.id,
+    seed: seeds.second,
+    network: net.id,
+    node: second.id,
     ts: resignTs,
     signedBytes: toHex(resignBytes),
-    sig: b64u(worker.sign(resignBytes)),
+    sig: b64u(second.sign(resignBytes)),
   };
 
   // ── SPAKE2 ──
@@ -187,9 +206,9 @@ export function buildVectors(): unknown {
     {
       ...unsigned,
       version: 13,
-      members: [...roster.members, memberFromIdentity(newcomer, 'mcp')],
+      members: [...roster.members, memberFromIdentity(newcomer)],
     },
-    primary,
+    net,
   );
   const p6 = pb.p6(paired);
   const keys = na.spakeKeys!;
@@ -229,9 +248,9 @@ export function buildVectors(): unknown {
   // ── Noise IK ──
   const iEph = fromHex(seedHex(5));
   const rEph = fromHex(seedHex(6));
-  const prologue = sessionPrologue(primary.id);
-  const init = new HandshakeState({ pattern: PATTERNS.IK, initiator: true, prologue, s: worker.x25519, rs: surface.x25519.pub, fixedEphemeral: iEph });
-  const resp = new HandshakeState({ pattern: PATTERNS.IK, initiator: false, prologue, s: surface.x25519, fixedEphemeral: rEph });
+  const prologue = sessionPrologue(net.id);
+  const init = new HandshakeState({ pattern: PATTERNS.IK, initiator: true, prologue, s: second.x25519, rs: third.x25519.pub, fixedEphemeral: iEph });
+  const resp = new HandshakeState({ pattern: PATTERNS.IK, initiator: false, prologue, s: third.x25519, fixedEphemeral: rEph });
   const initIndex = 0x0badcafe;
   const respIndex = 0x00c0ffee;
   const stamp1 = 1790000000000n;
@@ -241,31 +260,31 @@ export function buildVectors(): unknown {
   const r2 = init.readMessage(m2.message);
   const ti = r2.transport!;
   const tr = m2.transport!;
-  const t1: SessionMessage = { type: 'message', more: false, bytes: utf8('hello surface') };
+  const t1: SessionMessage = { type: 'message', more: false, bytes: utf8('hello') };
   const t2: SessionMessage = { type: 'credit', bytes: 13 };
   const ct1 = ti.send.encryptWithAd(EMPTY, encodeSessionMessage(t1));
   const ct2 = tr.send.encryptWithAd(EMPTY, encodeSessionMessage(t2));
-  const workerPeer = nodeIdToBytes(worker.id);
-  const surfacePeer = nodeIdToBytes(surface.id);
+  const secondPeer = nodeIdToBytes(second.id);
+  const thirdPeer = nodeIdToBytes(third.id);
   const noise = {
     protocol: 'Noise_IK_25519_ChaChaPoly_SHA256',
-    network: primary.id,
+    network: net.id,
     prologue: toHex(prologue),
-    initiator: { node: worker.id, seed: seeds.worker, staticPrivate: toHex(worker.x25519.priv), ephemeralPrivate: toHex(iEph), index: initIndex },
-    responder: { node: surface.id, seed: seeds.surface, staticPrivate: toHex(surface.x25519.priv), ephemeralPrivate: toHex(rEph), index: respIndex },
+    initiator: { node: second.id, seed: seeds.second, staticPrivate: toHex(second.x25519.priv), ephemeralPrivate: toHex(iEph), index: initIndex },
+    responder: { node: third.id, seed: seeds.third, staticPrivate: toHex(third.x25519.priv), ephemeralPrivate: toHex(rEph), index: respIndex },
     message1: {
       payload: toHex(initPayload(12, stamp1)),
       rosterVersion: 12,
       stamp: Number(stamp1),
       noise: toHex(m1.message),
-      frameSent: toHex(encodeFrame(FrameType.HandshakeInit, surfacePeer, handshakeInitBody(initIndex, m1.message))),
-      frameDelivered: toHex(encodeFrame(FrameType.HandshakeInit, workerPeer, handshakeInitBody(initIndex, m1.message))),
+      frameSent: toHex(encodeFrame(FrameType.HandshakeInit, thirdPeer, handshakeInitBody(initIndex, m1.message))),
+      frameDelivered: toHex(encodeFrame(FrameType.HandshakeInit, secondPeer, handshakeInitBody(initIndex, m1.message))),
     },
     message2: {
       payload: toHex(u64be(13)),
       noise: toHex(m2.message),
-      frameSent: toHex(encodeFrame(FrameType.HandshakeResp, workerPeer, handshakeRespBody(respIndex, initIndex, m2.message))),
-      frameDelivered: toHex(encodeFrame(FrameType.HandshakeResp, surfacePeer, handshakeRespBody(respIndex, initIndex, m2.message))),
+      frameSent: toHex(encodeFrame(FrameType.HandshakeResp, secondPeer, handshakeRespBody(respIndex, initIndex, m2.message))),
+      frameDelivered: toHex(encodeFrame(FrameType.HandshakeResp, thirdPeer, handshakeRespBody(respIndex, initIndex, m2.message))),
     },
     handshakeHash: toHex(ti.handshakeHash),
     transport: [
@@ -274,14 +293,14 @@ export function buildVectors(): unknown {
         nonce: 0,
         plaintext: toHex(encodeSessionMessage(t1)),
         ciphertext: toHex(ct1),
-        frameSent: toHex(encodeFrame(FrameType.Data, surfacePeer, dataBody(respIndex, ct1))),
+        frameSent: toHex(encodeFrame(FrameType.Data, thirdPeer, dataBody(respIndex, ct1))),
       },
       {
         direction: 'responder->initiator',
         nonce: 0,
         plaintext: toHex(encodeSessionMessage(t2)),
         ciphertext: toHex(ct2),
-        frameSent: toHex(encodeFrame(FrameType.Data, workerPeer, dataBody(initIndex, ct2))),
+        frameSent: toHex(encodeFrame(FrameType.Data, secondPeer, dataBody(initIndex, ct2))),
       },
     ],
   };
@@ -290,10 +309,10 @@ export function buildVectors(): unknown {
   }
 
   // ── Handshake stamps (section 7.1) ──
-  // The worker's inits to the surface, in order, each with its own ephemeral; the surface,
-  // starting with no stamp for the worker, accepts or refuses each as recorded.
+  // The second member's inits to the third, in order, each with its own ephemeral; the third,
+  // starting with no stamp for the second, accepts or refuses each as recorded.
   const stampInit = (stamp: bigint, eph: number, payload = initPayload(12, stamp)) => {
-    const hs = new HandshakeState({ pattern: PATTERNS.IK, initiator: true, prologue, s: worker.x25519, rs: surface.x25519.pub, fixedEphemeral: fromHex(seedHex(eph)) });
+    const hs = new HandshakeState({ pattern: PATTERNS.IK, initiator: true, prologue, s: second.x25519, rs: third.x25519.pub, fixedEphemeral: fromHex(seedHex(eph)) });
     return { ephemeralPrivate: seedHex(eph), payload: toHex(payload), noise: toHex(hs.writeMessage(payload).message) };
   };
   const T = 1790000000000n;
@@ -330,18 +349,18 @@ export function buildVectors(): unknown {
       { wallNowMs: 1789999999000, lastStamp: 1790000000005, stamp: Number(nextStamp(1789999999000, 1790000000005n)) },
       { wallNowMs: 1790000001000, lastStamp: 1790000000005, stamp: Number(nextStamp(1790000001000, 1790000000005n)) },
     ],
-    initiator: worker.id,
-    responder: surface.id,
+    initiator: second.id,
+    responder: third.id,
     windowMs: Number(W),
-    // The responder started at wall time T with the worker on its roster; step k comes 10 s
+    // The responder started at wall time T with the second on its roster; step k comes 10 s
     // after the one before (both its clocks advance together), at responderWallNowMs, so no
-    // budget is in play. stored is the responder's stamp for the worker after the step.
+    // budget is in play. stored is the responder's stamp for the second after the step.
     responderStartedMs: Number(T),
     steps: steps.map((st, k) => ({ ...st, responderWallNowMs: at(k + 1) })),
   };
 
   // ── Frames and session messages ──
-  const peer = nodeIdToBytes(worker.id);
+  const peer = nodeIdToBytes(second.id);
   const frame = (name: string, type: number, body: Uint8Array) => ({
     name,
     type,
@@ -375,9 +394,11 @@ export function buildVectors(): unknown {
   return {
     description:
       'Link protocol v1 vectors produced by the TypeScript client (client-typescript/scripts/vectors.ts). Byte strings are lowercase hex unless the field name ends in B64u or the spec puts them in JSON as b64u.',
-    keys: [keyVector(seeds.primary), keyVector(seeds.worker), keyVector(seeds.surface), keyVector(seedHex(4))],
+    keys: [keyVector(seeds.primary), keyVector(seeds.second), keyVector(seeds.third), keyVector(seedHex(4))],
+    networkKeys: [networkKeyVector(networkSeeds.network), networkKeyVector(networkSeeds.other)],
     roster: {
       signing: {
+        networkSeed: networkSeeds.network,
         roster,
         jcs: canonicalize(unsigned),
         signedBytes: toHex(rosterSigningBytes(roster)),
@@ -387,6 +408,8 @@ export function buildVectors(): unknown {
       valid: [
         { name: 'three members', roster },
         { name: 'non-ASCII relay URL', roster: unicodeRoster },
+        { name: 'the second member claimed the primary', roster: claimed },
+        { name: 'a member carrying a field the protocol does not define (kind): signed, and otherwise ignored', roster: withLabel },
         { name: 'another network', roster: otherNetwork },
       ],
       invalid,
@@ -396,11 +419,11 @@ export function buildVectors(): unknown {
     resign: resignation,
     pairing: {
       link: {
-        network: primary.id,
+        network: net.id,
         code,
         codeIdB64u: b64u(codeId),
         relay,
-        link: buildPairingLink({ network: primary.id, code, codeId: b64u(codeId), relay }),
+        link: buildPairingLink({ network: net.id, code, codeId: b64u(codeId), relay }),
       },
       codeNormalisation: ['7k2m-9qxz', '7K2M9QXZ', ' 7k2m 9qxz ', 'o1l1-i0OK'].map((input) => ({ input, code: normalizeCode(input) })),
     },

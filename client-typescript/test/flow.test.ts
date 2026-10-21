@@ -5,7 +5,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createIdentity, createNetwork, memberFromIdentity, signRoster, type Identity, type Roster } from '../src/index.js';
+import { createIdentity, createNetwork, memberFromIdentity, networkKeyFromSeed, signRoster, type Identity, type Roster } from '../src/index.js';
 import { FrameType, type SessionMessage } from '../src/frames.js';
 import { CREDIT_BATCH_BYTES, DEFAULT_SESSION_TIMING, INITIAL_CREDIT, PACE_FLOOR_BYTES, PACE_MIN_FRAGMENT, SessionManager } from '../src/sessions.js';
 import { Channel, SOCKET_LOW_WATER, streamSocket, type WebSocketStreamLike } from '../src/socket.js';
@@ -29,17 +29,18 @@ interface Node {
 /** A network of nodes whose frames cross a microtask hop, in order. */
 function mesh(count: number): { nodes: Node[]; drain(n: Node): void } {
   const ids: Identity[] = Array.from({ length: count }, () => createIdentity());
-  const unsigned = createNetwork({ identity: ids[0]!, relay: 'wss://relay.test/v1' });
+  const { roster: unsigned, networkSeed } = createNetwork({ identity: ids[0]!, relay: 'wss://relay.test/v1' });
   const roster: Roster = signRoster(
     {
       network: unsigned.network,
       version: 2,
       issuedAt: unsigned.issuedAt,
       relay: unsigned.relay,
-      primary: unsigned.primary,
-      members: ids.map((id, i) => memberFromIdentity(id, i === 0 ? 'primary' : 'worker')).sort((a, b) => (a.id < b.id ? -1 : 1)),
+      networkKey: unsigned.networkKey,
+      primary: ids[0]!.id,
+      members: ids.map((id) => memberFromIdentity(id)).sort((a, b) => (a.id < b.id ? -1 : 1)),
     },
-    ids[0]!,
+    networkKeyFromSeed(networkSeed),
   );
   const nodes: Node[] = [];
   const byId = new Map<string, Node>();

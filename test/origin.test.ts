@@ -29,9 +29,9 @@ test('members dialling ws://127.0.0.1:443 register with the origin 127.0.0.1', a
   try {
     assert.equal(net.relay.url, 'ws://127.0.0.1:443/v1');
     assert.equal(net.primary.state, 'connected');
-    const worker = await net.add('worker');
+    const alice = await net.add();
     const pIn = inbox(net.primary);
-    await worker.send(net.primary.id, bytesOf('signed without :443'));
+    await alice.send(net.primary.id, bytesOf('signed without :443'));
     assert.equal(new TextDecoder().decode((await pIn.next())[0]!.bytes), 'signed without :443');
   } finally {
     await net.close();

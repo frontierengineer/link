@@ -1,7 +1,9 @@
-//! The primary: the member that signs the roster. It opens pairing codes and runs the B side of
-//! pairing (section 5), revokes (section 8), accepts resignations (section 7.3), pushes every new
-//! roster to the relay and the members, and asks the relay for usage (section 4.3). The
-//! behaviour is the TypeScript client's `Primary`.
+//! The primary: the member that holds the network seed and signs the roster with the network
+//! key. It opens pairing codes and runs the B side of pairing (section 5), revokes (section 8),
+//! accepts resignations (section 7.3), pushes every new roster to the relay and the members, and
+//! asks the relay for usage (section 4.3). Being primary is a trait of a member (section 3.1):
+//! this state comes and goes on the same member, its connection untouched. The behaviour is the
+//! TypeScript client's.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -17,7 +19,7 @@ use crate::frames::{encode_frame, frame_type};
 use crate::identity::node_id_from_ed25519;
 use crate::json::Json;
 use crate::pairing::PrimaryExchange;
-use crate::roster::{MAX_ROSTER_BYTES, MemberKind, Roster, RosterMember, UnsignedRoster, sign_roster, signed_size};
+use crate::roster::{MAX_ROSTER_BYTES, Roster, RosterMember, UnsignedRoster, sign_roster, signed_size};
 use crate::signed::Resignation;
 use crate::types::{CODE_ATTEMPTS, Event, PairingCode, PairingFailure, UsageLimits, UsageReport};
 
@@ -30,7 +32,6 @@ struct OpenCode {
     /// The code itself is the secret SPAKE2 proves: wiped when the code goes.
     code: Zeroizing<String>,
     code_id: [u8; 8],
-    kind: MemberKind,
     /// The same moment on the monotonic clock, which is what is checked: `expires_at` (Unix
     /// milliseconds) is only shown.
     deadline: u64,
@@ -53,7 +54,6 @@ enum Stage {
 struct PairChannel {
     channel: [u8; 16],
     code_id: String,
-    kind: MemberKind,
     exchange: PrimaryExchange,
     stage: Stage,
     claimed: bool,
@@ -184,29 +184,42 @@ fn not_primary() -> LinkError {
     LinkError::invalid("this member is not the network primary")
 }
 
+/// This node stops being the primary (section 3.1): its pairing channels end (`pairEnd`, and
+/// `Demoted`), its usage asks fail, and its codes and pushes go with the state the
+/// caller drops.
+pub(crate) fn stop(node: &mut Node) {
+    let Some(st) = state(node) else {
+        return;
+    };
+    let keys: Vec<String> = st.channels.keys().cloned().collect();
+    let asks: Vec<String> = st.usage.keys().cloned().collect();
+    for k in keys {
+        end_channel(node, &k, PairingFailure::Demoted, "this node is no longer the primary", true);
+    }
+    for id in asks {
+        usage_finish(node, &id, Err(not_primary()));
+    }
+}
+
 // ── Pairing codes ──
 
-/// Opens a code that admits one node of `kind` for `lifetime_ms` (15 minutes by default). The
+/// Opens a code that admits one node for `lifetime_ms` (15 minutes by default). The
 /// code is random unless `code` gives one (any spelling `normalize_code` accepts).
 pub(crate) fn open_pairing_code(
     node: &mut Node,
-    kind: MemberKind,
     lifetime_ms: Option<u64>,
     code: Option<&str>,
 ) -> Result<PairingCode, LinkError> {
     if node.primary.is_none() {
         return Err(not_primary());
     }
-    if !kind.is_pairing_kind() {
-        return Err(LinkError::invalid("kind must be one of worker, surface, mcp"));
-    }
     let chosen = match code {
         Some(c) => Some(normalize_code(c).map_err(LinkError::invalid)?),
         None => None,
     };
-    // Every entry has the same shape, so a placeholder of this kind measures the next roster.
+    // Every entry has the same shape, so a placeholder measures the next roster.
     let mut members = node.roster().members().to_vec();
-    members.push(RosterMember::new(kind, [0; 32], [0; 32]));
+    members.push(RosterMember::new([0; 32], [0; 32]));
     let room = signed_size(&next_unsigned(node, members));
     if room > MAX_ROSTER_BYTES {
         return Err(LinkError::roster_full(room));
@@ -234,7 +247,6 @@ pub(crate) fn open_pairing_code(
         OpenCode {
             code: Zeroizing::new(code),
             code_id: code_id_bytes,
-            kind,
             deadline: mono.saturating_add(lifetime),
             setups: Bucket::default(),
             failed: 0,
@@ -243,7 +255,7 @@ pub(crate) fn open_pairing_code(
             burned: false,
         },
     );
-    Ok(PairingCode { code: display, code_id, kind, link, expires_at })
+    Ok(PairingCode { code: display, code_id, link, expires_at })
 }
 
 /// Withdraws an open code.
@@ -257,31 +269,49 @@ pub(crate) fn cancel_pairing_code(node: &mut Node, code_id: &str) {
 
 // ── Rosters ──
 
-/// The next roster version with `members`, unsigned.
+/// The next roster version with `members`, unsigned, the primary unchanged.
 fn next_unsigned(node: &Node, members: Vec<RosterMember>) -> UnsignedRoster {
+    next_unsigned_naming(node, members, node.roster().primary_id())
+}
+
+/// The next roster version with `members` and `primary`, unsigned.
+fn next_unsigned_naming(node: &Node, members: Vec<RosterMember>, primary: &str) -> UnsignedRoster {
     let prev = node.roster();
     UnsignedRoster {
         network: prev.network().to_owned(),
         version: prev.version() + 1,
         issued_at: node.unix_now().max(prev.issued_at()),
         relay: prev.relay().to_owned(),
-        primary: *prev.primary_key(),
+        network_key: *prev.network_key(),
+        primary: primary.to_owned(),
         members,
     }
 }
 
-/// The next roster version with `members`, signed. RosterFull over 65000 bytes.
-fn next_roster(node: &Node, members: Vec<RosterMember>) -> Result<Roster, LinkError> {
-    let unsigned = next_unsigned(node, members);
+/// The next roster version with `members`, signed with the network key. RosterFull over 65000
+/// bytes; invalid without the network seed.
+pub(crate) fn next_roster(node: &Node, members: Vec<RosterMember>) -> Result<Roster, LinkError> {
+    sign_next(node, next_unsigned(node, members))
+}
+
+/// The next roster version naming `primary`, the members unchanged, signed with the network key.
+pub(crate) fn next_roster_naming(node: &Node, primary: &str) -> Result<Roster, LinkError> {
+    sign_next(node, next_unsigned_naming(node, node.roster().members().to_vec(), primary))
+}
+
+fn sign_next(node: &Node, unsigned: UnsignedRoster) -> Result<Roster, LinkError> {
+    let Some(key) = node.network_key() else {
+        return Err(LinkError::invalid("this node does not hold the network seed"));
+    };
     let size = signed_size(&unsigned);
     if size > MAX_ROSTER_BYTES {
         return Err(LinkError::roster_full(size));
     }
-    sign_roster(&unsigned, &node.identity).map_err(LinkError::invalid)
+    sign_roster(&unsigned, key).map_err(LinkError::invalid)
 }
 
 /// Adopts a roster this primary signed and pushes it to the relay and every member.
-fn publish(node: &mut Node, roster: Roster) {
+pub(crate) fn publish(node: &mut Node, roster: Roster) {
     publish_except(node, roster, None);
 }
 
@@ -403,7 +433,7 @@ pub(crate) fn on_resign(node: &mut Node, from: &str, json: &str) {
     let Some(member) = node.roster().member(from).cloned() else {
         return;
     };
-    if member.kind() == MemberKind::Primary || !r.verify(node.network(), member.ed25519()) {
+    if from == node.roster().primary_id() || !r.verify(node.network(), member.ed25519()) {
         return;
     }
     let members = node.roster().members().iter().filter(|m| m.id() != from).cloned().collect();
@@ -559,13 +589,10 @@ fn on_pairing(node: &mut Node, msg: &Json) {
             .then_some((PairingFailure::NoAttempts, "too many attempts at once; try again")),
     };
     let exchange = match (refusal, st.codes.get(code_id)) {
-        (None, Some(e)) => match PrimaryExchange::new(&e.code, &e.code_id, None) {
-            Ok(x) => Some((x, e.kind)),
-            Err(_) => None,
-        },
+        (None, Some(e)) => PrimaryExchange::new(&e.code, &e.code_id, None).ok(),
         _ => None,
     };
-    let Some((exchange, kind)) = exchange else {
+    let Some(exchange) = exchange else {
         // Refused. A relay can send these as fast as it likes, so the answers are rate-limited
         // and the events are too: none for a code id this primary never opened, and at most one
         // a second per code and reason otherwise.
@@ -590,15 +617,7 @@ fn on_pairing(node: &mut Node, msg: &Json) {
     }
     st.channels.insert(
         key.to_owned(),
-        PairChannel {
-            channel,
-            code_id: code_id.to_owned(),
-            kind,
-            exchange,
-            stage: Stage::P1,
-            claimed: false,
-            deadline,
-        },
+        PairChannel { channel, code_id: code_id.to_owned(), exchange, stage: Stage::P1, claimed: false, deadline },
     );
 }
 
@@ -655,12 +674,11 @@ fn complete_pairing(node: &mut Node, key: &str, body: &[u8]) {
             return fail_attempt(node, key, PairingFailure::Malformed, &format!("malformed pairing message: {e}"));
         }
     };
-    let kind = ch.kind;
     let id = node_id_from_ed25519(&keys.ed25519);
     if node.roster().member(&id).is_some() {
         return end_channel(node, key, PairingFailure::AlreadyMember, &format!("{id} is already a member"), true);
     }
-    let member = RosterMember::new(kind, keys.ed25519, keys.x25519);
+    let member = RosterMember::new(keys.ed25519, keys.x25519);
     let mut members = node.roster().members().to_vec();
     members.push(member.clone());
     let next = match next_roster(node, members) {
@@ -687,7 +705,7 @@ fn complete_pairing(node: &mut Node, key: &str, body: &[u8]) {
     }
     publish_except(node, next.clone(), Some(&id));
     node.send_control_text(&Json::object([("type", Json::str("pairEnd")), ("channel", Json::str(key))]));
-    node.emit(Event::Paired { member, roster: next });
+    node.emit(Event::Paired { member, code_id: ch.code_id, roster: next });
 }
 
 fn send_pair(node: &mut Node, channel: &[u8; 16], body: &[u8]) {

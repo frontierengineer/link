@@ -188,22 +188,32 @@ func TestDriverAgainstTheRelay(t *testing.T) {
 	if ident["seed"] != seed || ident["id"] != float64(1) || len(ident["node"].(string)) != 26 || len(ident["ed25519"].(string)) != 43 {
 		t.Fatalf("identity %v", ident)
 	}
-	roster := pr.ok("createNetwork", map[string]any{"relay": relay})["roster"]
+	created := pr.ok("createNetwork", map[string]any{"relay": relay})
+	roster, netSeed := created["roster"], created["networkSeed"]
+	if raw, err := base64.StdEncoding.DecodeString(netSeed.(string)); err != nil || len(raw) != 32 {
+		t.Fatalf("networkSeed %v", netSeed)
+	}
+	if roster.(map[string]any)["network"] == ident["node"] {
+		t.Fatal("the network id is the primary's node id")
+	}
 	if r := pr.call("state", nil); r["error"].(map[string]any)["code"] != "invalid" {
 		t.Fatalf("state without a node: %v", r)
 	}
-	pr.ok("connect", map[string]any{"role": "primary", "roster": roster, "timing": timing})
+	if r := pr.call("connect", map[string]any{"role": "primary", "roster": roster}); r["error"].(map[string]any)["code"] != "invalid" {
+		t.Fatalf("a primary without the network seed: %v", r)
+	}
+	pr.ok("connect", map[string]any{"role": "primary", "roster": roster, "networkSeed": netSeed, "timing": timing})
 	// Events raised before a reply are written before it.
 	pr.inOrder(
 		func(v map[string]any) bool { return v["event"] == "state" && v["state"] == "connecting" },
 		func(v map[string]any) bool { return v["event"] == "state" && v["state"] == "connected" },
-		func(v map[string]any) bool { return v["id"] == float64(4) && v["ok"] == true },
+		func(v map[string]any) bool { return v["id"] == float64(5) && v["ok"] == true },
 	)
-	if r := pr.call("connect", map[string]any{"role": "primary", "roster": roster}); r["error"].(map[string]any)["code"] != "invalid" {
+	if r := pr.call("connect", map[string]any{"role": "primary", "roster": roster, "networkSeed": netSeed}); r["error"].(map[string]any)["code"] != "invalid" {
 		t.Fatalf("a second node: %v", r)
 	}
-	code := pr.ok("openPairingCode", map[string]any{"kind": "worker"})
-	if code["kind"] != "worker" || !strings.HasPrefix(code["link"].(string), "frontier://pair?") || code["expiresAt"].(float64) < float64(time.Now().UnixMilli()) {
+	code := pr.ok("openPairingCode", nil)
+	if !strings.HasPrefix(code["link"].(string), "frontier://pair?") || code["expiresAt"].(float64) < float64(time.Now().UnixMilli()) {
 		t.Fatalf("code %v", code)
 	}
 
@@ -217,10 +227,12 @@ func TestDriverAgainstTheRelay(t *testing.T) {
 	}
 	pr.event("pairingFailed", func(v map[string]any) bool { return v["reason"] == "wrong-code" && v["codeId"] == code["codeId"] })
 	paired := wk.ok("pair", map[string]any{"link": code["link"]})
-	if paired["pinnedPrimary"] != ident["ed25519"] {
-		t.Fatalf("pinned %v, primary %v", paired["pinnedPrimary"], ident["ed25519"])
+	if paired["pinnedNetworkKey"] != roster.(map[string]any)["networkKey"] {
+		t.Fatalf("pinned %v, network key %v", paired["pinnedNetworkKey"], roster.(map[string]any)["networkKey"])
 	}
-	pr.event("paired", func(v map[string]any) bool { return v["kind"] == "worker" && v["version"] == float64(2) })
+	pr.event("paired", func(v map[string]any) bool {
+		return v["codeId"] == code["codeId"] && v["version"] == float64(2) && len(v["node"].(string)) == 26
+	})
 	wk.ok("connect", map[string]any{"role": "member", "roster": paired["roster"], "timing": timing, "autoTake": false})
 	wid := wk.ok("state", nil)
 	if wid["state"] != "connected" {
@@ -229,7 +241,7 @@ func TestDriverAgainstTheRelay(t *testing.T) {
 	pr.event("roster", func(v map[string]any) bool { return v["roster"].(map[string]any)["version"] == float64(2) })
 
 	// Bytes, and a generated payload over 64 KiB (no bytes in the event, only its hash).
-	pid := roster.(map[string]any)["network"].(string)
+	pid := ident["node"].(string)
 	wk.ok("send", map[string]any{"peer": pid, "bytes": base64.StdEncoding.EncodeToString([]byte("hello"))})
 	m := pr.event("message", func(v map[string]any) bool { return v["size"] == float64(5) })
 	if m["bytes"] != base64.StdEncoding.EncodeToString([]byte("hello")) {
@@ -293,13 +305,62 @@ func TestDriverAgainstTheRelay(t *testing.T) {
 	if r := wk.call("nonsense", nil); r["error"].(map[string]any)["code"] != "internal" {
 		t.Fatalf("unknown command %v", r)
 	}
-	// Revocation reaches the member as a 4008, then its state.
-	pr.ok("revoke", map[string]any{"node": wID})
-	wk.inOrder(
+	// Alice claims the primary (section 3.1): started again with the network seed, it signs
+	// the roster naming itself primary once registered. The relay demotes the former primary in
+	// place: it stays connected and goes on as a member.
+	wRoster := wk.ok("state", nil)["roster"]
+	wk.ok("close", nil)
+	if r := wk.call("connect", map[string]any{"role": "primary", "roster": wRoster, "timing": timing}); r["error"].(map[string]any)["code"] != "invalid" {
+		t.Fatalf("a primary without the network seed %v", r)
+	}
+	wk.ok("connect", map[string]any{"role": "primary", "roster": wRoster, "networkSeed": netSeed, "timing": timing})
+	claimed := pr.event("roster", func(v map[string]any) bool { return v["roster"].(map[string]any)["primary"] == wID })["roster"].(map[string]any)
+	if len(claimed["members"].([]any)) != 2 {
+		t.Fatalf("the claim changed the members %v", claimed)
+	}
+	pr.mu.Lock()
+	for _, v := range pr.lines {
+		if v["event"] == "disconnect" || v["event"] == "state" && v["state"] != "connecting" && v["state"] != "connected" {
+			t.Errorf("the claim disconnected the former primary: %v", v)
+		}
+	}
+	pr.mu.Unlock()
+	eventually := func(what string, cond func() bool) {
+		for deadline := time.Now().Add(10 * time.Second); !cond(); time.Sleep(5 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for %s", what)
+			}
+		}
+	}
+	eventually("the claim", func() bool { return wk.ok("state", nil)["primary"] == true })
+	if ps := pr.ok("state", nil); ps["primary"] != false || ps["state"] != "connected" {
+		t.Fatalf("former primary state %v", ps)
+	}
+	if r := pr.call("openPairingCode", nil); r["error"].(map[string]any)["code"] != "invalid" {
+		t.Fatalf("a code from the former primary %v", r)
+	}
+	if r := pr.call("usage", nil); r["error"].(map[string]any)["code"] != "invalid" {
+		t.Fatalf("usage from the former primary %v", r)
+	}
+	wk.ok("openPairingCode", nil)
+	wk.ok("send", map[string]any{"peer": pid, "bytes": base64.StdEncoding.EncodeToString([]byte("after the claim"))})
+	pr.event("message", func(v map[string]any) bool {
+		return v["bytes"] == base64.StdEncoding.EncodeToString([]byte("after the claim"))
+	})
+	pr.ok("send", map[string]any{"peer": wID, "bytes": base64.StdEncoding.EncodeToString([]byte("back"))})
+	wk.event("message", func(v map[string]any) bool { return v["bytes"] == base64.StdEncoding.EncodeToString([]byte("back")) })
+	if wk.ok("usage", nil)["network"].(map[string]any)["connections"] != float64(2) {
+		t.Fatal("usage of the new primary")
+	}
+
+	// Revocation reaches the member as a 4008, then its state: the new primary revokes the
+	// former one. Its only disconnect is this one.
+	wk.ok("revoke", map[string]any{"node": pid})
+	pr.inOrder(
 		func(v map[string]any) bool { return v["event"] == "disconnect" && v["code"] == float64(4008) },
 		func(v map[string]any) bool { return v["event"] == "state" && v["state"] == "revoked" },
 	)
-	if r := wk.call("send", map[string]any{"peer": pid, "bytes": ""}); r["error"].(map[string]any)["code"] != "revoked" {
+	if r := pr.call("send", map[string]any{"peer": wID, "bytes": ""}); r["error"].(map[string]any)["code"] != "revoked" {
 		t.Fatalf("send after revoke %v", r)
 	}
 

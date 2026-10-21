@@ -149,6 +149,7 @@ type liveNet struct {
 	primary *Primary
 	members []*Member
 	timing  Timing
+	seed    []byte // the network seed
 }
 
 func ctxT(t *testing.T, d time.Duration) context.Context {
@@ -161,15 +162,15 @@ func startLiveNet(t *testing.T, env map[string]string, timing Timing) *liveNet {
 	t.Helper()
 	r := startRelay(t, env)
 	id, _ := NewIdentity()
-	roster, err := CreateNetwork(id, r.url, time.Now())
+	roster, seed, err := CreateNetwork(id, r.url, time.Now(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	p, err := ConnectPrimary(ctxT(t, 15*time.Second), MemberOptions{Identity: id, Roster: roster, Timing: timing})
+	p, err := ConnectPrimary(ctxT(t, 15*time.Second), MemberOptions{Identity: id, Roster: roster, Timing: timing, NetworkSeed: seed})
 	if err != nil {
 		t.Fatal(err)
 	}
-	n := &liveNet{t: t, relay: r, primary: p, timing: timing}
+	n := &liveNet{t: t, relay: r, primary: p, timing: timing, seed: seed}
 	t.Cleanup(func() {
 		for _, m := range n.members {
 			m.Close()
@@ -179,11 +180,11 @@ func startLiveNet(t *testing.T, env map[string]string, timing Timing) *liveNet {
 	return n
 }
 
-// pairOnly pairs a new node of kind and returns its identity and roster, unconnected.
-func (n *liveNet) pairOnly(kind MemberKind) (*Identity, *Roster) {
+// pairOnly pairs a new node and returns its identity and roster, unconnected.
+func (n *liveNet) pairOnly() (*Identity, *Roster) {
 	n.t.Helper()
 	id, _ := NewIdentity()
-	code, err := n.primary.OpenPairingCode(kind, PairingCodeOptions{})
+	code, err := n.primary.OpenPairingCode(PairingCodeOptions{})
 	if err != nil {
 		n.t.Fatal(err)
 	}
@@ -191,16 +192,16 @@ func (n *liveNet) pairOnly(kind MemberKind) (*Identity, *Roster) {
 	if err != nil {
 		n.t.Fatal(err)
 	}
-	if res.PinnedPrimary != res.Roster.Primary.Ed25519 || res.Roster.member(id.ID()) == nil {
+	if res.PinnedNetworkKey != res.Roster.NetworkKey || res.Roster.member(id.ID()) == nil {
 		n.t.Fatal("pair result")
 	}
 	return id, res.Roster
 }
 
 // add pairs a node and connects it; the others learn the roster before it returns.
-func (n *liveNet) add(kind MemberKind, mutate ...func(*MemberOptions)) *Member {
+func (n *liveNet) add(mutate ...func(*MemberOptions)) *Member {
 	n.t.Helper()
-	id, roster := n.pairOnly(kind)
+	id, roster := n.pairOnly()
 	o := MemberOptions{Identity: id, Roster: roster, Timing: n.timing}
 	for _, f := range mutate {
 		f(&o)
@@ -230,17 +231,13 @@ func (n *liveNet) track(m *Member) *Member {
 func TestLivePairingAndSessionsEveryWay(t *testing.T) {
 	n := startLiveNet(t, nil, fast)
 	pLog := record(n.primary.Member)
-	w := n.add(KindWorker)
-	s := n.add(KindSurface)
+	w := n.add()
+	s := n.add()
 	if v := n.primary.Roster().Version; v != 3 {
 		t.Fatalf("version %d", v)
 	}
-	kinds := map[string]MemberKind{}
-	for _, m := range s.Roster().Members {
-		kinds[m.ID] = m.Kind
-	}
-	if kinds[w.ID()] != KindWorker || kinds[s.ID()] != KindSurface || kinds[n.primary.ID()] != KindPrimary {
-		t.Fatalf("kinds %v", kinds)
+	if ro := s.Roster(); ro.Primary != n.primary.ID() || ro.member(w.ID()) == nil || ro.member(s.ID()) == nil {
+		t.Fatalf("roster %+v", ro.UnsignedRoster)
 	}
 	all := []*Member{n.primary.Member, w, s}
 	for _, from := range all {
@@ -270,8 +267,8 @@ func TestLivePairingAndSessionsEveryWay(t *testing.T) {
 
 func TestLiveLargeMessagesAndFlowControl(t *testing.T) {
 	n := startLiveNet(t, nil, fast)
-	w := n.add(KindWorker)
-	s := n.add(KindSurface)
+	w := n.add()
+	s := n.add()
 	big := pattern(6*1024*1024+17, 3)
 	got := make(chan InboundMessage, 4)
 	s.OnMessage(func(m InboundMessage) { got <- m })
@@ -298,7 +295,7 @@ func TestLiveLargeMessagesAndFlowControl(t *testing.T) {
 	}
 
 	// Credit: a receiver that takes nothing holds its senders.
-	x := n.add(KindMCP)
+	x := n.add()
 	msgs := [][]byte{bytes.Repeat([]byte{1}, 700*1024), bytes.Repeat([]byte{2}, 700*1024), bytes.Repeat([]byte{3}, 700*1024)}
 	for _, m := range msgs[:2] {
 		if err := w.Send(ctxT(t, 10*time.Second), x.ID(), m); err != nil {
@@ -348,8 +345,8 @@ func TestLiveRekeyAndReset(t *testing.T) {
 	timing.RekeyInterval = 250 * time.Millisecond
 	timing.RetireGrace = time.Second
 	n := startLiveNet(t, nil, timing)
-	w := n.add(KindWorker)
-	s := n.add(KindSurface)
+	w := n.add()
+	s := n.add()
 	indices := map[uint32]bool{}
 	for i := range 40 {
 		if err := w.Send(ctxT(t, 10*time.Second), s.ID(), []byte(fmt.Sprintf("w%d", i))); err != nil {
@@ -381,14 +378,14 @@ func TestLiveRekeyAndReset(t *testing.T) {
 
 func TestLiveResetAfterAPeerLosesItsState(t *testing.T) {
 	n := startLiveNet(t, nil, fast)
-	w := n.add(KindWorker)
-	s := n.add(KindSurface)
+	w := n.add()
+	s := n.add()
 	if err := w.Send(ctxT(t, 10*time.Second), s.ID(), []byte("one")); err != nil {
 		t.Fatal(err)
 	}
 	recv(t, s)
 	before := currentIndex(w, s.ID())
-	// The surface restarts with no sessions; the worker's next frame is answered reset.
+	// Bob restarts with no sessions; alice's next frame is answered reset.
 	id, roster := s.Identity(), s.Roster()
 	s.Close()
 	time.Sleep(100 * time.Millisecond)
@@ -396,7 +393,7 @@ func TestLiveResetAfterAPeerLosesItsState(t *testing.T) {
 	if err := w.Send(ctxT(t, 10*time.Second), s.ID(), []byte("lost")); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "the worker to drop the session", func() bool { return len(w.Sessions(s.ID())) == 0 })
+	eventually(t, "alice to drop the session", func() bool { return len(w.Sessions(s.ID())) == 0 })
 	if err := w.Send(ctxT(t, 10*time.Second), s.ID(), []byte("two")); err != nil {
 		t.Fatal(err)
 	}
@@ -419,9 +416,9 @@ func mustConnect(t *testing.T, o MemberOptions) *Member {
 
 func TestLiveRevocationResignationAnd4005(t *testing.T) {
 	n := startLiveNet(t, nil, fast)
-	w := n.add(KindWorker)
-	s := n.add(KindSurface)
-	x := n.add(KindMCP)
+	w := n.add()
+	s := n.add()
+	x := n.add()
 	if err := s.Send(ctxT(t, 10*time.Second), w.ID(), []byte("before")); err != nil {
 		t.Fatal(err)
 	}
@@ -432,9 +429,9 @@ func TestLiveRevocationResignationAnd4005(t *testing.T) {
 		t.Fatalf("revoke %v", err)
 	}
 	eventually(t, "revoked", func() bool { return s.State() == StateRevoked })
-	eventually(t, "the worker to learn", func() bool { return w.Roster().Version == 5 })
+	eventually(t, "alice to learn", func() bool { return w.Roster().Version == 5 })
 	if len(w.Sessions(s.ID())) != 0 {
-		t.Fatal("the worker kept a session with the revoked member")
+		t.Fatal("alice kept a session with the revoked member")
 	}
 	if err := w.Send(ctxT(t, 5*time.Second), s.ID(), []byte("x")); CodeOf(err) != CodeInvalid {
 		t.Fatal(err)
@@ -467,9 +464,9 @@ func TestLiveRevocationResignationAnd4005(t *testing.T) {
 	eventually(t, "4008", func() bool {
 		return slices.Contains(xLog.codes(), CloseNotMember) || slices.Contains(xLog.codes(), CloseNormal)
 	})
-	eventually(t, "the worker to learn", func() bool { return w.Roster().Version == 6 })
+	eventually(t, "alice to learn", func() bool { return w.Roster().Version == 6 })
 
-	// 4005: a second copy of the worker replaces the first, which stops for good.
+	// 4005: a second copy of alice replaces the first, which stops for good.
 	wLog := record(w)
 	cp := n.track(mustConnect(t, MemberOptions{Identity: w.Identity(), Roster: w.Roster(), Timing: fast}))
 	eventually(t, "replaced", func() bool { return w.State() == StateReplaced })
@@ -493,9 +490,9 @@ func TestLiveRevocationResignationAnd4005(t *testing.T) {
 
 func TestLiveUnreachableAndRefused(t *testing.T) {
 	n := startLiveNet(t, map[string]string{"LINK_NETWORK_TTL": "500ms"}, fast)
-	w := n.add(KindWorker)
-	absent, _ := n.pairOnly(KindMCP)
-	eventually(t, "the worker to learn of the mcp", func() bool { return w.Roster().member(absent.ID()) != nil })
+	w := n.add()
+	absent, _ := n.pairOnly()
+	eventually(t, "alice to learn of carol", func() bool { return w.Roster().member(absent.ID()) != nil })
 	start := time.Now()
 	if err := w.Send(ctxT(t, 5*time.Second), absent.ID(), []byte("x")); CodeOf(err) != CodeUnreachable {
 		t.Fatal(err)
@@ -506,7 +503,7 @@ func TestLiveUnreachableAndRefused(t *testing.T) {
 	// A member whose roster lacks the sender refuses it, then catches up from the primary.
 	wID, wRoster := w.Identity(), w.Roster()
 	w.Close()
-	s := n.add(KindSurface) // a roster the worker never saw
+	s := n.add() // a roster alice never saw
 	sID, sRoster := s.Identity(), s.Roster()
 	pID, pRoster := n.primary.Identity(), n.primary.Roster()
 	s.Close()
@@ -522,7 +519,7 @@ func TestLiveUnreachableAndRefused(t *testing.T) {
 	if w2.Roster().Version != wRoster.Version {
 		t.Fatal("caught up without the primary")
 	}
-	p2, err := ConnectPrimary(ctxT(t, 10*time.Second), MemberOptions{Identity: pID, Roster: pRoster, Timing: fast})
+	p2, err := ConnectPrimary(ctxT(t, 10*time.Second), MemberOptions{Identity: pID, Roster: pRoster, Timing: fast, NetworkSeed: n.seed})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,16 +538,16 @@ func TestLiveUnreachableAndRefused(t *testing.T) {
 
 func TestLiveRevocationSpreadsWithThePrimaryOffline(t *testing.T) {
 	n := startLiveNet(t, map[string]string{"LINK_NETWORK_TTL": "300ms"}, fast)
-	wID, _ := n.pairOnly(KindWorker)
-	tID, _ := n.pairOnly(KindSurface)
-	xID, before := n.pairOnly(KindWorker)
+	wID, _ := n.pairOnly()
+	tID, _ := n.pairOnly()
+	xID, before := n.pairOnly()
 	w := n.track(mustConnect(t, MemberOptions{Identity: wID, Roster: n.primary.Roster(), Timing: fast}))
 	tRoster := n.primary.Roster()
 	if _, err := n.primary.Revoke(xID.ID()); err != nil {
 		t.Fatal(err)
 	}
 	after := n.primary.Roster().Version
-	eventually(t, "the worker to learn", func() bool { return w.Roster().Version == after })
+	eventually(t, "alice to learn", func() bool { return w.Roster().Version == after })
 	wRoster := w.Roster()
 	w.Close()
 	n.primary.Close()
@@ -563,8 +560,8 @@ func TestLiveRevocationSpreadsWithThePrimaryOffline(t *testing.T) {
 		t.Fatal(err)
 	}
 	recv(t, x)
-	// The worker returns with the revocation; the primary stays away. The tablet learns it
-	// from the worker alone, then refuses the phone by itself.
+	// Alice returns with the revocation; the primary stays away. The tablet learns it
+	// from alice alone, then refuses the phone by itself.
 	w2 := n.track(mustConnect(t, MemberOptions{Identity: wID, Roster: wRoster, Timing: fast}))
 	if err := tm.Send(ctxT(t, 5*time.Second), w2.ID(), []byte("hello")); err != nil {
 		t.Fatal(err)
@@ -579,7 +576,7 @@ func TestLiveRevocationSpreadsWithThePrimaryOffline(t *testing.T) {
 func TestLivePairingCodes(t *testing.T) {
 	n := startLiveNet(t, nil, fast)
 	pLog := record(n.primary.Member)
-	code, err := n.primary.OpenPairingCode(KindWorker, PairingCodeOptions{})
+	code, err := n.primary.OpenPairingCode(PairingCodeOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -611,7 +608,7 @@ func TestLivePairingCodes(t *testing.T) {
 		return count >= CodeAttempts+1
 	})
 	// A used code admits one node; a chosen code pairs in any spelling.
-	c2, _ := n.primary.OpenPairingCode(KindSurface, PairingCodeOptions{Code: "2b2b-2b2b"})
+	c2, _ := n.primary.OpenPairingCode(PairingCodeOptions{Code: "2b2b-2b2b"})
 	l2, _ := ParsePairingLink(c2.Link)
 	l2.Code = "2b2b 2b2b"
 	if _, err := Pair(ctxT(t, 10*time.Second), PairOptions{Target: &l2, Identity: id}); err != nil {
@@ -622,12 +619,12 @@ func TestLivePairingCodes(t *testing.T) {
 		t.Fatalf("a used code paired again: %v", err)
 	}
 	// A cancelled code fails; an absent primary is unreachable.
-	c3, _ := n.primary.OpenPairingCode(KindMCP, PairingCodeOptions{})
+	c3, _ := n.primary.OpenPairingCode(PairingCodeOptions{})
 	n.primary.CancelPairingCode(c3.CodeID)
 	if _, err := Pair(ctxT(t, 10*time.Second), PairOptions{Link: c3.Link, Identity: other}); CodeOf(err) != CodePairing {
 		t.Fatalf("a cancelled code paired: %v", err)
 	}
-	c4, _ := n.primary.OpenPairingCode(KindMCP, PairingCodeOptions{})
+	c4, _ := n.primary.OpenPairingCode(PairingCodeOptions{})
 	n.primary.Close()
 	time.Sleep(100 * time.Millisecond)
 	if _, err := Pair(ctxT(t, 10*time.Second), PairOptions{Link: c4.Link, Identity: other}); CodeOf(err) != CodeUnreachable {
@@ -640,8 +637,8 @@ func TestLivePairingCodes(t *testing.T) {
 
 func TestLiveUsageAndControlFrames(t *testing.T) {
 	n := startLiveNet(t, nil, fast)
-	w := n.add(KindWorker)
-	s := n.add(KindSurface)
+	w := n.add()
+	s := n.add()
 	u, err := n.primary.Usage(ctxT(t, 10*time.Second))
 	if err != nil {
 		t.Fatal(err)
@@ -668,16 +665,18 @@ func TestLiveUsageAndControlFrames(t *testing.T) {
 func TestLiveRosterAtTheLimitTravelsEverywhere(t *testing.T) {
 	r := startRelay(t, nil)
 	id, _ := NewIdentity()
+	seed, _ := NewNetworkSeed()
+	key, _ := NetworkKeyFromSeed(seed)
 	fake := func() RosterMember {
 		pub := make([]byte, 32)
 		x := make([]byte, 32)
 		rand.Read(pub)
 		rand.Read(x)
-		return RosterMember{ID: NodeIDFromEd25519(pub), Ed25519: b64u(pub), X25519: b64u(x), Kind: KindMCP}
+		return RosterMember{ID: NodeIDFromEd25519(pub), Ed25519: b64u(pub), X25519: b64u(x)}
 	}
 	sign := func(members []RosterMember) *Roster {
-		ro, err := SignRoster(UnsignedRoster{Network: id.ID(), Version: 1, IssuedAt: time.Now().UnixMilli(), Relay: r.url,
-			Primary: RosterPrimary{Ed25519: b64u(id.edPub)}, Members: append([]RosterMember{MemberFromIdentity(id, KindPrimary)}, members...)}, id)
+		ro, err := SignRoster(UnsignedRoster{Network: key.ID(), Version: 1, IssuedAt: time.Now().UnixMilli(), Relay: r.url,
+			NetworkKey: b64u(key.edPub), Primary: id.ID(), Members: append([]RosterMember{MemberFromIdentity(id)}, members...)}, key)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -691,26 +690,26 @@ func TestLiveRosterAtTheLimitTravelsEverywhere(t *testing.T) {
 	for range (MaxRosterBytes-base)/entry - 1 { // room for two more
 		fakes = append(fakes, fake())
 	}
-	p, err := ConnectPrimary(ctxT(t, 15*time.Second), MemberOptions{Identity: id, Roster: sign(fakes), Timing: fast})
+	p, err := ConnectPrimary(ctxT(t, 15*time.Second), MemberOptions{Identity: id, Roster: sign(fakes), Timing: fast, NetworkSeed: seed})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer p.Close()
 	pLog := record(p.Member)
-	codes := map[MemberKind]PairingCode{}
-	for _, k := range PairingKinds {
-		if codes[k], err = p.OpenPairingCode(k, PairingCodeOptions{}); err != nil {
+	codes := make([]PairingCode, 3)
+	for k := range codes {
+		if codes[k], err = p.OpenPairingCode(PairingCodeOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	wID, _ := NewIdentity()
-	res, err := Pair(ctxT(t, 20*time.Second), PairOptions{Link: codes[KindWorker].Link, Identity: wID})
+	res, err := Pair(ctxT(t, 20*time.Second), PairOptions{Link: codes[0].Link, Identity: wID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The primary is busy handing v2 to some 400 members (a handshake each, every one of them
 	// unreachable), which takes seconds under the race detector, and longer on a loaded
-	// machine: the worker's handshake gets a minute.
+	// machine: alice's handshake gets a minute.
 	slow := fast
 	slow.HandshakeTimeout = time.Minute
 	w := mustConnect(t, MemberOptions{Identity: wID, Roster: res.Roster, Timing: slow})
@@ -719,31 +718,31 @@ func TestLiveRosterAtTheLimitTravelsEverywhere(t *testing.T) {
 		t.Fatal(err)
 	}
 	recv(t, p.Member)
-	// The last member that fits: v3 is just under the limit and reaches the worker in a session.
+	// The last member that fits: v3 is just under the limit and reaches alice in a session.
 	sID, _ := NewIdentity()
-	if _, err := Pair(ctxT(t, 20*time.Second), PairOptions{Link: codes[KindSurface].Link, Identity: sID}); err != nil {
+	if _, err := Pair(ctxT(t, 20*time.Second), PairOptions{Link: codes[1].Link, Identity: sID}); err != nil {
 		t.Fatal(err)
 	}
 	size, _ := p.Roster().Size()
 	if p.Roster().Version != 3 || size > MaxRosterBytes || size <= MaxRosterBytes-entry {
 		t.Fatalf("v%d is %d bytes", p.Roster().Version, size)
 	}
-	eventually(t, "the worker to receive v3 in a session", func() bool { return w.Roster().Version == 3 })
+	eventually(t, "alice to receive v3 in a session", func() bool { return w.Roster().Version == 3 })
 	// It travels in register (and would in registered).
 	w.Close()
 	w2 := mustConnect(t, MemberOptions{Identity: wID, Roster: w.Roster(), Timing: fast})
 	defer w2.Close()
-	// The restarted worker opens a fresh session (the primary's old one would be reset).
+	// The restarted alice opens a fresh session (the primary's old one would be reset).
 	if err := w2.Send(ctxT(t, 5*time.Second), p.ID(), []byte("back")); err != nil {
 		t.Fatal(err)
 	}
 	recv(t, p.Member)
 	// No room left: a new code is refused at once, and a code opened earlier fails at P5.
-	if _, err := p.OpenPairingCode(KindMCP, PairingCodeOptions{}); CodeOf(err) != CodeRosterFull {
+	if _, err := p.OpenPairingCode(PairingCodeOptions{}); CodeOf(err) != CodeRosterFull {
 		t.Fatalf("got %v", err)
 	}
 	other, _ := NewIdentity()
-	if _, err := Pair(ctxT(t, 20*time.Second), PairOptions{Link: codes[KindMCP].Link, Identity: other}); CodeOf(err) != CodePairing {
+	if _, err := Pair(ctxT(t, 20*time.Second), PairOptions{Link: codes[2].Link, Identity: other}); CodeOf(err) != CodePairing {
 		t.Fatalf("got %v", err)
 	}
 	eventually(t, "pairingFailed", func() bool {
@@ -777,8 +776,8 @@ func TestLiveRosterAtTheLimitTravelsEverywhere(t *testing.T) {
 // middle of its first traffic (section 5.3).
 func TestLiveThePrimaryDoesNotPushTheRosterToTheNewcomer(t *testing.T) {
 	n := startLiveNet(t, nil, fast)
-	w := n.add(KindWorker)
-	id, roster := n.pairOnly(KindSurface) // paired, not connected
+	w := n.add()
+	id, roster := n.pairOnly() // paired, not connected
 	time.Sleep(200 * time.Millisecond)
 	locked(n.primary.Member, func() {
 		ps := n.primary.sess.peers[id.ID()]
@@ -790,7 +789,7 @@ func TestLiveThePrimaryDoesNotPushTheRosterToTheNewcomer(t *testing.T) {
 		}
 	})
 	// The others got it.
-	eventually(t, "the worker to hold the new roster", func() bool { return w.Roster().Version == roster.Version })
+	eventually(t, "alice to hold the new roster", func() bool { return w.Roster().Version == roster.Version })
 	// The newcomer connects and talks with nothing from the primary in the way.
 	s := n.track(mustConnect(t, MemberOptions{Identity: id, Roster: roster, Timing: fast}))
 	s.ResetTraffic()

@@ -14,7 +14,7 @@ use crate::bytes::u32be;
 use crate::errors::ErrorCode;
 use crate::frames::{MAX_FRAME, SessionMessage, data_body, handshake_init_body, parse_handshake_resp, session_type};
 use crate::noise::{HandshakeOptions, HandshakeState, IK, KeyPair, Transport};
-use crate::roster::{MemberKind, RosterMember, UnsignedRoster, sign_roster};
+use crate::roster::{RosterMember, UnsignedRoster, sign_roster};
 use crate::types::{INITIAL_CREDIT, MAX_FRAGMENT, MAX_MESSAGE, SOCKET_LOW_WATER};
 
 // ── The fakes ──
@@ -135,7 +135,33 @@ fn timing() -> Timing {
     Timing::default()
 }
 
+/// The network seed of the network `creator` made, in these tests: apart from its node seed.
+fn net_seed(creator: &Identity) -> [u8; 32] {
+    let mut s = *creator.seed();
+    for b in &mut s {
+        *b ^= 0x80;
+    }
+    s
+}
+
+fn net_key(creator: &Identity) -> NetworkKey {
+    NetworkKey::from_seed(&net_seed(creator))
+}
+
 fn make(identity: &Identity, roster: &Roster, primary: bool, clock: &Arc<FakeClock>, t: Timing, resolver: bool) -> T {
+    let seed = primary.then(|| net_seed(identity));
+    make_with(identity, roster, primary, seed, clock, t, resolver)
+}
+
+fn make_with(
+    identity: &Identity,
+    roster: &Roster,
+    primary: bool,
+    network_seed: Option<[u8; 32]>,
+    clock: &Arc<FakeClock>,
+    t: Timing,
+    resolver: bool,
+) -> T {
     let (events, rx) = broadcast::channel(65536);
     let (state, _) = watch::channel(MemberState::Disconnected);
     let (seen, _) = watch::channel(0);
@@ -143,7 +169,8 @@ fn make(identity: &Identity, roster: &Roster, primary: bool, clock: &Arc<FakeClo
         NodeConfig {
             identity: identity.clone(),
             roster: roster.clone(),
-            pinned_primary: None,
+            pinned_network_key: None,
+            network_seed,
             relay_url: Some("ws://127.0.0.1:9/v1".into()),
             credit_window: INITIAL_CREDIT,
             timing: t,
@@ -301,29 +328,38 @@ struct World {
     a: Identity,
     b: Identity,
     roster: Roster,
+    /// The network id: derived from the network's own seed, not the primary's node id.
+    net: String,
 }
 
-fn roster_with(p: &Identity, version: u64, others: &[(&Identity, MemberKind)]) -> Roster {
-    let mut members = vec![RosterMember::from_identity(p, MemberKind::Primary)];
-    members.extend(others.iter().map(|(i, k)| RosterMember::from_identity(i, *k)));
+fn roster_with(p: &Identity, version: u64, others: &[&Identity]) -> Roster {
+    let mut members = vec![RosterMember::from_identity(p)];
+    members.extend(others.iter().map(|i| RosterMember::from_identity(i)));
+    roster_of(&net_key(p), version, p, members)
+}
+
+/// A roster of the network `key` names, with exactly these members, `primary` its primary.
+fn roster_of(key: &NetworkKey, version: u64, primary: &Identity, members: Vec<RosterMember>) -> Roster {
     sign_roster(
         &UnsignedRoster {
-            network: p.id().into(),
+            network: key.id().into(),
             version,
             issued_at: 1_790_000_000_000,
             relay: "ws://127.0.0.1:9/v1".into(),
-            primary: p.ed25519_public(),
+            network_key: key.ed25519_public(),
+            primary: primary.id().into(),
             members,
         },
-        p,
+        key,
     )
     .unwrap()
 }
 
 fn world() -> World {
     let (p, a, b) = (Identity::from_seed(&[1; 32]), Identity::from_seed(&[2; 32]), Identity::from_seed(&[3; 32]));
-    let roster = roster_with(&p, 3, &[(&a, MemberKind::Worker), (&b, MemberKind::Surface)]);
-    World { clock: FakeClock::new(), p, a, b, roster }
+    let roster = roster_with(&p, 3, &[&a, &b]);
+    let net = roster.network().to_owned();
+    World { clock: FakeClock::new(), p, a, b, roster, net }
 }
 
 fn connected(w: &World, id: &Identity, roster: &Roster, t: Timing) -> T {
@@ -687,7 +723,7 @@ fn unreachable_and_refused_fail_the_send() {
     route(&mut [&mut a]); // B is not connected
     assert_eq!(done(&mut rx).unwrap().unwrap_err().code(), ErrorCode::Unreachable);
     // B holds a roster without A: it refuses.
-    let without_a = roster_with(&w.p, 2, &[(&w.b, MemberKind::Surface)]);
+    let without_a = roster_with(&w.p, 2, &[&w.b]);
     let mut b = connected(&w, &w.b, &without_a, timing());
     let mut rx = a.send(w.b.id(), b"x");
     route(&mut [&mut a, &mut b]);
@@ -706,7 +742,7 @@ fn unreachable_and_refused_fail_the_send() {
 #[test]
 fn rosters_spread_member_to_member_over_a_handshake() {
     let w = world();
-    let older = roster_with(&w.p, 2, &[(&w.a, MemberKind::Worker), (&w.b, MemberKind::Surface)]);
+    let older = roster_with(&w.p, 2, &[&w.a, &w.b]);
     let mut a = connected(&w, &w.a, &w.roster, timing()); // v3
     let mut b = connected(&w, &w.b, &older, timing()); // v2
     b.events();
@@ -718,7 +754,7 @@ fn rosters_spread_member_to_member_over_a_handshake() {
 }
 
 #[test]
-fn a_roster_from_a_peer_is_taken_only_if_the_pinned_primary_signed_it_and_it_is_newer() {
+fn a_roster_from_a_peer_is_taken_only_if_the_pinned_network_key_signed_it_and_it_is_newer() {
     let w = world();
     let (mut a, mut b) = pair_ab(&w, timing());
     let mut rx = a.send(w.b.id(), b"x");
@@ -726,7 +762,7 @@ fn a_roster_from_a_peer_is_taken_only_if_the_pinned_primary_signed_it_and_it_is_
     assert_eq!(done(&mut rx), Some(Ok(())));
     // A forged roster (signed by A, not the primary) and an older one: B keeps v3.
     let forged = roster_with(&w.a, 9, &[]);
-    let older = roster_with(&w.p, 2, &[(&w.a, MemberKind::Worker), (&w.b, MemberKind::Surface)]);
+    let older = roster_with(&w.p, 2, &[&w.a, &w.b]);
     for r in [&forged, &older] {
         sessions::send_control(&mut a.node, w.b.id(), Ctl::Roster(r.to_jcs(), r.version()), None, FailAction::Ignore);
         route(&mut [&mut a, &mut b]);
@@ -735,7 +771,7 @@ fn a_roster_from_a_peer_is_taken_only_if_the_pinned_primary_signed_it_and_it_is_
     route(&mut [&mut a, &mut b]);
     assert_eq!(b.node.roster().version(), 3);
     // A newer one that drops A: B takes it and drops its sessions with A.
-    let v4 = roster_with(&w.p, 4, &[(&w.b, MemberKind::Surface)]);
+    let v4 = roster_with(&w.p, 4, &[&w.b]);
     sessions::send_control(&mut a.node, w.b.id(), Ctl::Roster(v4.to_jcs(), v4.version()), None, FailAction::Ignore);
     route(&mut [&mut a, &mut b]);
     assert_eq!(b.node.roster().version(), 4);
@@ -808,8 +844,8 @@ fn close_codes_4008_and_4005_are_terminal_and_4009_asks_where_the_network_went()
     a.events();
     let conn = a.conn;
     a.node.on_close(conn, close_code::MOVED, "moved");
-    assert!(a.events().iter().any(|e| matches!(e, Event::Moved { network } if network == w.p.id())));
-    assert_eq!(a.node.take_resolve().as_deref(), Some(w.p.id()));
+    assert!(a.events().iter().any(|e| matches!(e, Event::Moved { network } if *network == w.net)));
+    assert_eq!(a.node.take_resolve().as_deref(), Some(w.net.as_str()));
     w.clock.advance(5_000);
     a.node.poll();
     assert!(a.node.take_dial().is_none(), "nothing until the lookup answers");
@@ -865,7 +901,7 @@ fn nothing_but_register_goes_out_before_registered() {
     let ts = reg.get("ts").and_then(Json::as_safe_uint).unwrap();
     assert_eq!(ts, w.clock.unix_ms());
     let challenge: [u8; 32] = crate::bytes::from_b64u_array("AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA").unwrap();
-    let msg = register_signing_bytes(w.p.id(), w.a.id(), &challenge, ts, "127.0.0.1:9");
+    let msg = register_signing_bytes(&w.net, w.a.id(), &challenge, ts, "127.0.0.1:9");
     assert!(crate::crypto::ed25519_verify(&w.a.ed25519_public(), &msg, &sig));
     assert_eq!(reg.get("roster"), Some(w.roster.json()));
 }
@@ -873,7 +909,7 @@ fn nothing_but_register_goes_out_before_registered() {
 #[test]
 fn registered_with_a_newer_roster_applies_it_before_connected() {
     let w = world();
-    let older = roster_with(&w.p, 2, &[(&w.a, MemberKind::Worker)]);
+    let older = roster_with(&w.p, 2, &[&w.a]);
     let mut a = make(&w.a, &older, false, &w.clock, timing(), false);
     a.node.start();
     let registered = Json::object([
@@ -987,7 +1023,7 @@ fn target(w: &World) -> T {
 fn a_replayed_frame_ends_the_session_and_the_next_one_is_reset() {
     let w = world();
     let mut b = target(&w);
-    let mut r = Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap();
+    let mut r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
     let body = r.frame(&SessionMessage::Message { more: false, bytes: b"once" }.encode());
     b.deliver_from(&w.a, frame_type::DATA, &body);
     assert_eq!(b.take_all().len(), 1);
@@ -1004,7 +1040,7 @@ fn a_replayed_frame_ends_the_session_and_the_next_one_is_reset() {
 fn an_out_of_order_frame_ends_the_session() {
     let w = world();
     let mut b = target(&w);
-    let mut r = Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap();
+    let mut r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
     let first = r.frame(&SessionMessage::Message { more: false, bytes: b"1" }.encode());
     let second = r.frame(&SessionMessage::Message { more: false, bytes: b"2" }.encode());
     b.deliver_from(&w.a, frame_type::DATA, &second);
@@ -1017,7 +1053,7 @@ fn an_out_of_order_frame_ends_the_session() {
 fn malformed_frames_are_dropped_or_end_the_session_never_panic() {
     let w = world();
     let mut b = target(&w);
-    let mut r = Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap();
+    let mut r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
     let conn = b.conn;
     // Frames that do not parse: dropped.
     for f in [vec![], vec![1], vec![2; 18], vec![1, 1], vec![1, 3, 0], vec![1; MAX_FRAME + 1]] {
@@ -1048,12 +1084,12 @@ fn malformed_frames_are_dropped_or_end_the_session_never_panic() {
         vec![session_type::ROSTER_REQUEST, 1],
         vec![session_type::ROSTER, 0xff],
     ] {
-        let mut r = Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap();
+        let mut r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
         r.send(&mut b, &bad);
         assert!(b.node.sessions.info(w.a.id()).is_empty(), "{bad:?}");
     }
     // A ciphertext longer than a Noise message ends the session before any decryption.
-    let r = Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap();
+    let r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
     let mut body = u32be(r.their_index).to_vec();
     body.extend(vec![0u8; 65536]);
     b.deliver_from(&w.a, frame_type::DATA, &body);
@@ -1067,10 +1103,10 @@ fn a_handshake_from_a_non_member_or_with_the_wrong_key_is_refused() {
     let w = world();
     let mut b = target(&w);
     let stranger = Identity::from_seed(&[9; 32]);
-    assert!(Rogue::handshake(&stranger, &mut b, w.p.id(), 3).is_none());
+    assert!(Rogue::handshake(&stranger, &mut b, &w.net, 3).is_none());
     // The relay named a member, but the handshake carried another key.
     let mut b2 = target(&w);
-    let prologue = session_prologue(w.p.id());
+    let prologue = session_prologue(&w.net);
     let mut hs = HandshakeState::new(HandshakeOptions {
         pattern: &IK,
         initiator: true,
@@ -1104,7 +1140,7 @@ fn data_for_an_unknown_index_is_answered_reset() {
 fn message_bytes_beyond_the_credit_given_end_the_session() {
     let w = world();
     let mut b = target(&w);
-    let mut r = Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap();
+    let mut r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
     // A whole message is held until taken, so its bytes stay charged against the window.
     let chunk = vec![1u8; MAX_FRAGMENT];
     let mut sent = 0usize;
@@ -1124,7 +1160,7 @@ fn message_bytes_beyond_the_credit_given_end_the_session() {
 fn a_message_over_64_mib_ends_the_session() {
     let w = world();
     let mut b = target(&w);
-    let mut r = Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap();
+    let mut r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
     // Fragments of a message in progress are credited at once (nothing is held), so the
     // window never stops it: the 64 MiB rule does.
     let chunk = vec![3u8; MAX_FRAGMENT];
@@ -1150,7 +1186,7 @@ fn what_one_peer_can_make_this_node_hold_is_bounded() {
     let chunk = vec![4u8; MAX_FRAGMENT];
     let mut ended = false;
     for _ in 0..5 {
-        let mut r = Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap();
+        let mut r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
         for _ in 0..(INITIAL_CREDIT as usize / MAX_FRAGMENT) {
             r.fragment(&mut b, false, &chunk);
             if b.node.sessions.info(w.a.id()).iter().all(|s| !s.current) {
@@ -1166,7 +1202,7 @@ fn what_one_peer_can_make_this_node_hold_is_bounded() {
     // Empty messages need no credit; their count is bounded too.
     let mut c = target(&w);
     c.node.sessions.set_limits(u64::MAX, 100);
-    let mut r = Rogue::handshake(&w.a, &mut c, w.p.id(), 3).unwrap();
+    let mut r = Rogue::handshake(&w.a, &mut c, &w.net, 3).unwrap();
     for _ in 0..150 {
         r.fragment(&mut c, false, &[]);
     }
@@ -1174,7 +1210,7 @@ fn what_one_peer_can_make_this_node_hold_is_bounded() {
     assert!(c.node.sessions.info(w.a.id()).is_empty());
     // Taking them frees the room again.
     c.take_all();
-    let mut r = Rogue::handshake(&w.a, &mut c, w.p.id(), 3).unwrap();
+    let mut r = Rogue::handshake(&w.a, &mut c, &w.net, 3).unwrap();
     r.fragment(&mut c, false, b"room again");
     assert_eq!(c.take_all().len(), 1);
 }
@@ -1183,7 +1219,7 @@ fn what_one_peer_can_make_this_node_hold_is_bounded() {
 fn sessions_per_peer_are_bounded() {
     let w = world();
     let mut b = target(&w);
-    let mut rogues: Vec<Rogue> = (0..20).map(|_| Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap()).collect();
+    let mut rogues: Vec<Rogue> = (0..20).map(|_| Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap()).collect();
     assert_eq!(b.node.sessions.info(w.a.id()).len(), sessions::MAX_SESSIONS_PER_PEER);
     // The newest still works; the oldest was dropped and is answered reset.
     let last = rogues.len() - 1;
@@ -1200,22 +1236,22 @@ fn resignations_are_checked_before_the_primary_publishes() {
     let mut p = make(&w.p, &w.roster, true, &w.clock, timing(), false);
     p.connect();
     p.take();
-    let mut r = Rogue::handshake(&w.a, &mut p, w.p.id(), 3).unwrap();
+    let mut r = Rogue::handshake(&w.a, &mut p, &w.net, 3).unwrap();
     let now = w.clock.unix_ms();
     let resign = |id: &Identity, network: &str, ts: u64| {
         crate::signed::Resignation::sign(id, network, ts).to_json().to_json_string().unwrap().into_bytes()
     };
     let msg = |json: Vec<u8>| [vec![session_type::RESIGN], json].concat();
     // Signed by another member, for another network, too old, tampered, malformed.
-    r.send(&mut p, &msg(resign(&w.b, w.p.id(), now)));
+    r.send(&mut p, &msg(resign(&w.b, &w.net, now)));
     r.send(&mut p, &msg(resign(&w.a, w.b.id(), now)));
-    r.send(&mut p, &msg(resign(&w.a, w.p.id(), now - 300_001)));
-    let mut bad_sig = crate::signed::Resignation::sign(&w.a, w.p.id(), now);
+    r.send(&mut p, &msg(resign(&w.a, &w.net, now - 300_001)));
+    let mut bad_sig = crate::signed::Resignation::sign(&w.a, &w.net, now);
     bad_sig.ts += 1;
     r.send(&mut p, &msg(bad_sig.to_json().to_json_string().unwrap().into_bytes()));
     r.send(&mut p, &msg(b"{\"node\":1}".to_vec()));
     assert_eq!(p.node.roster().version(), 3);
-    r.send(&mut p, &msg(resign(&w.a, w.p.id(), now - 299_000)));
+    r.send(&mut p, &msg(resign(&w.a, &w.net, now - 299_000)));
     assert_eq!(p.node.roster().version(), 4);
     assert!(p.node.roster().member(w.a.id()).is_none());
     let pushed = p.texts();
@@ -1262,7 +1298,7 @@ fn the_primary_runs_pairing_and_burns_a_code_after_five_failures() {
     p.connect();
     p.take();
     p.events();
-    let code = primary::open_pairing_code(&mut p.node, MemberKind::Mcp, None, None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
     let wrong = if code.code == "AAAA-AAAA" { "BBBBBBBB" } else { "AAAAAAAA" };
     for n in 1..=4 {
         assert!(attempt(&mut p, n, wrong, &code.code_id).is_none());
@@ -1287,7 +1323,7 @@ fn a_pairing_channel_left_hanging_times_out_and_refunds_its_slot() {
     p.connect();
     p.take();
     p.events();
-    let code = primary::open_pairing_code(&mut p.node, MemberKind::Worker, None, None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
     let wrong = if code.code == "AAAA-AAAA" { "BBBBBBBB" } else { "AAAAAAAA" };
     for n in 1..=4 {
         assert!(attempt(&mut p, n, wrong, &code.code_id).is_none());
@@ -1303,9 +1339,11 @@ fn a_pairing_channel_left_hanging_times_out_and_refunds_its_slot() {
     let roster = Roster::from_json(attempt(&mut p, 11, &code.code.replace('-', ""), &code.code_id).unwrap()).unwrap();
     assert_eq!(roster.version(), 4);
     let newcomer = Identity::from_seed(&[11; 32]);
-    assert_eq!(roster.member(newcomer.id()).map(RosterMember::kind), Some(MemberKind::Worker));
+    assert!(roster.member(newcomer.id()).is_some());
     assert_eq!(p.node.roster(), &roster);
-    assert!(p.events().iter().any(|e| matches!(e, Event::Paired { member, .. } if member.id() == newcomer.id())));
+    assert!(p.events().iter().any(
+        |e| matches!(e, Event::Paired { member, code_id, .. } if member.id() == newcomer.id() && *code_id == code.code_id)
+    ));
     // Used: the code admits no one else.
     assert!(attempt(&mut p, 12, &code.code.replace('-', ""), &code.code_id).is_none());
 }
@@ -1418,7 +1456,7 @@ fn roster_frames(t: &T) -> usize {
 fn a_roster_request_flood_gets_one_answer_while_it_is_unsent_then_one_per_interval() {
     let w = world();
     let mut b = target(&w);
-    let mut r = Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap();
+    let mut r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
     b.take();
     // The socket stops draining: nothing B queues is written.
     b.log.buffered.store(usize::MAX / 2, Ordering::SeqCst);
@@ -1458,8 +1496,8 @@ fn a_newer_roster_is_queued_even_while_an_older_one_is_unsent() {
     route(&mut [&mut a, &mut b]);
     assert_eq!(done(&mut rx), Some(Ok(())));
     a.log.buffered.store(usize::MAX / 2, Ordering::SeqCst);
-    let v4 = roster_with(&w.p, 4, &[(&w.a, MemberKind::Worker), (&w.b, MemberKind::Surface)]);
-    let v5 = roster_with(&w.p, 5, &[(&w.a, MemberKind::Worker), (&w.b, MemberKind::Surface)]);
+    let v4 = roster_with(&w.p, 4, &[&w.a, &w.b]);
+    let v5 = roster_with(&w.p, 5, &[&w.a, &w.b]);
     for r in [&v4, &v4, &v5, &v4] {
         sessions::send_control(&mut a.node, w.b.id(), Ctl::Roster(r.to_jcs(), r.version()), None, FailAction::Ignore);
     }
@@ -1520,13 +1558,13 @@ fn an_overflowing_outbound_queue_drops_the_connection_and_redials() {
 fn handshake_inits_are_limited_per_peer_and_for_strangers() {
     let w = world();
     let mut b = target(&w);
-    let answered = (0..100).filter(|_| Rogue::handshake(&w.a, &mut b, w.p.id(), 3).is_some()).count();
+    let answered = (0..100).filter(|_| Rogue::handshake(&w.a, &mut b, &w.net, 3).is_some()).count();
     assert_eq!(answered, sessions::INIT_BURST as usize);
     w.clock.advance(1000);
-    let answered = (0..100).filter(|_| Rogue::handshake(&w.a, &mut b, w.p.id(), 3).is_some()).count();
+    let answered = (0..100).filter(|_| Rogue::handshake(&w.a, &mut b, &w.net, 3).is_some()).count();
     assert_eq!(answered, sessions::INIT_RATE as usize, "one second refills one second's worth");
     // Another member is not held back by the first one's flood.
-    assert!(Rogue::handshake(&w.p, &mut b, w.p.id(), 3).is_some());
+    assert!(Rogue::handshake(&w.p, &mut b, &w.net, 3).is_some());
     // Ids off the roster: each its own budget (an init processed is answered `refused`).
     b.take();
     let refused_from = |b: &mut T, who: &Identity, n: usize| {
@@ -1545,7 +1583,7 @@ fn deliver_init(b: &mut T, who: &Identity, w: &World) {
 }
 
 fn deliver_init_v(b: &mut T, who: &Identity, w: &World, version: u64) {
-    let prologue = session_prologue(w.p.id());
+    let prologue = session_prologue(&w.net);
     let mut hs = HandshakeState::new(HandshakeOptions {
         pattern: &IK,
         initiator: true,
@@ -1629,7 +1667,7 @@ fn budgets_carry_across_a_new_connection() {
     // A relay that forces reconnects does not get budgets back in full: they refill with time.
     let w = world();
     let mut b = target(&w);
-    let answered = (0..100).filter(|_| Rogue::handshake(&w.a, &mut b, w.p.id(), 3).is_some()).count();
+    let answered = (0..100).filter(|_| Rogue::handshake(&w.a, &mut b, &w.net, 3).is_some()).count();
     assert_eq!(answered, sessions::INIT_BURST as usize);
     let conn = b.conn;
     b.node.on_close(conn, close_code::GOING_AWAY, "");
@@ -1637,7 +1675,7 @@ fn budgets_carry_across_a_new_connection() {
     b.node.poll();
     b.open_and_register(None);
     b.take();
-    let after = (0..100).filter(|_| Rogue::handshake(&w.a, &mut b, w.p.id(), 3).is_some()).count();
+    let after = (0..100).filter(|_| Rogue::handshake(&w.a, &mut b, &w.net, 3).is_some()).count();
     assert_eq!(after, (sessions::INIT_RATE / 2) as usize, "half a second's refill, not a full budget");
 }
 
@@ -1679,7 +1717,7 @@ fn a_relay_streaming_pairings_for_unknown_codes_raises_no_events_and_few_answers
 fn refusals_for_a_closed_code_raise_one_event_a_second() {
     let w = world();
     let mut p = primary_node(&w);
-    let code = primary::open_pairing_code(&mut p.node, MemberKind::Worker, None, None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
     primary::cancel_pairing_code(&mut p.node, &code.code_id);
     let conn = p.conn;
     for _ in 0..1000 {
@@ -1692,7 +1730,7 @@ fn refusals_for_a_closed_code_raise_one_event_a_second() {
     p.node.on_text(conn, &pairing_msg(&channel, &code.code_id));
     assert_eq!(failures(&mut p), ["unknown-code"]);
     // An expired code is refused with its event too.
-    let short = primary::open_pairing_code(&mut p.node, MemberKind::Worker, Some(10), None).unwrap();
+    let short = primary::open_pairing_code(&mut p.node, Some(10), None).unwrap();
     w.clock.advance(20);
     p.node.on_text(conn, &pairing_msg(&[3; 16], &short.code_id));
     assert_eq!(failures(&mut p), ["unknown-code"]);
@@ -1720,7 +1758,7 @@ fn an_observer_that_falls_behind_drops_its_oldest_and_says_how_many() {
     let w = world();
     let mut b = target(&w);
     let mut seen = b.node.observe();
-    let mut r = Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap();
+    let mut r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
     for i in 0..3000u32 {
         r.fragment(&mut b, false, &i.to_be_bytes());
     }
@@ -1775,7 +1813,7 @@ fn relay_error_events_carry_short_fields() {
 fn an_empty_fragment_saying_more_follow_ends_the_session() {
     let w = world();
     let mut b = target(&w);
-    let mut r = Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap();
+    let mut r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
     r.fragment(&mut b, false, &[]);
     assert_eq!(b.take_all().len(), 1, "an empty last fragment is an empty message");
     r.fragment(&mut b, true, &[]);
@@ -1786,8 +1824,8 @@ fn an_empty_fragment_saying_more_follow_ends_the_session() {
 fn refusals_for_issued_codes_are_answered_whatever_made_up_ids_used() {
     let w = world();
     let mut p = primary_node(&w);
-    let expired = primary::open_pairing_code(&mut p.node, MemberKind::Worker, Some(10), None).unwrap();
-    let cancelled = primary::open_pairing_code(&mut p.node, MemberKind::Worker, None, None).unwrap();
+    let expired = primary::open_pairing_code(&mut p.node, Some(10), None).unwrap();
+    let cancelled = primary::open_pairing_code(&mut p.node, None, None).unwrap();
     primary::cancel_pairing_code(&mut p.node, &cancelled.code_id);
     w.clock.advance(20);
     let conn = p.conn;
@@ -1813,7 +1851,7 @@ fn refusals_for_issued_codes_are_answered_whatever_made_up_ids_used() {
 fn someone_holding_a_code_id_cannot_use_up_another_newcomers_answer() {
     let w = world();
     let mut p = primary_node(&w);
-    let code = primary::open_pairing_code(&mut p.node, MemberKind::Worker, None, None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
     primary::cancel_pairing_code(&mut p.node, &code.code_id);
     let conn = p.conn;
     // Someone with the code id refuses itself over and over on its channel...
@@ -1833,7 +1871,7 @@ fn bogus_init(w: &World, b: &mut T, named: &Identity) {
 }
 
 fn bogus_init_v(w: &World, b: &mut T, named: &Identity, version: u64) {
-    let prologue = session_prologue(w.p.id());
+    let prologue = session_prologue(&w.net);
     let mut hs = HandshakeState::new(HandshakeOptions {
         pattern: &IK,
         initiator: true,
@@ -1861,11 +1899,11 @@ fn inits_that_fail_in_a_members_name_starve_only_that_member() {
     let refused = b.sent_kinds().iter().filter(|k| **k == frame_type::REFUSED).count();
     assert_eq!(refused, sessions::MEMBER_FAILURE_BURST as usize);
     // A's own genuine init waits for its budget to refill...
-    assert!(Rogue::handshake(&w.a, &mut b, w.p.id(), 3).is_none());
+    assert!(Rogue::handshake(&w.a, &mut b, &w.net, 3).is_none());
     // ...while another member's goes through at once.
-    assert!(Rogue::handshake(&w.p, &mut b, w.p.id(), 3).is_some());
+    assert!(Rogue::handshake(&w.p, &mut b, &w.net, 3).is_some());
     w.clock.advance(500);
-    assert!(Rogue::handshake(&w.a, &mut b, w.p.id(), 3).is_some());
+    assert!(Rogue::handshake(&w.a, &mut b, &w.net, 3).is_some());
 }
 
 /// Re-review 4, L4 (`forged_version_push.rs`): an init in A's name on a key that is not A's, claiming
@@ -1905,10 +1943,10 @@ fn unreadable_inits_in_a_members_name_are_charged_to_that_member() {
     }
     assert!(b.binaries().is_empty(), "unreadable inits get no answer");
     // A's budget is spent: its genuine init waits for it to refill; P's never did.
-    assert!(Rogue::handshake(&w.a, &mut b, w.p.id(), 3).is_none());
-    assert!(Rogue::handshake(&w.p, &mut b, w.p.id(), 3).is_some());
+    assert!(Rogue::handshake(&w.a, &mut b, &w.net, 3).is_none());
+    assert!(Rogue::handshake(&w.p, &mut b, &w.net, 3).is_some());
     w.clock.advance(500);
-    assert!(Rogue::handshake(&w.a, &mut b, w.p.id(), 3).is_some());
+    assert!(Rogue::handshake(&w.a, &mut b, &w.net, 3).is_some());
 }
 
 /// Re-review 4, M2 (`member_init_ceiling.rs`): eight members stream inits in their own names on a
@@ -1919,13 +1957,13 @@ fn members_failing_their_own_inits_cannot_block_an_honest_member() {
     let w = world();
     let attackers: Vec<Identity> = (0..8u8).map(|i| Identity::from_seed(&[40 + i; 32])).collect();
     let honest = Identity::from_seed(&[60; 32]);
-    let mut others: Vec<(&Identity, MemberKind)> = attackers.iter().map(|a| (a, MemberKind::Worker)).collect();
-    others.push((&honest, MemberKind::Worker));
-    others.push((&w.b, MemberKind::Surface));
+    let mut others: Vec<&Identity> = attackers.iter().collect();
+    others.push(&honest);
+    others.push(&w.b);
     let roster = roster_with(&w.p, 3, &others);
     let mut b = connected(&w, &w.b, &roster, timing());
     // One bogus init per attacker, replayed: each copy costs the victim a DH if it is processed.
-    let prologue = session_prologue(w.p.id());
+    let prologue = session_prologue(&w.net);
     let floods: Vec<Vec<u8>> = attackers
         .iter()
         .map(|_| {
@@ -1951,7 +1989,7 @@ fn members_failing_their_own_inits_cannot_block_an_honest_member() {
         }
         if tick % 5 == 4 {
             attempts += 1;
-            completed += usize::from(Rogue::handshake(&honest, &mut b, w.p.id(), 3).is_some());
+            completed += usize::from(Rogue::handshake(&honest, &mut b, &w.net, 3).is_some());
         }
         w.clock.advance(20);
     }
@@ -1980,7 +2018,7 @@ fn resets_to_made_up_ids_have_a_ceiling_together() {
 fn tiny_fragments_cost_no_more_heap_than_the_caps_count() {
     let w = world();
     let mut b = target(&w);
-    let mut r = Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap();
+    let mut r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
     for _ in 0..100_000 {
         r.fragment(&mut b, true, &[1]);
     }
@@ -1996,7 +2034,7 @@ fn an_init_on_a_members_key_without_a_roster_version_is_a_failed_init() {
     let w = world();
     let mut b = target(&w);
     b.take();
-    let prologue = session_prologue(w.p.id());
+    let prologue = session_prologue(&w.net);
     // Nothing, a bare roster version (the old 8 bytes), and one byte too many.
     for payload in [&[][..], &[0; 8], &[0; 17]].iter().cycle().take(6) {
         let mut hs = HandshakeState::new(HandshakeOptions {
@@ -2014,10 +2052,10 @@ fn an_init_on_a_members_key_without_a_roster_version_is_a_failed_init() {
     assert!(b.binaries().is_empty(), "malformed inits are dropped unanswered");
     assert!(!b.node.sessions.engaged(w.a.id()));
     // They spent A's failure budget: A's next init waits for it, P's does not.
-    assert!(Rogue::handshake(&w.a, &mut b, w.p.id(), 3).is_none());
-    assert!(Rogue::handshake(&w.p, &mut b, w.p.id(), 3).is_some());
+    assert!(Rogue::handshake(&w.a, &mut b, &w.net, 3).is_none());
+    assert!(Rogue::handshake(&w.p, &mut b, &w.net, 3).is_some());
     w.clock.advance(500);
-    assert!(Rogue::handshake(&w.a, &mut b, w.p.id(), 3).is_some());
+    assert!(Rogue::handshake(&w.a, &mut b, &w.net, 3).is_some());
 }
 
 /// Re-review 5, M3: hints that bring no newer roster double the wait before the next, from 1 s to
@@ -2030,7 +2068,7 @@ fn hints_that_bring_no_newer_roster_back_off_to_five_minutes() {
     b.take();
     // An id off the roster whose init is read and refused, claiming a newer roster: a hint.
     let stranger = Identity::from_seed(&[90; 32]);
-    let prologue = session_prologue(w.p.id());
+    let prologue = session_prologue(&w.net);
     let init = |b: &mut T| {
         let mut hs = HandshakeState::new(HandshakeOptions {
             pattern: &IK,
@@ -2066,7 +2104,7 @@ fn hints_that_bring_no_newer_roster_back_off_to_five_minutes() {
     assert!(g[10..].iter().all(|g| *g == 300), "{g:?}");
     // A newer roster arrives (at least 1 s after the last hint): the next goes at once, and the
     // back-off starts over.
-    let newer = roster_with(&w.p, 4, &[(&w.a, MemberKind::Worker), (&w.b, MemberKind::Surface)]);
+    let newer = roster_with(&w.p, 4, &[&w.a, &w.b]);
     b.node.adopt_roster(newer);
     let at = hints_over(&mut b, 8);
     assert_eq!(at[0], 0, "a hint after a newer roster waits only 1 s");
@@ -2077,7 +2115,7 @@ fn hints_that_bring_no_newer_roster_back_off_to_five_minutes() {
 fn pairing_channel_setups_per_code_have_a_budget_and_ended_channels_few_events() {
     let w = world();
     let mut p = primary_node(&w);
-    let code = primary::open_pairing_code(&mut p.node, MemberKind::Worker, None, None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
     let conn = p.conn;
     // A relay sets channels up on an open code and ends each at once: the ending refunds the
     // attempt, so only the setup budget stops it.
@@ -2130,9 +2168,9 @@ fn pairing_channel_setups_per_code_have_a_budget_and_ended_channels_few_events()
 fn a_wall_clock_stepped_back_strands_no_budget_and_extends_no_code() {
     let w = world();
     let mut p = primary_node(&w);
-    let code = primary::open_pairing_code(&mut p.node, MemberKind::Worker, Some(10_000), None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, Some(10_000), None).unwrap();
     let mut b = target(&w);
-    let mut r = Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap();
+    let mut r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
     b.take();
     // Spend A's init budget, and have B answer A's roster-request.
     for _ in 0..64 {
@@ -2150,9 +2188,9 @@ fn a_wall_clock_stepped_back_strands_no_budget_and_extends_no_code() {
     assert_eq!(pair_ends(&p), 1);
     assert_eq!(failures(&mut p), ["unknown-code"]);
     // ...A's init budget has refilled...
-    assert!(Rogue::handshake(&w.a, &mut b, w.p.id(), 3).is_some());
+    assert!(Rogue::handshake(&w.a, &mut b, &w.net, 3).is_some());
     // ...and a roster-request is answered again.
-    let mut r = Rogue::handshake(&w.a, &mut b, w.p.id(), 3).unwrap();
+    let mut r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
     b.take();
     r.send(&mut b, &[session_type::ROSTER_REQUEST]);
     assert_eq!(roster_frames(&b), 1);
@@ -2164,7 +2202,7 @@ fn stranger_hint(w: &World, b: &mut T) {
     let mut hs = HandshakeState::new(HandshakeOptions {
         pattern: &IK,
         initiator: true,
-        prologue: &session_prologue(w.p.id()),
+        prologue: &session_prologue(&w.net),
         s: Some(KeyPair::from_private(&stranger.x25519_private())),
         rs: Some(w.b.x25519_public()),
         fixed_ephemeral: None,
@@ -2235,7 +2273,7 @@ fn stamped_init(w: &World, b: &T, who: &Identity, version: u64, stamp: u64) -> V
     let mut hs = HandshakeState::new(HandshakeOptions {
         pattern: &IK,
         initiator: true,
-        prologue: &session_prologue(w.p.id()),
+        prologue: &session_prologue(&w.net),
         s: Some(KeyPair::from_private(&who.x25519_private())),
         rs: Some(b.identity.x25519_public()),
         fixed_ephemeral: None,
@@ -2300,7 +2338,7 @@ fn an_init_stamped_no_later_than_the_last_accepted_is_refused_and_a_later_one_ac
     b.deliver_from(&w.p, frame_type::HANDSHAKE_INIT, &stamped_init(&w, &b, &w.p, 3, t - 5));
     assert_eq!(b.sent_kinds(), [frame_type::HANDSHAKE_RESP]);
     // The table holds roster members only: A off the roster, its entry goes.
-    let without_a = roster_with(&w.p, 4, &[(&w.b, MemberKind::Surface)]);
+    let without_a = roster_with(&w.p, 4, &[&w.b]);
     b.node.adopt_roster(without_a);
     assert_eq!(b.node.sessions.stamped(), [w.p.id().to_owned()]);
 }
@@ -2318,7 +2356,7 @@ fn inits_in_the_same_millisecond_get_increasing_stamps() {
         let mut hs = HandshakeState::new(HandshakeOptions {
             pattern: &IK,
             initiator: false,
-            prologue: &session_prologue(w.p.id()),
+            prologue: &session_prologue(&w.net),
             s: Some(KeyPair::from_private(&peer.x25519_private())),
             rs: None,
             fixed_ephemeral: None,
@@ -2372,14 +2410,27 @@ fn handshake_stamp_vectors() {
     };
     let initiator = identity(&text(hs, "initiator"));
     let responder = identity(&text(hs, "responder"));
-    let network = identity(&text(v.get("noise").unwrap(), "network"));
+    let network = text(v.get("noise").unwrap(), "network");
+    let nets = v.get("networkKeys").and_then(Json::as_array).unwrap();
+    let net = nets.iter().find(|n| n.get("networkId").and_then(Json::as_str) == Some(network.as_str())).unwrap();
+    let key = NetworkKey::from_seed(&hex(net, "networkSeed").try_into().unwrap());
+    let primary = identity(keys[0].get("nodeId").and_then(Json::as_str).unwrap());
     assert_eq!(num(hs, "windowMs"), sessions::STAMP_WINDOW_MS);
     // The responder starts at responderStartedMs; each step runs at its own responderWallNowMs,
     // the monotonic clock moving with the wall clock (so the start, kept on the monotonic clock,
     // reads back as responderStartedMs).
     let clock = FakeClock::new();
     clock.set_wall(num(hs, "responderStartedMs"));
-    let roster = roster_with(&network, 12, &[(&initiator, MemberKind::Worker), (&responder, MemberKind::Worker)]);
+    let roster = roster_of(
+        &key,
+        12,
+        &primary,
+        vec![
+            RosterMember::from_identity(&primary),
+            RosterMember::from_identity(&initiator),
+            RosterMember::from_identity(&responder),
+        ],
+    );
     let mut node = make(&responder, &roster, false, &clock, timing(), false);
     node.connect();
     node.take();
@@ -2396,12 +2447,14 @@ fn handshake_stamp_vectors() {
         if let Some(event) = step.get("event").and_then(Json::as_str) {
             events += 1;
             version += 1;
-            let others: &[(&Identity, MemberKind)] = match event {
-                "removed" => &[(&responder, MemberKind::Worker)],
-                "readmitted" => &[(&initiator, MemberKind::Worker), (&responder, MemberKind::Worker)],
+            let others: &[&Identity] = match event {
+                "removed" => &[&responder],
+                "readmitted" => &[&initiator, &responder],
                 other => panic!("{what}: unknown event {other}"),
             };
-            node.node.adopt_roster(roster_with(&network, version, others));
+            let mut members = vec![RosterMember::from_identity(&primary)];
+            members.extend(others.iter().map(|i| RosterMember::from_identity(i)));
+            node.node.adopt_roster(roster_of(&key, version, &primary, members));
             node.take();
             let stored = node.node.sessions.stamp_of(initiator.id());
             match (event, step.get("stored").and_then(Json::as_safe_uint)) {
@@ -2519,9 +2572,9 @@ fn inits_recorded_before_a_restart_or_a_re_add_are_refused() {
     assert_eq!(b.sent_kinds(), [frame_type::HANDSHAKE_RESP]);
     // A leaves the roster and comes back 15 minutes later: what was recorded before is refused.
     let recorded = stamped_init(&w, &b, &w.a, 5, w.clock.unix_ms() + 1);
-    b.node.adopt_roster(roster_with(&w.p, 4, &[(&w.b, MemberKind::Surface)]));
+    b.node.adopt_roster(roster_with(&w.p, 4, &[&w.b]));
     w.clock.advance(15 * 60_000);
-    b.node.adopt_roster(roster_with(&w.p, 5, &[(&w.a, MemberKind::Worker), (&w.b, MemberKind::Surface)]));
+    b.node.adopt_roster(roster_with(&w.p, 5, &[&w.a, &w.b]));
     b.take();
     b.deliver_from(&w.a, frame_type::HANDSHAKE_INIT, &recorded);
     assert!(b.binaries().is_empty(), "a recorded init is not taken after a re-add");
@@ -2540,9 +2593,9 @@ fn a_member_re_added_soon_after_leaving_gets_its_stamp_back() {
     let before = stamped_init(&w, &b, &w.a, 3, w.clock.unix_ms());
     b.deliver_from(&w.a, frame_type::HANDSHAKE_INIT, &before);
     assert_eq!(b.sent_kinds(), [frame_type::HANDSHAKE_RESP]);
-    b.node.adopt_roster(roster_with(&w.p, 4, &[(&w.b, MemberKind::Surface)]));
+    b.node.adopt_roster(roster_with(&w.p, 4, &[&w.b]));
     w.clock.advance(2 * 60_000);
-    b.node.adopt_roster(roster_with(&w.p, 5, &[(&w.a, MemberKind::Worker), (&w.b, MemberKind::Surface)]));
+    b.node.adopt_roster(roster_with(&w.p, 5, &[&w.a, &w.b]));
     b.take();
     b.deliver_from(&w.a, frame_type::HANDSHAKE_INIT, &before);
     assert!(b.binaries().is_empty(), "an init from before A left is refused when A is back");
@@ -2565,8 +2618,8 @@ fn departed_stamps_are_bounded() {
         })
         .collect();
     for chunk in ids.chunks(100) {
-        let mut others: Vec<(&Identity, MemberKind)> = chunk.iter().map(|i| (i, MemberKind::Worker)).collect();
-        others.push((&w.b, MemberKind::Surface));
+        let mut others: Vec<&Identity> = chunk.iter().collect();
+        others.push(&w.b);
         let v = b.node.roster().version() + 1;
         b.node.adopt_roster(roster_with(&w.p, v, &others));
         for id in chunk {
@@ -2575,7 +2628,7 @@ fn departed_stamps_are_bounded() {
         b.take();
     }
     let v = b.node.roster().version() + 1;
-    b.node.adopt_roster(roster_with(&w.p, v, &[(&w.b, MemberKind::Surface)]));
+    b.node.adopt_roster(roster_with(&w.p, v, &[&w.b]));
     assert_eq!(b.node.sessions.departed_len(), sessions::DEPARTED_STAMPS);
 }
 
@@ -2647,7 +2700,7 @@ fn roster_push_retries_back_off_and_stop_when_replaced_or_the_member_leaves() {
         at
     };
     let c = Identity::from_seed(&[50; 32]);
-    let v4 = roster_with(&w.p, 4, &[(&w.a, MemberKind::Worker), (&w.b, MemberKind::Surface), (&c, MemberKind::Mcp)]);
+    let v4 = roster_with(&w.p, 4, &[&w.a, &w.b, &c]);
     primary::publish_for_test(&mut p.node, v4);
     let at = tries(&mut p, 50 * 60);
     let gaps: Vec<u64> = at.windows(2).map(|x| x[1] - x[0]).collect();
@@ -2655,7 +2708,7 @@ fn roster_push_retries_back_off_and_stop_when_replaced_or_the_member_leaves() {
     assert_eq!(gaps[..12], [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 600, 600], "{gaps:?}");
     assert!(gaps[12..].iter().all(|g| *g == 600));
     // A newer roster: pushed at once, and its retries start over at 1 s.
-    let v5 = roster_with(&w.p, 5, &[(&w.a, MemberKind::Worker), (&w.b, MemberKind::Surface)]);
+    let v5 = roster_with(&w.p, 5, &[&w.a, &w.b]);
     primary::publish_for_test(&mut p.node, v5);
     assert_eq!(tries(&mut p, 4), [0, 1, 3]);
     // A leaves the roster: no more tries at it.
@@ -2702,7 +2755,7 @@ fn a_push_owed_ends_when_the_member_shows_it_holds_the_roster() {
 fn the_roster_made_by_a_pairing_is_pushed_to_the_others_not_the_newcomer() {
     let w = world();
     let mut p = primary_node(&w);
-    let code = primary::open_pairing_code(&mut p.node, MemberKind::Worker, None, None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
     assert!(attempt(&mut p, 33, &code.code.replace('-', ""), &code.code_id).is_some());
     let newcomer = Identity::from_seed(&[33; 32]);
     assert!(p.node.roster().member(newcomer.id()).is_some());
@@ -2717,4 +2770,172 @@ fn the_roster_made_by_a_pairing_is_pushed_to_the_others_not_the_newcomer() {
     let mut expected = vec![w.a.id().to_owned(), w.b.id().to_owned()];
     expected.sort();
     assert_eq!(owed, expected);
+}
+
+// ── Becoming the primary (section 3.1) ──
+
+/// The roster of `world()`'s network naming alice primary, at `version`.
+fn worker_primary_roster(w: &World, version: u64) -> Roster {
+    roster_of(
+        &net_key(&w.p),
+        version,
+        &w.a,
+        vec![RosterMember::from_identity(&w.p), RosterMember::from_identity(&w.a), RosterMember::from_identity(&w.b)],
+    )
+}
+
+/// The text messages a node sent since last asked; its binary frames stay to be routed.
+fn texts_keeping_binaries(n: &T) -> Vec<Json> {
+    let mut out = n.log.out.lock().unwrap();
+    let mut texts = Vec::new();
+    out.retain(|s| match s {
+        Sent::Text(t) => {
+            texts.push(Json::parse(t).unwrap());
+            false
+        }
+        Sent::Binary(_) => true,
+    });
+    texts
+}
+
+fn rosters_pushed(texts: &[Json]) -> Vec<Roster> {
+    texts
+        .iter()
+        .filter(|t| t.get("type").and_then(Json::as_str) == Some("roster"))
+        .map(|t| Roster::from_json(t.get("roster").unwrap().clone()).unwrap())
+        .collect()
+}
+
+#[test]
+fn a_node_started_with_the_seed_claims_the_network_at_its_first_registration() {
+    let w = world();
+    let named = worker_primary_roster(&w, 4);
+    // The seed's custody is the caller's: it starts this node with it, under a roster naming
+    // alice primary.
+    let mut p = make_with(&w.p, &named, true, Some(net_seed(&w.p)), &w.clock, timing(), false);
+    let mut a = make(&w.a, &named, false, &w.clock, timing(), false);
+    assert!(!p.node.is_primary(), "not before it has claimed");
+    a.connect();
+    a.take();
+    p.connect();
+    // It signed the next roster, naming itself primary, and pushed it to the relay.
+    let pushed = rosters_pushed(&texts_keeping_binaries(&p));
+    assert_eq!(pushed.len(), 1);
+    let claimed = &pushed[0];
+    assert_eq!(claimed.version(), 5);
+    assert_eq!(claimed.primary_id(), w.p.id());
+    // The members unchanged: only `primary` names another node.
+    assert_eq!(claimed.members(), named.members());
+    assert_eq!(claimed.network(), named.network(), "the same network");
+    assert_eq!(p.node.roster().version(), 5);
+    assert!(p.node.is_primary());
+    assert!(primary::open_pairing_code(&mut p.node, None, None).is_ok());
+    // And to every member: alice takes it, and is not the primary.
+    p.node.poll();
+    route(&mut [&mut p, &mut a]);
+    assert_eq!(a.node.roster().version(), 5);
+    assert!(!a.node.is_primary());
+}
+
+#[test]
+fn a_node_claims_only_at_start_and_stops_being_the_primary_in_place_after() {
+    let w = world();
+    let mut p = make_with(&w.p, &w.roster, true, Some(net_seed(&w.p)), &w.clock, timing(), false);
+    p.connect();
+    p.take();
+    p.events();
+    assert!(p.node.is_primary());
+    let (tx, mut rx) = oneshot::channel();
+    primary::usage_begin(&mut p.node, "u1", tx);
+    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
+
+    // A newer roster names alice primary: this node stops being the primary in place.
+    let later = worker_primary_roster(&w, 4);
+    assert!(p.node.offer_roster(later.json()));
+    assert!(!p.node.is_primary());
+    assert!(p.node.holds_network_seed(), "the caller's seed is not touched");
+    assert_eq!(rx.try_recv().unwrap().unwrap_err().code(), ErrorCode::Invalid, "the usage ask fails");
+    assert!(primary::open_pairing_code(&mut p.node, None, None).is_err());
+    let pairing = Json::object([
+        ("type", Json::str("pairing")),
+        ("channel", Json::str(b64u(&[7u8; 16]))),
+        ("code", Json::str(&code.code_id)),
+    ]);
+    let conn = p.conn;
+    p.node.on_text(conn, &pairing.to_json_string().unwrap());
+    assert!(p.texts().is_empty(), "no claim, and no pairing served");
+    // Nothing disconnected, and no claim on this roster or at a later registration.
+    let events = p.events();
+    assert!(!events.iter().any(|e| matches!(e, Event::Disconnect { .. } | Event::State(_))), "{events:?}");
+    assert_eq!(*p.log.closed.lock().unwrap(), None);
+    assert_eq!(p.state(), MemberState::Connected);
+    p.node.on_close(conn, close_code::ABNORMAL, "");
+    w.clock.advance(1000);
+    p.node.poll();
+    p.open_and_register(None);
+    assert!(rosters_pushed(&p.texts()).is_empty(), "a reconnect claims nothing");
+    assert!(!p.node.is_primary());
+    assert_eq!(p.node.roster().version(), 4);
+}
+
+#[test]
+fn a_primary_that_a_newer_roster_does_not_name_ends_its_pairing_channels() {
+    let w = world();
+    let mut p = make(&w.p, &w.roster, true, &w.clock, timing(), false);
+    p.connect();
+    p.take();
+    p.events();
+    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
+    let channel = b64u(&[7u8; 16]);
+    let pairing = Json::object([
+        ("type", Json::str("pairing")),
+        ("channel", Json::str(&channel)),
+        ("code", Json::str(&code.code_id)),
+    ]);
+    let conn = p.conn;
+    p.node.on_text(conn, &pairing.to_json_string().unwrap());
+    assert!(p.node.offer_roster(worker_primary_roster(&w, 4).json()));
+    let ends: Vec<Json> =
+        p.texts().into_iter().filter(|t| t.get("type").and_then(Json::as_str) == Some("pairEnd")).collect();
+    assert_eq!(ends.len(), 1);
+    assert_eq!(ends[0].get("channel").and_then(Json::as_str), Some(channel.as_str()));
+    assert!(
+        p.events()
+            .iter()
+            .any(|e| matches!(e, Event::PairingFailed { reason: crate::types::PairingFailure::Demoted, .. }))
+    );
+}
+
+#[test]
+fn a_seed_that_does_not_derive_the_rosters_key_is_refused_and_primary_needs_one() {
+    let w = world();
+    let cfg = |roster: &Roster, seed: Option<[u8; 32]>, primary: bool| {
+        let (events, _) = broadcast::channel(16);
+        let (state, _) = watch::channel(MemberState::Disconnected);
+        let (seen, _) = watch::channel(0);
+        Node::new(
+            NodeConfig {
+                identity: w.p.clone(),
+                roster: roster.clone(),
+                pinned_network_key: None,
+                network_seed: seed,
+                relay_url: None,
+                credit_window: INITIAL_CREDIT,
+                timing: timing(),
+                primary,
+                has_resolver: false,
+                clock: w.clock.clone(),
+                observer: None,
+            },
+            Outputs { events, state, rosters_seen: seen, inbox: Arc::new(Notify::new()) },
+        )
+        .map(|_| ())
+        .map_err(|e| e.code())
+    };
+    let r = &w.roster;
+    assert_eq!(cfg(r, Some(*w.p.seed()), false), Err(ErrorCode::Invalid), "the node seed is not the network seed");
+    assert_eq!(cfg(r, None, true), Err(ErrorCode::Invalid), "a primary without the seed");
+    assert_eq!(cfg(r, Some(net_seed(&w.p)), true), Ok(()));
+    // Under a roster naming another member primary, the seed is enough: it claims.
+    assert_eq!(cfg(&worker_primary_roster(&w, 4), Some(net_seed(&w.p)), true), Ok(()));
 }

@@ -1,7 +1,7 @@
 // The client in a real browser: bundled for the browser with esbuild (which fails on any
 // Node import), loaded into headless Chromium from a page on its own origin, where a
-// surface pairs with a Node primary through the real relay and exchanges messages with it
-// and with a Node worker, using the browser's own WebSocket and crypto.
+// bob pairs with a Node primary through the real relay and exchanges messages with it
+// and with a Node alice, using the browser's own WebSocket and crypto.
 
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -61,7 +61,7 @@ async function openPage(): Promise<Page> {
   return page;
 }
 
-test('a surface in Chromium pairs with a Node primary through the relay and talks to it', async () => {
+test('bob, in Chromium, pairs with a Node primary through the relay and talks to it', async () => {
   const net = await startNet();
   const page = await openPage();
   try {
@@ -69,7 +69,7 @@ test('a surface in Chromium pairs with a Node primary through the relay and talk
     assert.equal(await page.evaluate(() => typeof WebSocket === 'function' && typeof process === 'undefined'), true);
 
     // Pair in the browser, with the browser's WebSocket, then connect as a member.
-    const code = primary.openPairingCode('surface');
+    const code = primary.openPairingCode();
     const paired = await page.evaluate(async (link) => {
       const L = (globalThis as any).Link;
       const identity = L.createIdentity();
@@ -85,7 +85,7 @@ test('a surface in Chromium pairs with a Node primary through the relay and talk
     }, code.link);
     assert.equal(paired.version, 2);
     assert.equal(paired.state, 'connected');
-    assert.equal(primary.roster.members.find((m) => m.id === paired.id)?.kind, 'surface');
+    assert.ok(primary.roster.members.some((m) => m.id === paired.id));
 
     // Browser to Node, small and several MiB (fragments and credit in the browser).
     const pIn = inbox(primary);
@@ -113,17 +113,17 @@ test('a surface in Chromium pairs with a Node primary through the relay and talk
     assert.equal(got[1]!.length, large.length);
     assert.equal(got[1]!.sum, (3 * large.length) % 65521);
 
-    // A Node worker joins: the browser receives the new roster, and they talk both ways.
-    const worker = await net.add('worker');
+    // A Node alice joins: the browser receives the new roster, and they talk both ways.
+    const alice = await net.add();
     assert.deepEqual(await page.evaluate(() => (globalThis as any).versions), [3]);
-    const wIn = inbox(worker);
-    await page.evaluate((to) => (globalThis as any).member.send(to, new TextEncoder().encode('surface to worker')), worker.id);
-    assert.equal(textOf((await wIn.next())[0]!.bytes), 'surface to worker');
-    await worker.send(paired.id, bytesOf('worker to surface'));
+    const wIn = inbox(alice);
+    await page.evaluate((to) => (globalThis as any).member.send(to, new TextEncoder().encode('bob to alice')), alice.id);
+    assert.equal(textOf((await wIn.next())[0]!.bytes), 'bob to alice');
+    await alice.send(paired.id, bytesOf('alice to bob'));
     await page.waitForFunction(() => (globalThis as any).received.length >= 3);
     const third = await page.evaluate(() => (globalThis as any).received[2]);
-    assert.equal(third.from, worker.id);
-    assert.equal(new TextDecoder().decode(Uint8Array.from(third.bytes)), 'worker to surface');
+    assert.equal(third.from, alice.id);
+    assert.equal(new TextDecoder().decode(Uint8Array.from(third.bytes)), 'alice to bob');
 
     // Revoked from Node: the browser's member ends revoked (closed 4008 by the relay).
     primary.revoke(paired.id);

@@ -10,7 +10,6 @@ import {
   type Identity,
   type InboundMessage,
   type MemberOptions,
-  type PairingKind,
   type Timing,
 } from '@frontierengineer/link-client';
 import { startRelay, type RelayProcess } from './relay.js';
@@ -20,11 +19,13 @@ export const FAST: Partial<Timing> = { backoffInitialMs: 20, backoffMaxMs: 200, 
 export interface Net {
   relay: RelayProcess;
   primary: Primary;
+  /** The network seed the primary was started with: the test's to keep, as an application's. */
+  networkSeed: Uint8Array;
   members: Member[];
-  /** Pairs a new node of `kind` and connects it as a member. */
-  add(kind: PairingKind, opts?: Partial<MemberOptions>): Promise<Member>;
+  /** Pairs a new node and connects it as a member. */
+  add(opts?: Partial<MemberOptions>): Promise<Member>;
   /** Pairs a new node and returns its identity and roster without connecting it. */
-  pairOnly(kind: PairingKind): Promise<{ identity: Identity; roster: Member['roster'] }>;
+  pairOnly(): Promise<{ identity: Identity; roster: Member['roster'] }>;
   close(): Promise<void>;
 }
 
@@ -33,9 +34,11 @@ export async function startNet(
 ): Promise<Net> {
   const relay = await startRelay(opts.env);
   const id = createIdentity();
+  const { roster, networkSeed } = createNetwork({ identity: id, relay: relay.url });
   const primary = new Primary({
     identity: id,
-    roster: createNetwork({ identity: id, relay: relay.url }),
+    roster,
+    networkSeed,
     timing: FAST,
     ...opts.member,
   });
@@ -50,9 +53,10 @@ export async function startNet(
   const net: Net = {
     relay,
     primary,
+    networkSeed,
     members,
-    async add(kind, more = {}) {
-      const { identity, roster } = await net.pairOnly(kind);
+    async add(more = {}) {
+      const { identity, roster } = await net.pairOnly();
       const m = await Member.connect({ identity, roster, timing: FAST, ...opts.member, ...more });
       // The primary pushes the new roster to the others over their sessions, which takes a
       // moment: until it lands, they do not know the newcomer and would refuse to send to it.
@@ -61,9 +65,9 @@ export async function startNet(
       await until(() => others.every((o) => o.state !== 'connected' || o.roster.version >= roster.version), 'the others to learn the roster');
       return m;
     },
-    async pairOnly(kind) {
+    async pairOnly() {
       const identity = createIdentity();
-      const code = primary.openPairingCode(kind);
+      const code = primary.openPairingCode();
       const { roster } = await pair({ link: code.link, identity });
       return { identity, roster };
     },

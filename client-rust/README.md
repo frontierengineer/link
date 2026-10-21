@@ -16,14 +16,16 @@ of the 8 small-order points, `S < L`, and the cofactorless equation `[S]B = R + 
 ```rust
 use link_client::*;
 
-// The primary: create the network once, then persist the seed and the roster.
+// The primary: create the network once, then persist both seeds and the roster.
 let me = Identity::generate();                                  // me.seed(): 32 secret bytes
-let roster = create_network(&me, "wss://frontierengineer.link/v1", unix_ms())?;
-let primary = Primary::connect(MemberOptions::new(me, roster)).await?;
+let (roster, network_key) = create_network(&me, "wss://frontierengineer.link/v1", unix_ms())?;
+let mut opts = MemberOptions::new(me, roster);
+opts.network_seed = Some(*network_key.seed());                  // the network's own 32 secret bytes
+let primary = Primary::connect(opts).await?;
 let mut events = primary.events();                              // Event::Roster(r): persist r
 
 // Invite a node. Show the code or the link; it admits one node for 15 minutes.
-let code = primary.open_pairing_code(MemberKind::Worker, CodeOptions::default())?;
+let code = primary.open_pairing_code(CodeOptions::default())?;
 
 // The newcomer: pair once, then connect as a member from then on.
 let id = Identity::from_seed(&saved_seed);
@@ -41,7 +43,19 @@ member.close();
 `ed25519_public()`, `x25519_public()`, `sign(msg)`. Persist the seed; everything else derives
 from it (section 2). Secrets are zeroised on drop and never printed by `Debug`.
 
-**Rosters.** `create_network(&identity, relay, now_ms)` makes version 1 with the primary alone.
+**Network key.** A network has a seed of its own, minted once when it is created, apart from
+every node's (section 2): `NetworkKey::generate()`, `NetworkKey::from_seed(&seed)`: `seed()`,
+`id()` (the network id, derived from the network key, whichever node is primary),
+`ed25519_public()`, `sign(msg)`. It signs every roster; only the primary holds it. Its seed is
+zeroised on drop and never printed by `Debug`.
+
+**Rosters.** `create_network(&identity, relay, now_ms)` mints a network key and returns it with
+version 1, `identity` alone as the primary; `create_network_with(&identity, &network_key, relay,
+now_ms)` takes a key already minted. `roster.network_key()` / `network_key_b64u()` is
+`networkKey`, what a member pins; `roster.primary_id()` is `primary`, the node id of the
+member holding the network seed, and `roster.primary()` that member. Members carry `id`,
+`ed25519` and `x25519` (`RosterMember::new(ed25519, x25519)`, `RosterMember::from_identity(&id)`);
+a field the protocol does not define is signed over and otherwise ignored.
 A `Roster` is always valid: `Roster::parse(text)` and `Roster::from_json(json)` check every rule of
 section 3, signature included, and keep the JSON as signed (members a later version adds
 included). `roster_problem(&json)` says why a value is not a valid roster;
@@ -59,7 +73,8 @@ it freely; the member closes when the last clone is dropped.
 |---|---|
 | `identity`, `roster` | required; the newest roster held (`MemberOptions::new(identity, roster)`) |
 | `relay_url` | defaults to the roster's `relay` |
-| `pinned_primary` | defaults to the roster's `primary.ed25519` |
+| `pinned_network_key` | defaults to the roster's `networkKey` |
+| `network_seed` | the network seed, for a node that is to be the primary; it must derive the roster's `networkKey`. Its custody is the caller's: the client never stores, sends or deletes it |
 | `credit_window` | the receive window granted per session: 1 MiB (every session's initial credit) up to 2^32 - 1, granted as extra credit |
 | `timing` | the protocol timers (rekey, idle, handshake timeout, backoff, request timeout), for tests |
 | `resolve_relay` | called on close code 4009 with the network id; may return a new relay URL |
@@ -75,16 +90,17 @@ it freely; the member closes when the last clone is dropped.
   to its sender when taken, so a slow reader slows its senders.
 - `events()` streams `Event`s: `State` (`Connecting`, `Connected`, `Disconnected`, `Revoked`,
   `Replaced`, `Closed`), `Roster` (persist it), `Disconnect { code, reason }`, `Moved` (4009),
-  `RelayError`, and for the primary `Paired` and `PairingFailed` (with a `PairingFailure`
+  `RelayError`, and for the primary `Paired { member, code_id, roster }` (the new member, the
+  code it paired with, the roster that lists it) and `PairingFailed` (with a `PairingFailure`
   reason: `wrong-code`, `malformed`, `unknown-code`, `used`, `no-attempts`, `newcomer-left`,
-  `timeout`, `relay-lost`, `already-member`, `roster-full`). The first call sees every
-  event since creation; later calls see events from then on. `observe()` streams events and
+  `timeout`, `relay-lost`, `already-member`, `roster-full`, and `demoted`, when a newer roster
+  names another member primary). The first call sees every event since creation; later calls see events from then on. `observe()` streams events and
   arriving messages together, in order, without taking the messages; it holds at most 1024 items,
   dropping its oldest past that and saying how many with `Observed::Lagged(n)`.
 - `sync_roster()` asks the primary for its newest roster. `resign()` leaves the network. Rosters
   also spread member to member: when a handshake shows a peer holds a newer roster, the member
   asks that peer for it, and hands its own to a peer that is behind. A roster is taken only if
-  the pinned primary signed it, so a revocation reaches every member that meets one that has it.
+  the pinned network key signed it, so a revocation reaches every member that meets one that has it.
   After a pairing, the new roster is pushed to every member but the newcomer, which already
   holds it from P6. A primary's push of a new roster that fails (the member away, a handshake
   that times out) is made again after 1 s, the wait doubling up to 10 minutes, until it goes, the
@@ -104,14 +120,29 @@ revoked) or 4005 (replaced: another copy of the identity connected); both are te
 that registers with an older roster than the relay holds receives the newer one in `registered`
 and accepts it (an `Event::Roster`) before it is connected.
 
-**`Primary`** derefs to `Member`: `Primary::connect(opts)`, `open_pairing_code(kind, CodeOptions
-{ lifetime, code })` returning `{ code, code_id, kind, link, expires_at }` (`code` chooses the
-code instead of a random one), `cancel_pairing_code(code_id)`, `revoke(node_id)` returning the
-new roster, `usage()`. The relay allows `USAGE_BURST` (3) asks at once, then one per
-`USAGE_INTERVAL` (10 s); beyond that `usage()` fails with `RateLimited`. When no further member
-fits under the roster limit, `open_pairing_code` fails with `RosterFull`.
+**The primary.** Being primary is a trait of a member (section 3.1): `is_primary()` is true while
+it holds the network seed and its roster names it primary, and `holds_network_seed()` says
+whether it holds the seed. The primary's calls are `Member`'s, and fail with `Invalid` on a
+member that is not the primary now: `open_pairing_code(CodeOptions { lifetime, code })`
+returning `{ code, code_id, link, expires_at }` (`code` chooses the code instead of a random
+one), `cancel_pairing_code(code_id)`, `revoke(node_id)` returning the new roster, `usage()`. The
+relay allows `USAGE_BURST` (3) asks at once, then one per `USAGE_INTERVAL` (10 s); beyond that
+`usage()` fails with `RateLimited`. When no further member fits under the roster limit,
+`open_pairing_code` fails with `RosterFull`. `Primary::connect(opts)` / `Primary::new(opts)` start
+a member that must be the primary (`network_seed` given); `Primary` derefs to `Member`.
 
-**Pairing.** `pair(PairOptions { target, identity, timeout })` returns `{ roster, pinned_primary }`,
+**Becoming the primary.** A node started with the network seed whose roster names another
+member primary claims the network at its first registration (section 3.1): it signs the next
+roster naming itself `primary`, the members unchanged,
+adopts it and publishes it like any change, and from then on is the primary. It claims only at
+start, never on a later roster. A node whose roster comes to name another member primary stops
+being the primary in place: its codes close, its pairing channels end (`pairEnd`, and a
+`PairingFailed` of reason `demoted`), its pushes are cancelled and its usage asks fail; its
+connection and sessions are untouched, and the seed its caller gave it stays. The relay, too,
+keeps that node's connection: nobody is disconnected. Neither the primary nor a node given the
+seed can `resign()`.
+
+**Pairing.** `pair(PairOptions { target, identity, timeout })` returns `{ roster, pinned_network_key }`,
 or fails with `Pairing`, `Unreachable` (the primary is not connected) or `Timeout`. Codes:
 `generate_code`, `normalize_code`, `format_code`; links: `build_pairing_link`, `parse_pairing_link`.
 
@@ -129,14 +160,15 @@ template over its own number of shards (default 1), so one region can grow witho
     "relay": "wss://{shard}.eu1.relay.example.com/v1", "shards": 256, "accepting": true } ] }
 ```
 
-When a primary creates its network, `pick_relay(PickRelayOptions::new(network, directory))`
+When a primary creates its network, it mints the network key first (`NetworkKey::generate()`:
+the network id is its `id()`), then `pick_relay(PickRelayOptions::new(network, directory))`
 (`directory` a URL, or a `RelayDirectory` already in hand) times every accepting region (the
 fastest of `probes` requests each, default 3, within `timeout`, default 3 s), takes the closest,
 and puts the network's shard into that region's template. The shard is `shard_of(network,
 shards)` with that region's `shards`: the first four bytes of SHA-256 of the network id,
 big-endian, modulo `shards`, in lowercase hex padded to the width of `shards - 1` (`00` to `ff`
-for 256). Pass the `url` of the `PickedRelay` it returns to `create_network(&identity, relay,
-now_ms)`; the roster carries it from then on, so the directory is consulted once, at creation,
+for 256). Pass the `url` of the `PickedRelay` it returns to `create_network_with(&identity,
+&network_key, relay, now_ms)`; the roster carries it from then on, so the directory is consulted once, at creation,
 and never on reconnect. It fails with `Unreachable` when no region answers (or the directory
 cannot be fetched) and `Invalid` on a directory it cannot use (`parse_directory` checks one);
 fall back to a relay of your own. The requests are the client's own HTTP/1.1 GETs (http:// and
@@ -184,7 +216,7 @@ that would exceed them ends (delivery is at most once). Control messages over 12
 over 1 MiB are refused.
 
 What others can make a member send is bounded too. A connection holds at most 64 MiB queued and
-unwritten (a primary publishing a full roster to about 400 members needs some 26 MB); past
+unwritten (a primary publishing a full roster to about 440 members needs some 29 MB); past
 that, the member drops the connection and redials rather than grow or wait. A peer's
 rosters (answers to `roster-request`, and rosters handed to a peer seen to be behind) go at most
 once per 250 ms, repeats coalesced into one, and no roster is queued to a peer while one as new is

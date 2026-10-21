@@ -14,10 +14,11 @@ Package `link`, Go 1.27 or later. Its dependencies are `golang.org/x/crypto` (Ch
 ```go
 import link "github.com/frontierengineer/link/client-go"
 
-// The primary: create the network once, then persist the seed and the roster.
+// The primary: create the network once, then persist both seeds and the roster.
 me, _ := link.NewIdentity()                                    // me.Seed(): 32 secret bytes
-roster, _ := link.CreateNetwork(me, "wss://frontierengineer.link/v1", time.Now())
+roster, networkSeed, _ := link.CreateNetwork(me, "wss://frontierengineer.link/v1", time.Now(), nil)
 primary, _ := link.ConnectPrimary(ctx, link.MemberOptions{Identity: me, Roster: roster,
+	NetworkSeed: networkSeed, // the network's own seed: as secret as me.Seed(), and yours to keep
 	OnEvent: func(e link.Event) {
 		if r, ok := e.(link.RosterEvent); ok {
 			save(r.Roster) // every accepted roster: persist it
@@ -25,7 +26,7 @@ primary, _ := link.ConnectPrimary(ctx, link.MemberOptions{Identity: me, Roster: 
 	}})
 
 // Invite a node. Show the code or the link; it admits one node for 15 minutes.
-code, _ := primary.OpenPairingCode(link.KindWorker, link.PairingCodeOptions{}) // or KindSurface, KindMCP
+code, _ := primary.OpenPairingCode(link.PairingCodeOptions{})
 
 // The newcomer: pair once, then connect as a member from then on.
 id, _ := link.IdentityFromSeed(savedSeed)
@@ -41,19 +42,27 @@ member.Close()
 
 **Identity.** `NewIdentity()`, `IdentityFromSeed(seed)` give an `*Identity` with `Seed()`, `ID()`,
 `Ed25519Public()`, `X25519Public()` and `Sign(msg)`. Persist the seed; everything else derives
-from it (section 2). `NodeIDFromEd25519`, `IsNodeID`. Every signature (rosters, resignations) is
+from it (section 2). `NodeIDFromEd25519`, `IsNodeID`. A network has a seed of its own, apart
+from every node's: `NewNetworkSeed()` mints one, and `NetworkKeyFromSeed(seed)` gives its
+`*NetworkKey`, with `Seed()`, `ID()` (the network id), `Ed25519Public()` (the roster's
+`networkKey`) and `Sign(msg)`. Every signature (rosters, resignations) is
 verified strictly, the same in every implementation: A and R canonical encodings and neither
 of small order, S < L, and the cofactorless equation. `crypto/ed25519` gives the last two (and
 refuses a non-canonical R); the checks on A and R it would not make are made first.
 
-**Rosters.** `CreateNetwork(identity, relay, now)` makes version 1 with the primary alone.
+**Rosters.** `CreateNetwork(identity, relay, now, networkSeed)` mints a network seed (or takes
+the one given), and returns version 1, with the identity alone as primary, signed by the network
+key, and the network seed. The network id derives from the network key, never from a node's.
+The roster's `Primary` (also `(*Roster).PrimaryID()`) is the node id of the primary, and must
+be a member's id. A member is `{ID, Ed25519, X25519}`; any field this version does not define is
+signed and otherwise ignored. `MemberFromIdentity(identity)` is an identity's entry.
 `*Roster` marshals and unmarshals as JSON (strictly: no duplicate keys, no lone surrogates),
 keeping any members this protocol version does not define, since the signature covers them.
 `DecodeRoster(json)` checks the shape, `ValidateRoster(json)` and `(*Roster).Problem()` every
-rule of section 3; `AcceptanceProblem(r, pinned, heldVersion)` applies the acceptance rule;
+rule of section 3; `AcceptanceProblem(r, pinnedNetworkKey, heldVersion)` applies the acceptance rule;
 `SignRoster`, `MemberFromIdentity`, `(*Roster).FindMember`, `JCS`, `Size`, `SigningBytes`,
 `Clone`; `Canonicalize(json)` is RFC 8785 JCS. A roster's JCS encoding, signature included, is
-at most `MaxRosterBytes` (65000 bytes, about 400 members), so it always fits one session message.
+at most `MaxRosterBytes` (65000 bytes, about 440 members), so it always fits one session message.
 
 **`Member`** (`ConnectMember(ctx, options)` returns once registered; `NewMember(options)` starts
 connecting and returns at once):
@@ -62,7 +71,8 @@ connecting and returns at once):
 |---|---|
 | `Identity`, `Roster` | required; the newest roster held |
 | `RelayURL` | defaults to the roster's relay |
-| `PinnedPrimary` | defaults to the roster's `primary.ed25519` |
+| `PinnedNetworkKey` | defaults to the roster's `networkKey` |
+| `NetworkSeed` | for the node meant to be the primary; must derive the roster's `networkKey`. The seed is the caller's: this package never stores, sends or deletes it |
 | `CreditWindow` | the receive window granted per session: 1 MiB (every session's initial credit) to 2^32 - 1, the excess granted as extra credit |
 | `Timing` | overrides for the protocol timers (rekey, idle, handshake timeout, backoff, request timeout); a zero field keeps the default |
 | `ResolveRelay(ctx, network)` | called on close code 4009; may return a new relay URL |
@@ -87,10 +97,11 @@ connecting and returns at once):
   `RosterEvent`, `DisconnectEvent` (`Code`, `Reason`), `MovedEvent` (4009), `RelayErrorEvent`.
   Every close is reported before the state it leads to, the member's own (`Close`, a roster
   without it) included.
-- `SyncRoster(ctx)` asks the primary for its newest roster. `Resign(ctx)` leaves the network.
+- `SyncRoster(ctx)` asks the primary for its newest roster. `Resign(ctx)` leaves the network;
+  it fails `invalid` on the primary and on any node holding the network seed.
   Rosters also spread member to member: when a handshake shows a peer holds a newer roster,
   the member asks that peer for it, and hands its own to a peer that is behind. A roster is
-  taken only if the pinned primary signed it, so a revocation reaches every member that meets
+  taken only if the pinned network key signed it, so a revocation reaches every member that meets
   one that has it, with the primary offline and whatever the relay remembers.
 - `ID()`, `Network()`, `Roster()`, `State()`, `RelayURL()`, `WaitConnected(ctx)`, `Close()`,
   `Sessions(peer)` (the live sessions with a peer, for tests and diagnostics).
@@ -103,20 +114,35 @@ A member reconnects after 500 ms, doubling to 10 s, forever, except after close 
 member that registers with an older roster than the relay holds receives the newer one in
 `registered` and accepts it (a `RosterEvent`) before it is `connected`.
 
-**`Primary`** embeds `*Member`: `ConnectPrimary`, `NewPrimary`,
-`OpenPairingCode(kind, PairingCodeOptions{Lifetime, Code})` returning
-`{Code, CodeID, Kind, Link, ExpiresAt}` (`Code` chooses the code instead of a random one),
+**The primary** is the member that holds the network seed and that its roster names primary
+(section 3.1): a trait of a member and its connection, not a separate object. `IsPrimary()` and
+`HoldsNetworkSeed()` say where a member stands. `ConnectPrimary` and `NewPrimary` start a member
+meant to be the primary (they need `NetworkSeed`) and return a `*Primary`, which embeds
+`*Member`. The primary capabilities are the `Member`'s, and
+fail `invalid` on a member that is not the primary now:
+`OpenPairingCode(PairingCodeOptions{Lifetime, Code})` returning
+`{Code, CodeID, Link, ExpiresAt}` (`Code` chooses the code instead of a random one),
 `CancelPairingCode(codeID)`, `Revoke(nodeID)` returning the new roster, and `Usage(ctx)`, which
 asks the relay (request-only) for `{Network: {BytesHour, Connections, Limits, QuotaUsed, Slowed}}`;
 beyond the relay's budget (`UsageBurst` at once, then one per `UsageInterval`) it fails
 `rate-limited`. When no further member fits under the roster limit, `OpenPairingCode` fails
 `roster-full`, and a code opened earlier fails its pairing with a `PairingFailedEvent`. Extra
-events: `PairedEvent`, `PairingFailedEvent` (its `Code` one of the `Fail*` constants:
+events: `PairedEvent` (`Member`, `CodeID`: the code it paired with, `Roster`), `PairingFailedEvent` (its `Code` one of the `Fail*` constants:
 `wrong-code`, `malformed`, `unknown-code`, `used`, `no-attempts`, `newcomer-left`, `timeout`,
-`relay-lost`, `already-member`, `roster-full`).
+`relay-lost`, `already-member`, `roster-full`, and the one below).
+
+**Becoming the primary.** A node started with `NetworkSeed` whose roster names another member
+primary claims the primary once registered (section 3.1): it signs the next roster naming
+itself primary, the members unchanged, publishes it as any change, and is the primary from then
+on. It claims only at its first registration. A node whose roster later
+names another member stops being the primary in place: its codes close, its pairing channels
+end (`PairingFailedEvent` code `FailDemoted`), its pushes stop and its usage asks fail, and
+its connection is untouched; it keeps the seed its caller gave it and signs nothing more. The
+relay likewise treats the former primary's connection as an ordinary member's without closing
+it, so nobody disconnects.
 
 **Pairing.** `Pair(ctx, PairOptions{Link | Target, Identity, Timeout})` returns
-`{Roster, PinnedPrimary}`, or fails with `pairing`, `unreachable` (the primary is not
+`{Roster, PinnedNetworkKey}`, or fails with `pairing`, `unreachable` (the primary is not
 connected) or `timeout`. Codes: `GenerateCode`, `NormalizeCode`, `FormatCode`; links:
 `BuildPairingLink`, `ParsePairingLink`.
 
@@ -137,8 +163,10 @@ requests each, default 3, within `Timeout`, default 3 s), takes the closest, and
 network's shard into that region's template; `Client` replaces `http.DefaultClient`. The shard is
 `ShardOf(network, shards)` with that region's `Shards`: the first four bytes of SHA-256 of the
 network id, big-endian, modulo `shards`, in lowercase hex padded to the width of `shards - 1`
-(`00` to `ff` for 256). Pass the `URL` of the `PickedRelay` it returns to
-`CreateNetwork(identity, relay, now)`; the roster carries it from then on, so the directory is
+(`00` to `ff` for 256). The network id derives from the network seed, so mint the seed first
+(`NewNetworkSeed`, then `NetworkKeyFromSeed(seed).ID()` is the network), and pass the `URL` of
+the `PickedRelay` it returns and that seed to `CreateNetwork(identity, relay, now, seed)`; the
+roster carries it from then on, so the directory is
 consulted once, at creation, and never on reconnect. It fails `unreachable` when no region
 answers (or the directory cannot be fetched) and `invalid` on a directory it cannot use
 (`ParseDirectory` checks one); fall back to a relay of your own.

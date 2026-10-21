@@ -11,59 +11,62 @@ before(() => {
   relayBinary();
 });
 
-test('a primary pairs a worker and a surface; the roster reaches everyone; sessions run every way', async () => {
+test('a primary pairs alice and bob; the roster reaches everyone; sessions run every way', async () => {
   const net = await startNet();
   try {
     const { primary } = net;
-    const paired: string[] = [];
-    primary.on('paired', (p) => paired.push(p.member.kind));
-    const worker = await net.add('worker');
-    assert.equal(worker.roster.version, 2);
-    assert.equal(worker.state, 'connected');
+    const paired: { node: string; codeId: string }[] = [];
+    primary.on('paired', (p) => paired.push({ node: p.member.id, codeId: p.codeId }));
+    const alice = await net.add();
+    assert.equal(alice.roster.version, 2);
+    assert.equal(alice.state, 'connected');
 
     // The second node pairs from the code's parts rather than the link.
-    const surfaceId = createIdentity();
-    const code = primary.openPairingCode('surface');
+    const bobId = createIdentity();
+    const code = primary.openPairingCode();
     assert.match(code.code, /^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/);
     // As a person might type it: lower case, O for 0 and l for 1.
     const typed = code.code.toLowerCase().replace(/0/g, 'o').replace(/1/g, 'l');
-    const { roster, pinnedPrimary } = await pair({
-      link: { network: primary.id, code: typed, codeId: code.codeId, relay: net.relay.url },
-      identity: surfaceId,
+    const { roster, pinnedNetworkKey } = await pair({
+      link: { network: primary.network, code: typed, codeId: code.codeId, relay: net.relay.url },
+      identity: bobId,
     });
     assert.equal(roster.version, 3);
-    assert.equal(pinnedPrimary, primary.roster.primary.ed25519);
-    const surface = await Member.connect({ identity: surfaceId, roster, timing: FAST });
-    net.members.push(surface);
-    assert.deepEqual(paired, ['worker', 'surface']);
+    assert.equal(pinnedNetworkKey, primary.roster.networkKey);
+    const bob = await Member.connect({ identity: bobId, roster, timing: FAST });
+    net.members.push(bob);
+    // The primary names the code that admitted each node: an application labels its members by code.
+    assert.equal(paired.length, 2);
+    assert.equal(paired[0]!.node, alice.id);
+    assert.deepEqual(paired[1], { node: bob.id, codeId: code.codeId });
 
-    // The primary pushed v3 to the worker over their session.
-    await until(() => worker.roster.version === 3, 'the worker to receive v3');
-    assert.equal(worker.roster.members.find((m) => m.id === surface.id)?.kind, 'surface');
+    // The primary pushed v3 to alice over their session.
+    await until(() => alice.roster.version === 3, 'alice to receive v3');
+    assert.ok(alice.roster.members.some((m) => m.id === bob.id));
 
-    const wIn = inbox(worker);
-    const sIn = inbox(surface);
+    const wIn = inbox(alice);
+    const sIn = inbox(bob);
     const pIn = inbox(primary);
-    await worker.send(surface.id, bytesOf('worker to surface'));
-    await surface.send(worker.id, bytesOf('surface to worker'));
-    await primary.send(surface.id, bytesOf('primary to surface'));
-    await surface.send(primary.id, bytesOf('surface to primary'));
-    await worker.send(primary.id, bytesOf('worker to primary'));
-    await primary.send(worker.id, bytesOf('primary to worker'));
+    await alice.send(bob.id, bytesOf('alice to bob'));
+    await bob.send(alice.id, bytesOf('bob to alice'));
+    await primary.send(bob.id, bytesOf('primary to bob'));
+    await bob.send(primary.id, bytesOf('bob to primary'));
+    await alice.send(primary.id, bytesOf('alice to primary'));
+    await primary.send(alice.id, bytesOf('primary to alice'));
     const s = await sIn.next(2);
     assert.deepEqual(s.map((m) => [m.from, textOf(m.bytes)]), [
-      [worker.id, 'worker to surface'],
-      [primary.id, 'primary to surface'],
+      [alice.id, 'alice to bob'],
+      [primary.id, 'primary to bob'],
     ]);
     const w = await wIn.next(2);
     assert.deepEqual(w.map((m) => [m.from, textOf(m.bytes)]), [
-      [surface.id, 'surface to worker'],
-      [primary.id, 'primary to worker'],
+      [bob.id, 'bob to alice'],
+      [primary.id, 'primary to alice'],
     ]);
     const p = await pIn.next(2);
     assert.deepEqual(p.map((m) => [m.from, textOf(m.bytes)]).sort(), [
-      [surface.id, 'surface to primary'],
-      [worker.id, 'worker to primary'],
+      [bob.id, 'bob to primary'],
+      [alice.id, 'alice to primary'],
     ].sort());
   } finally {
     await net.close();
@@ -73,12 +76,12 @@ test('a primary pairs a worker and a surface; the roster reaches everyone; sessi
 test('effective roster: a member offline during a pairing is brought up to date at registration', async () => {
   const net = await startNet();
   try {
-    const worker = await net.add('worker');
-    const identity = worker.identity;
-    const stale = worker.roster;
-    worker.close();
+    const alice = await net.add();
+    const identity = alice.identity;
+    const stale = alice.roster;
+    alice.close();
     await sleep(100);
-    const surface = await net.add('surface');
+    const bob = await net.add();
     assert.equal(net.primary.roster.version, 3);
 
     // It presents v2; the relay holds v3 and returns it in `registered`.
@@ -91,8 +94,8 @@ test('effective roster: a member offline during a pairing is brought up to date 
     // Applied before anything is sent under it: the roster event comes before `connected`.
     assert.deepEqual(seen, [{ version: 3, state: 'connecting' }]);
 
-    const sIn = inbox(surface);
-    await back.send(surface.id, bytesOf('caught up'));
+    const sIn = inbox(bob);
+    await back.send(bob.id, bytesOf('caught up'));
     assert.equal(textOf((await sIn.next())[0]!.bytes), 'caught up');
   } finally {
     await net.close();
@@ -102,10 +105,10 @@ test('effective roster: a member offline during a pairing is brought up to date 
 test('a member revoked while offline is closed 4008 at registration and stays revoked', async () => {
   const net = await startNet();
   try {
-    const worker = await net.add('worker');
-    const identity = worker.identity;
-    const stale = worker.roster;
-    worker.close();
+    const alice = await net.add();
+    const identity = alice.identity;
+    const stale = alice.roster;
+    alice.close();
     await sleep(100);
     net.primary.revoke(identity.id);
     const back = new Member({ identity, roster: stale, timing: FAST });
@@ -128,17 +131,17 @@ test('wrong codes burn after five; a used code admits one node; an absent primar
     const { primary } = net;
     const failures: string[] = [];
     primary.on('pairingFailed', (f) => failures.push(f.reason));
-    const code = primary.openPairingCode('worker');
-    const wrong = { network: primary.id, code: code.code === 'AAAA-AAAA' ? 'BBBB-BBBB' : 'AAAA-AAAA', codeId: code.codeId, relay: net.relay.url };
+    const code = primary.openPairingCode();
+    const wrong = { network: primary.network, code: code.code === 'AAAA-AAAA' ? 'BBBB-BBBB' : 'AAAA-AAAA', codeId: code.codeId, relay: net.relay.url };
     for (let i = 0; i < 5; i++) await assert.rejects(pair({ link: wrong, identity: createIdentity() }), { code: 'pairing' });
     assert.deepEqual(failures, Array(5).fill('wrong code'));
     await assert.rejects(pair({ link: code.link, identity: createIdentity() }), { code: 'pairing' });
 
-    const once = primary.openPairingCode('mcp');
+    const once = primary.openPairingCode();
     assert.equal((await pair({ link: once.link, identity: createIdentity() })).roster.version, 2);
     await assert.rejects(pair({ link: once.link, identity: createIdentity() }), { code: 'pairing' });
 
-    const later = primary.openPairingCode('worker');
+    const later = primary.openPairingCode();
     primary.close();
     await sleep(100);
     await assert.rejects(pair({ link: later.link, identity: createIdentity() }), { code: 'unreachable' });
@@ -170,10 +173,10 @@ async function stalledNewcomer(url: string, network: string, codeId: string): Pr
 }
 
 async function lastSlotHeld(primary: Primary, url: string) {
-  const code = primary.openPairingCode('worker');
-  const wrong = { network: primary.id, code: code.code === 'AAAA-AAAA' ? 'BBBB-BBBB' : 'AAAA-AAAA', codeId: code.codeId, relay: url };
+  const code = primary.openPairingCode();
+  const wrong = { network: primary.network, code: code.code === 'AAAA-AAAA' ? 'BBBB-BBBB' : 'AAAA-AAAA', codeId: code.codeId, relay: url };
   for (let i = 0; i < 4; i++) await assert.rejects(pair({ link: wrong, identity: createIdentity() }), { code: 'pairing' });
-  const stalled = await stalledNewcomer(url, primary.id, code.codeId);
+  const stalled = await stalledNewcomer(url, primary.network, code.codeId);
   const reasons: string[] = [];
   primary.on('pairingFailed', (f) => reasons.push(f.reason));
   // The fifth slot is in flight: the right code is turned away for now.

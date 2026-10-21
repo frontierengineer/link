@@ -50,6 +50,20 @@ func TestVectorsVerify(t *testing.T) {
 		}
 		keys[kv.NodeID] = k
 	}
+	if len(f.Networks) == 0 {
+		t.Fatal("expected networks")
+	}
+	for _, nv := range f.Networks {
+		seed, _ := link.B64u.DecodeString(nv.Seed)
+		n, err := link.DeriveNetworkKeys(seed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b64(n.Ed25519Seed) != nv.Ed25519Seed || b64(n.Ed25519Public) != nv.Ed25519 || n.ID.String() != nv.NetworkID ||
+			hex.EncodeToString(n.ID[:]) != nv.NetworkIDRaw {
+			t.Fatalf("network keys for seed %s disagree", nv.Seed)
+		}
+	}
 	valid := 0
 	for _, rv := range f.Rosters {
 		_, err := link.ParseRoster(rv.Roster)

@@ -26,8 +26,8 @@ type PairOptions struct {
 // PairResult is what pairing yields. Persist both with the identity.
 type PairResult struct {
 	Roster *Roster // the roster that includes this node
-	// PinnedPrimary is the primary's Ed25519 key, pinned from the roster.
-	PinnedPrimary string
+	// PinnedNetworkKey is the network key, pinned from the roster.
+	PinnedNetworkKey string
 }
 
 type pairEvent struct {
@@ -238,5 +238,5 @@ func checkPairedRoster(r *Roster, network string, id *Identity) (*PairResult, er
 	if me == nil || me.Ed25519 != b64u(id.edPub) || me.X25519 != b64u(id.xPub[:]) {
 		return nil, pairingError("the roster does not list this node with its keys")
 	}
-	return &PairResult{Roster: r.Clone(), PinnedPrimary: r.Primary.Ed25519}, nil
+	return &PairResult{Roster: r.Clone(), PinnedNetworkKey: r.NetworkKey}, nil
 }

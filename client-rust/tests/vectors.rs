@@ -59,31 +59,56 @@ fn client_keys_and_ids() {
 }
 
 #[test]
+fn client_network_keys_and_ids() {
+    let v = load("spec/vectors/client.json");
+    let nets = arr(&v, "networkKeys");
+    assert!(nets.len() >= 2);
+    for n in nets {
+        let seed = h32(&hex(n, "networkSeed"));
+        let key = NetworkKey::from_seed(&seed);
+        assert_eq!(key.ed25519_seed().to_vec(), hex(n, "ed25519Seed"));
+        assert_eq!(key.ed25519_public().to_vec(), hex(n, "ed25519Public"));
+        assert_eq!(b64u(&key.ed25519_public()), s(n, "ed25519PublicB64u"));
+        assert_eq!(node_id_bytes(&key.ed25519_public()).to_vec(), hex(n, "networkIdBytes"));
+        assert_eq!(key.id(), s(n, "networkId"));
+        // A network seed is not a node seed: read as one, it gives another key and id.
+        assert_ne!(Identity::from_seed(&seed).id(), key.id());
+    }
+}
+
+#[test]
 fn client_roster_signing_and_unicode() {
     let v = load("spec/vectors/client.json");
     let keys = arr(&v, "keys");
-    let primary = Identity::from_seed(&h32(&hex(&keys[0], "seed")));
+    let node = Identity::from_seed(&h32(&hex(&keys[0], "seed")));
     let signing = v.get("roster").and_then(|r| r.get("signing")).unwrap();
+    let key = NetworkKey::from_seed(&h32(&hex(signing, "networkSeed")));
     let roster = signing.get("roster").unwrap();
     assert_eq!(roster_problem(roster), None);
     let jcs = without_signature(roster).canonicalize().unwrap();
     assert_eq!(jcs, s(signing, "jcs"));
     let signed = roster_signing_bytes(roster).unwrap();
     assert_eq!(signed, hex(signing, "signedBytes"));
-    assert_eq!(b64u(&primary.sign(&signed)), s(signing, "signature"));
+    assert_eq!(b64u(&key.sign(&signed)), s(signing, "signature"));
     assert_eq!(s(roster, "signature"), s(signing, "signature"));
-    // Signing the same content from typed parts gives the same roster, byte for byte.
+    // Signed by the network key, named by it, whoever the primary is.
     let r = Roster::from_json(roster.clone()).unwrap();
+    assert_eq!(r.network(), key.id());
+    assert_eq!(r.network_key(), &key.ed25519_public());
+    assert_eq!(r.primary_id(), node.id());
+    assert_ne!(r.network(), node.id(), "the network id is not the primary's node id");
+    // Signing the same content from typed parts gives the same roster, byte for byte.
     let again = sign_roster(
         &UnsignedRoster {
             network: r.network().into(),
             version: r.version(),
             issued_at: r.issued_at(),
             relay: r.relay().into(),
-            primary: *r.primary_key(),
+            network_key: *r.network_key(),
+            primary: r.primary_id().into(),
             members: r.members().iter().rev().cloned().collect(),
         },
-        &primary,
+        &key,
     )
     .unwrap();
     assert_eq!(again.to_jcs(), r.to_jcs());
@@ -101,6 +126,20 @@ fn client_roster_validity_and_acceptance() {
     for c in arr(rosters, "valid") {
         assert_eq!(roster_problem(c.get("roster").unwrap()), None, "{}", s(c, "name"));
     }
+    let valid = |name: &str| {
+        let c = arr(rosters, "valid").iter().find(|c| s(c, "name").starts_with(name)).unwrap();
+        Roster::from_json(c.get("roster").unwrap().clone()).unwrap()
+    };
+    // Once the second member has claimed the primary, `primary` names it; the same network key signs.
+    let claimed = valid("the second member claimed the primary");
+    let second = Identity::from_seed(&h32(&hex(&arr(&v, "keys")[1], "seed")));
+    assert_eq!(claimed.primary_id(), second.id());
+    assert!(claimed.member(second.id()).is_some());
+    // A member carrying a field the protocol does not define is valid: signed over, kept, and
+    // otherwise ignored.
+    let extra = valid("a member carrying a field the protocol does not define");
+    assert!(extra.to_jcs().contains("\"kind\""));
+    assert_eq!(Roster::parse(&extra.to_jcs()).unwrap().to_jcs(), extra.to_jcs());
     let invalid = arr(rosters, "invalid");
     assert!(invalid.len() >= 10);
     for c in invalid {
@@ -108,9 +147,10 @@ fn client_roster_validity_and_acceptance() {
     }
     let acceptance = arr(rosters, "acceptance");
     let expected: Vec<bool> = acceptance.iter().map(|c| c.get("accept").and_then(Json::as_bool).unwrap()).collect();
-    assert_eq!(expected, [true, false, false, false]);
+    assert_eq!(expected, [true, false, false, true, false]);
     for c in acceptance {
-        let got = acceptance_problem(c.get("roster").unwrap(), s(c, "pinnedPrimary"), uint(c, "heldVersion")).is_none();
+        let got =
+            acceptance_problem(c.get("roster").unwrap(), s(c, "pinnedNetworkKey"), uint(c, "heldVersion")).is_none();
         assert_eq!(got, c.get("accept").and_then(Json::as_bool).unwrap(), "{}", s(c, "name"));
     }
 }
@@ -386,6 +426,22 @@ fn relay_keys_and_ids() {
         assert_eq!(id.id(), s(k, "nodeId"));
         let raw: [u8; 16] = hex(k, "nodeIdRaw").try_into().unwrap();
         assert_eq!(node_id_from_bytes(&raw), s(k, "nodeId"));
+    }
+}
+
+#[test]
+fn relay_networks() {
+    let v = load("spec/vectors/relay.json");
+    let nets = arr(&v, "networks");
+    assert!(nets.len() >= 2);
+    for n in nets {
+        let seed: [u8; 32] = from_b64u(s(n, "seed")).unwrap().try_into().unwrap();
+        let key = NetworkKey::from_seed(&seed);
+        assert_eq!(b64u(&key.ed25519_seed()), s(n, "ed25519Seed"));
+        assert_eq!(b64u(&key.ed25519_public()), s(n, "ed25519"));
+        assert_eq!(key.id(), s(n, "networkId"));
+        let raw: [u8; 16] = hex(n, "networkIdRaw").try_into().unwrap();
+        assert_eq!(node_id_from_bytes(&raw), key.id());
     }
 }
 

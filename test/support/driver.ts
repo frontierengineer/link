@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import type { PairingKind, Roster, Timing, TrafficReport, UsageReport } from '@frontierengineer/link-client';
+import type { Roster, Timing, TrafficReport, UsageReport } from '@frontierengineer/link-client';
 import { startRelay, type RelayProcess } from './relay.js';
 
 const testDir = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -148,7 +148,7 @@ export type DriverEvent =
   | { event: 'disconnect'; code: number; reason: string }
   | MessageEvent
   | { event: 'moved'; network: string }
-  | { event: 'paired'; node: string; kind: PairingKind; version: number }
+  | { event: 'paired'; node: string; codeId: string; version: number }
   | { event: 'pairingFailed'; codeId: string; reason: string }
   | { event: 'relayError'; code: string; message: string };
 
@@ -158,7 +158,9 @@ export type EventOf<K extends EventName> = Extract<DriverEvent, { event: K }>;
 export interface ConnectOptions {
   role: 'member' | 'primary';
   roster: Roster;
-  pinnedPrimary?: string;
+  /** Base64: the network seed, for a node to be the primary (spec section 3.1). */
+  networkSeed?: string;
+  pinnedNetworkKey?: string;
   relayUrl?: string;
   creditWindow?: number;
   timing?: Partial<Timing>;
@@ -187,7 +189,6 @@ export interface PairArgs {
 export interface PairingCodeResult {
   code: string;
   codeId: string;
-  kind: PairingKind;
   link: string;
   expiresAt: number;
 }
@@ -433,10 +434,10 @@ export class Driver {
     this.ed25519 = r.ed25519;
     return r;
   }
-  async createNetwork(relay: string): Promise<Roster> {
-    return (await this.call<{ roster: Roster }>('createNetwork', { relay })).roster;
+  createNetwork(relay: string): Promise<{ roster: Roster; networkSeed: string }> {
+    return this.call('createNetwork', { relay });
   }
-  pair(args: PairArgs): Promise<{ roster: Roster; pinnedPrimary: string }> {
+  pair(args: PairArgs): Promise<{ roster: Roster; pinnedNetworkKey: string }> {
     return this.call('pair', { ...args });
   }
   async connect(opts: ConnectOptions): Promise<void> {
@@ -448,7 +449,7 @@ export class Driver {
   async waitConnected(timeoutMs?: number): Promise<void> {
     await this.call('waitConnected', timeoutMs === undefined ? {} : { timeoutMs });
   }
-  state(): Promise<{ state: NodeState; roster: Roster }> {
+  state(): Promise<{ state: NodeState; roster: Roster; primary: boolean }> {
     return this.call('state');
   }
   async send(peer: string, payload: { bytes: string } | { size: number; fill: number }, timeoutMs?: number): Promise<void> {
@@ -474,8 +475,8 @@ export class Driver {
   async resetTraffic(): Promise<void> {
     await this.call('resetTraffic');
   }
-  openPairingCode(kind: PairingKind, opts: { lifetimeMs?: number; code?: string } = {}): Promise<PairingCodeResult> {
-    return this.call('openPairingCode', { kind, ...opts });
+  openPairingCode(opts: { lifetimeMs?: number; code?: string } = {}): Promise<PairingCodeResult> {
+    return this.call('openPairingCode', { ...opts });
   }
   async cancelPairingCode(codeId: string): Promise<void> {
     await this.call('cancelPairingCode', { codeId });
@@ -536,7 +537,9 @@ export interface Node {
   id: string;
   seed: string;
   roster: Roster;
-  pinnedPrimary: string;
+  pinnedNetworkKey: string;
+  /** Base64, for the primary: the network seed the test keeps, as an application would. */
+  networkSeed?: string;
 }
 
 export interface Scene {
@@ -548,9 +551,9 @@ export interface Scene {
   /** Creates a network with a primary of `impl` and connects it. */
   primary(impl: Impl, opts?: Partial<ConnectOptions>): Promise<Node>;
   /** Pairs a new node of `impl` through the primary, without connecting it. */
-  pairOnly(impl: Impl, kind: PairingKind, label: string): Promise<Node>;
+  pairOnly(impl: Impl, label: string): Promise<Node>;
   /** Pairs a new node and connects it as a member, and waits for the others to learn of it. */
-  add(impl: Impl, kind: PairingKind, label: string, opts?: Partial<ConnectOptions>): Promise<Node>;
+  add(impl: Impl, label: string, opts?: Partial<ConnectOptions>): Promise<Node>;
   /** Connects a node as a member with its roster (or the one given in `opts`). */
   join(node: Node, opts?: Partial<ConnectOptions>): Promise<void>;
   /** Nodes connected through the scene, the primary first. */
@@ -591,21 +594,21 @@ export async function scene(opts: SceneOptions, body: (s: Scene) => Promise<void
     },
     async primary(impl, more = {}) {
       const d = await s.spawn(impl, 'primary');
-      const roster = await d.createNetwork(relay.url);
-      await d.connect({ role: 'primary', roster, timing, ...more });
-      primary = { d, impl, id: d.id, seed: d.seed, roster, pinnedPrimary: roster.primary.ed25519 };
+      const { roster, networkSeed } = await d.createNetwork(relay.url);
+      await d.connect({ role: 'primary', roster, networkSeed, timing, ...more });
+      primary = { d, impl, id: d.id, seed: d.seed, roster, pinnedNetworkKey: roster.networkKey, networkSeed };
       s.nodes.push(primary);
       return primary;
     },
-    async pairOnly(impl, kind, label) {
+    async pairOnly(impl, label) {
       if (!primary) throw new Error('no primary yet');
       const d = await s.spawn(impl, label);
-      const code = await primary.d.openPairingCode(kind);
-      const { roster, pinnedPrimary } = await d.pair({ link: code.link });
-      return { d, impl, id: d.id, seed: d.seed, roster, pinnedPrimary };
+      const code = await primary.d.openPairingCode();
+      const { roster, pinnedNetworkKey } = await d.pair({ link: code.link });
+      return { d, impl, id: d.id, seed: d.seed, roster, pinnedNetworkKey };
     },
-    async add(impl, kind, label, more = {}) {
-      const n = await s.pairOnly(impl, kind, label);
+    async add(impl, label, more = {}) {
+      const n = await s.pairOnly(impl, label);
       const others = s.nodes.filter((o) => o.d.exit.code === undefined);
       await s.join(n, more);
       // The primary pushes the new roster over the others' sessions, which takes a moment: until
@@ -614,7 +617,7 @@ export async function scene(opts: SceneOptions, body: (s: Scene) => Promise<void
       return n;
     },
     async join(n, more = {}) {
-      await n.d.connect({ role: 'member', roster: n.roster, pinnedPrimary: n.pinnedPrimary, timing, ...more });
+      await n.d.connect({ role: 'member', roster: n.roster, pinnedNetworkKey: n.pinnedNetworkKey, timing, ...more });
       s.nodes.push(n);
     },
   };

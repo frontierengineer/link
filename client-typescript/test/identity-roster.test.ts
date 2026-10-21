@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { b32, b64u, concat, fromB64u, fromHex, toHex, utf8, EMPTY } from '../src/bytes.js';
 import { ed25519Verify, hkdf, sha256 } from '../src/crypto.js';
-import { createIdentity, identityFromSeed, isNodeId, nodeIdFromBytes, nodeIdToBytes } from '../src/identity.js';
+import { createIdentity, createNetworkSeed, identityFromSeed, isNodeId, networkKeyFromSeed, nodeIdFromBytes, nodeIdToBytes } from '../src/identity.js';
 import { canonicalize } from '../src/jcs.js';
 import {
   acceptanceProblem,
@@ -52,24 +52,48 @@ test('isNodeId refuses wrong length, case and trailing bits', () => {
 });
 
 const primary = identityFromSeed(seed(1));
-const worker = identityFromSeed(seed(2));
-const surface = identityFromSeed(seed(3));
+const net = networkKeyFromSeed(seed(0x80));
+
+test('a network has a seed of its own: its key and id derive from it, not from the primary (section 2)', () => {
+  const edSeed = hkdf(seed(0x80), EMPTY, utf8('frontier-link/1/network'), 32);
+  assert.deepEqual(net.ed25519.seed, edSeed);
+  assert.deepEqual(net.ed25519.pub, ed25519.getPublicKey(edSeed));
+  assert.equal(net.id, b32(sha256(net.ed25519.pub).subarray(0, 16)));
+  assert.ok(isNodeId(net.id));
+  // The same 32 bytes as a node seed give another key: the info string keeps them apart.
+  assert.notEqual(net.id, identityFromSeed(seed(0x80)).id);
+  assert.ok(ed25519Verify(net.sign(utf8('m')), utf8('m'), net.ed25519.pub));
+  assert.throws(() => networkKeyFromSeed(new Uint8Array(31)));
+  assert.notDeepEqual(createNetworkSeed(), createNetworkSeed());
+  // createNetwork mints a seed apart from the node's, and the network id is the seed's.
+  const made = createNetwork({ identity: primary, relay: 'wss://r/v1', now: 5 });
+  const key = networkKeyFromSeed(made.networkSeed);
+  assert.equal(made.roster.network, key.id);
+  assert.notEqual(made.roster.network, primary.id);
+  assert.equal(made.roster.networkKey, b64u(key.ed25519.pub));
+  assert.notDeepEqual(made.networkSeed, primary.seed);
+  assert.notEqual(createNetwork({ identity: primary, relay: 'wss://r/v1' }).roster.network, made.roster.network);
+  assert.equal(createNetwork({ identity: primary, relay: 'wss://r/v1', networkSeed: seed(0x80) }).roster.network, net.id);
+});
+const alice = identityFromSeed(seed(2));
+const bob = identityFromSeed(seed(3));
 
 function sample(): Roster {
   return signRoster(
     {
-      network: primary.id,
+      network: net.id,
       version: 3,
       issuedAt: 1790000000000,
       relay: 'wss://eu.frontierengineer.link/v1',
-      primary: { ed25519: b64u(primary.ed25519.pub) },
+      networkKey: b64u(net.ed25519.pub),
+      primary: primary.id,
       members: [
-        memberFromIdentity(surface, 'surface'),
-        memberFromIdentity(primary, 'primary'),
-        memberFromIdentity(worker, 'worker'),
+        memberFromIdentity(bob),
+        memberFromIdentity(primary),
+        memberFromIdentity(alice),
       ],
     },
-    primary,
+    net,
   );
 }
 
@@ -79,12 +103,38 @@ test('roster signing: label || JCS without signature, members sorted', () => {
   assert.deepEqual(ids, [...ids].sort());
   const { signature, ...rest } = r;
   assert.deepEqual(rosterSigningBytes(r), concat(utf8('frontier-link/1/roster'), utf8(canonicalize(rest))));
-  assert.ok(ed25519Verify(fromB64u(signature), rosterSigningBytes(r), primary.ed25519.pub));
+  assert.ok(ed25519Verify(fromB64u(signature), rosterSigningBytes(r), net.ed25519.pub));
+  assert.ok(!ed25519Verify(fromB64u(signature), rosterSigningBytes(r), primary.ed25519.pub));
   assert.equal(rosterProblem(r), null);
-  const first = createNetwork({ identity: primary, relay: 'wss://r/v1', now: 5 });
+  const { roster: first } = createNetwork({ identity: primary, relay: 'wss://r/v1', now: 5 });
   assert.equal(first.version, 1);
   assert.equal(first.members.length, 1);
+  assert.equal(first.primary, primary.id);
   assert.equal(rosterProblem(first), null);
+});
+
+test("a roster is signed by the network key: the primary's own key does not do, and a new primary changes no key", () => {
+  const r = sample();
+  const { signature: _s, ...rest } = r;
+  const byPrimary: Roster = { ...rest, signature: b64u(primary.sign(rosterSigningBytes(rest))) };
+  assert.match(rosterProblem(byPrimary)!, /signature does not verify/);
+  // Once alice is the primary: the same network, key and signer.
+  const moved = signRoster({ ...rest, version: 4, primary: alice.id }, net);
+  assert.equal(rosterProblem(moved), null);
+  assert.equal(acceptanceProblem(moved, r.networkKey, 3), null);
+  assert.equal(moved.network, r.network);
+});
+
+test('a field the protocol does not define, on a member or the roster, is signed and otherwise ignored', () => {
+  const r = sample();
+  const { signature: _s, ...rest } = r;
+  const labelled = { ...rest, members: rest.members.map((m, i) => (i === 0 ? { ...m, kind: 'label' } : m)), x: [1, 'two'] };
+  const signed = { ...labelled, signature: b64u(net.sign(rosterSigningBytes(labelled as unknown as Roster))) };
+  assert.equal(rosterProblem(signed), null);
+  assert.equal(acceptanceProblem(signed, r.networkKey, 2), null);
+  // Still signed: changing it after signing breaks the signature.
+  const changed = { ...signed, members: signed.members.map((m, i) => (i === 0 ? { ...m, kind: 'other' } : m)) };
+  assert.match(rosterProblem(changed)!, /signature does not verify/);
 });
 
 test('roster validation refuses each broken rule', () => {
@@ -93,32 +143,34 @@ test('roster validation refuses each broken rule', () => {
     f(r);
     if (!resign) return r;
     const { signature: _s, ...rest } = r;
-    return { ...rest, signature: b64u(primary.sign(rosterSigningBytes(rest as Roster))) };
+    return { ...rest, signature: b64u(net.sign(rosterSigningBytes(rest as Roster))) };
   };
   const cases: [string, Roster][] = [
     ['tampered body', mutate((r) => (r.version = 4), false)],
     ['bad signature', mutate((r) => (r.signature = b64u(new Uint8Array(64))), false)],
-    ['network not derived', mutate((r) => (r.network = worker.id))],
+    ['network not derived', mutate((r) => (r.network = alice.id))],
+    ["network is the primary's node id", mutate((r) => (r.network = primary.id))],
+    ['networkKey missing', mutate((r) => delete (r as Partial<Roster>).networkKey)],
     ['unsorted', mutate((r) => r.members.reverse())],
     ['duplicate', mutate((r) => r.members.push({ ...r.members[r.members.length - 1]! }))],
-    ['id not derived', mutate((r) => (r.members.find((m) => m.kind === 'worker')!.ed25519 = b64u(surface.ed25519.pub)))],
-    ['two primaries', mutate((r) => (r.members.find((m) => m.kind === 'worker')!.kind = 'primary'))],
-    ['no primary', mutate((r) => (r.members = r.members.filter((m) => m.kind !== 'primary')))],
-    ['bad kind', mutate((r) => ((r.members[0] as { kind: string }).kind = 'admin'))],
+    ['id not derived', mutate((r) => (r.members.find((m) => m.id === alice.id)!.ed25519 = b64u(bob.ed25519.pub)))],
+    ['primary missing', mutate((r) => delete (r as Partial<Roster>).primary)],
+    ['primary not a node id', mutate((r) => (r.primary = 'P'))],
+    ['primary not a member', mutate((r) => (r.members = r.members.filter((m) => m.id !== r.primary)))],
     ['version zero', mutate((r) => (r.version = 0))],
     ['fractional version', mutate((r) => (r.version = 1.5))],
     ['short key', mutate((r) => (r.members[0]!.x25519 = b64u(new Uint8Array(31))))],
   ];
   for (const [name, r] of cases) assert.notEqual(rosterProblem(r), null, name);
-  // A different signer with a roster naming itself is valid, but not acceptable to a pinned member.
-  const other = createNetwork({ identity: worker, relay: 'wss://r/v1' });
+  // Another network's roster is valid, but not acceptable to a member that pinned this one.
+  const { roster: other } = createNetwork({ identity: alice, relay: 'wss://r/v1' });
   assert.equal(rosterProblem(other), null);
-  assert.match(acceptanceProblem(other, b64u(primary.ed25519.pub), 0)!, /different primary/);
+  assert.match(acceptanceProblem(other, b64u(net.ed25519.pub), 0)!, /another network key/);
 });
 
-test('roster acceptance needs a newer version from the pinned primary', () => {
+test('roster acceptance needs a newer version under the pinned network key', () => {
   const r = sample();
-  const pin = r.primary.ed25519;
+  const pin = r.networkKey;
   assert.equal(acceptanceProblem(r, pin, 2), null);
   assert.match(acceptanceProblem(r, pin, 3)!, /not newer/);
   assert.match(acceptanceProblem(r, pin, 4)!, /not newer/);
@@ -151,21 +203,21 @@ test('registration signing bytes and origin', () => {
 });
 
 test('resignation signatures verify only for the signer, network and node', () => {
-  const r = signResignation(worker, primary.id, 1790000000000);
-  assert.ok(verifyResignation(r, primary.id, worker.ed25519.pub));
-  assert.ok(!verifyResignation(r, worker.id, worker.ed25519.pub));
-  assert.ok(!verifyResignation({ ...r, ts: r.ts + 1 }, primary.id, worker.ed25519.pub));
-  assert.ok(!verifyResignation(r, primary.id, surface.ed25519.pub));
+  const r = signResignation(alice, primary.id, 1790000000000);
+  assert.ok(verifyResignation(r, primary.id, alice.ed25519.pub));
+  assert.ok(!verifyResignation(r, alice.id, alice.ed25519.pub));
+  assert.ok(!verifyResignation({ ...r, ts: r.ts + 1 }, primary.id, alice.ed25519.pub));
+  assert.ok(!verifyResignation(r, primary.id, bob.ed25519.pub));
 });
 
 test('a roster is valid up to 65000 bytes of JCS, signature included, and invalid one byte over', () => {
   const p = identityFromSeed(seed(9));
-  const members: RosterMember[] = [memberFromIdentity(p, 'primary')];
+  const members: RosterMember[] = [memberFromIdentity(p)];
   for (let i = 0; i < 300; i++) {
     const s = Uint8Array.from({ length: 32 }, (_, j) => (j === 0 ? i >> 8 : j === 1 ? i & 0xff : 7));
-    members.push(memberFromIdentity(identityFromSeed(s), 'mcp'));
+    members.push(memberFromIdentity(identityFromSeed(s)));
   }
-  const make = (relay: string) => signRoster({ network: p.id, version: 3, issuedAt: 1790000000000, relay, primary: { ed25519: members[0]!.ed25519 }, members }, p);
+  const make = (relay: string) => signRoster({ network: net.id, version: 3, issuedAt: 1790000000000, relay, networkKey: b64u(net.ed25519.pub), primary: p.id, members }, net);
   const base = rosterSize(make(''));
   assert.ok(base < MAX_ROSTER_BYTES);
   const exact = make('x'.repeat(MAX_ROSTER_BYTES - base));
@@ -175,10 +227,10 @@ test('a roster is valid up to 65000 bytes of JCS, signature included, and invali
   assert.throws(() => make('x'.repeat(MAX_ROSTER_BYTES - base + 1)), /over the 65000-byte limit/);
   const { signature: _s, ...unsigned } = exact;
   const over = { ...unsigned, relay: exact.relay + 'x' };
-  const signed: Roster = { ...over, signature: b64u(p.sign(rosterSigningBytes(over))) };
+  const signed: Roster = { ...over, signature: b64u(net.sign(rosterSigningBytes(over))) };
   assert.equal(rosterSize(signed), MAX_ROSTER_BYTES + 1);
   assert.match(rosterProblem(signed)!, /over the 65000-byte limit/);
-  assert.match(acceptanceProblem(signed, signed.primary.ed25519, 1)!, /over the 65000-byte limit/);
+  assert.match(acceptanceProblem(signed, signed.networkKey, 1)!, /over the 65000-byte limit/);
   // Multi-byte characters count as bytes, not characters.
   const chars = MAX_ROSTER_BYTES - base;
   assert.throws(() => make('\u00e9'.repeat(Math.ceil(chars / 2) + 1)), /over the 65000-byte limit/);

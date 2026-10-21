@@ -39,7 +39,7 @@ export const SOCKET_LOW_WATER = 65536;
 
 /** The most a connection's socket may hold not yet sent (section 11). Control is handed over at
  * once, so this bounds it: the largest honest burst is a primary publishing a full roster
- * (65000 bytes) to every member (about 400), some 26 MB, so the bound leaves room for that and
+ * (65000 bytes) to every member (about 440), some 29 MB, so the bound leaves room for that and
  * more besides. A send past it drops the connection, which then reconnects, rather than grow
  * without limit behind a relay that stopped reading. */
 export const MAX_SOCKET_BYTES = 64 * 1024 * 1024;

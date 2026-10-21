@@ -1,6 +1,15 @@
 // @frontierengineer/link-client: the public surface.
 
-export { createIdentity, identityFromSeed, nodeIdFromEd25519, isNodeId, type Identity } from './identity.js';
+export {
+  createIdentity,
+  identityFromSeed,
+  nodeIdFromEd25519,
+  isNodeId,
+  networkKeyFromSeed,
+  createNetworkSeed,
+  type Identity,
+  type NetworkKey,
+} from './identity.js';
 export {
   createNetwork,
   signRoster,
@@ -12,13 +21,10 @@ export {
   MAX_ROSTER_BYTES,
   memberFromIdentity,
   findMember,
-  MEMBER_KINDS,
-  PAIRING_KINDS,
+  primaryOf,
   type Roster,
   type UnsignedRoster,
   type RosterMember,
-  type MemberKind,
-  type PairingKind,
 } from './roster.js';
 export { canonicalize, type JsonValue } from './jcs.js';
 export {
@@ -42,6 +48,7 @@ export { pair, type PairOptions, type PairTarget, type PairResult } from './newc
 export {
   Member,
   DEFAULT_TIMING,
+  DEMOTED_REASON,
   type MemberOptions,
   type MemberState,
   type MemberEvents,

@@ -1045,18 +1045,15 @@ func TestPrimaryOpensCodesWithinTheRosterLimit(t *testing.T) {
 	tn.roster = tn.sign(1, tn.ids[0])
 	pm := tn.start(0)
 	p := &Primary{Member: pm}
-	code, err := p.OpenPairingCode(KindWorker, PairingCodeOptions{Code: "abcd-1234"})
+	code, err := p.OpenPairingCode(PairingCodeOptions{Code: "abcd-1234"})
 	if err != nil || code.Code != "ABCD-1234" {
 		t.Fatalf("%+v %v", code, err)
 	}
 	link, err := ParsePairingLink(code.Link)
-	if err != nil || link.Code != "ABCD1234" || link.CodeID != code.CodeID || link.Network != p.ID() || link.Relay != testRelayURL {
+	if err != nil || link.Code != "ABCD1234" || link.CodeID != code.CodeID || link.Network != p.Network() || link.Relay != testRelayURL {
 		t.Fatalf("link %+v %v", link, err)
 	}
-	if _, err := p.OpenPairingCode(KindPrimary, PairingCodeOptions{}); CodeOf(err) != CodeInvalid {
-		t.Fatal("a primary code")
-	}
-	if _, err := p.OpenPairingCode(KindMCP, PairingCodeOptions{Code: "nope"}); CodeOf(err) != CodeInvalid {
+	if _, err := p.OpenPairingCode(PairingCodeOptions{Code: "nope"}); CodeOf(err) != CodeInvalid {
 		t.Fatal("a bad chosen code")
 	}
 	// Fill the roster to just under the limit: no further member fits.
@@ -1065,20 +1062,20 @@ func TestPrimaryOpensCodesWithinTheRosterLimit(t *testing.T) {
 		u.Version = 9
 		for {
 			id, _ := NewIdentity()
-			u.Members = append(u.Members, MemberFromIdentity(id, KindMCP))
+			u.Members = append(u.Members, MemberFromIdentity(id))
 			r := &Roster{UnsignedRoster: u, Signature: strings.Repeat("A", 86)}
 			if s, _ := r.Size(); s > MaxRosterBytes {
 				u.Members = u.Members[:len(u.Members)-1]
 				break
 			}
 		}
-		r, err := SignRoster(u, tn.ids[0])
+		r, err := SignRoster(u, tn.key)
 		if err != nil {
 			t.Fatal(err)
 		}
 		pm.roster = r
 	})
-	if _, err := p.OpenPairingCode(KindWorker, PairingCodeOptions{}); CodeOf(err) != CodeRosterFull {
+	if _, err := p.OpenPairingCode(PairingCodeOptions{}); CodeOf(err) != CodeRosterFull {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -1308,7 +1305,7 @@ func TestAHostileRelayCannotFloodPairingRefusals(t *testing.T) {
 	// A code the primary issued and cancelled is refused apart from that budget, which the
 	// flood has spent: the first refusal on each pairing channel is answered, repeats on one
 	// channel once a second, and the application hears of it once a second.
-	code, _ := prim.OpenPairingCode(KindWorker, PairingCodeOptions{})
+	code, _ := prim.OpenPairingCode(PairingCodeOptions{})
 	prim.CancelPairingCode(code.CodeID)
 	on := func(channel byte) {
 		msg, _ := json.Marshal(map[string]string{"type": "pairing", "channel": b64u(append(make([]byte, 15), channel)), "code": code.CodeID})
@@ -1481,7 +1478,7 @@ func TestPairingChannelSetupsAreBudgetedPerCode(t *testing.T) {
 			events.Add(1)
 		}
 	})
-	code, _ := p.OpenPairingCode(KindWorker, PairingCodeOptions{})
+	code, _ := p.OpenPairingCode(PairingCodeOptions{})
 	conn := tn.relay.conn(pm.ID())
 	setups := 0
 	for i := range 100 {

@@ -1,6 +1,6 @@
 [package]
 name = "link-client"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "The Rust client for Link, protocol version 1 (spec/protocol.md)"
 license = "MIT"

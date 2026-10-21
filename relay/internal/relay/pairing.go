@@ -50,7 +50,7 @@ func (c *conn) pair(data []byte) bool {
 	var p *conn
 	if n != nil {
 		n.mu.Lock()
-		p = n.members[netID]
+		p = n.members[n.roster.Primary]
 		n.mu.Unlock()
 	}
 	if p == nil {

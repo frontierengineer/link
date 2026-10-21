@@ -66,7 +66,13 @@ type would. `spec/vectors/relay.json` holds such documents as text (section 12).
 - `x25519Private = HKDF-SHA256(ikm = seed, salt = empty, info = "frontier-link/1/x25519", L = 32)`,
   clamped as X25519 requires.
 - **Node id** = `b32(SHA-256(ed25519Public)[0..16])`: 26 characters.
-- **Network id** = the node id of the network's primary.
+- Each network has its own 32-byte **network seed**, from a secure random source, minted once
+  when the network is created, apart from every node's seed. Its custody is the application's
+  (section 3.1): Link never stores, sends or deletes it.
+- `networkEd25519Seed = HKDF-SHA256(ikm = network seed, salt = empty, info = "frontier-link/1/network", L = 32)`;
+  the **network key**, an Ed25519 keypair, is derived from it as RFC 8032 specifies.
+- **Network id** = `b32(SHA-256(networkKeyPublic)[0..16])`, derived from the network key as a
+  node id is from a node's key. It never changes, whichever node is primary.
 - Public keys in JSON are `b64u` of the raw 32 bytes.
 
 ## 3. The roster
@@ -77,29 +83,59 @@ type would. `spec/vectors/relay.json` holds such documents as text (section 12).
   "version": 12,
   "issuedAt": 1790000000000,
   "relay": "wss://frontierengineer.link/v1",
-  "primary": { "ed25519": "<b64u>" },
+  "networkKey": "<b64u>",
+  "primary": "<node id>",
   "members": [
-    { "id": "<node id>", "ed25519": "<b64u>", "x25519": "<b64u>", "kind": "primary" }
+    { "id": "<node id>", "ed25519": "<b64u>", "x25519": "<b64u>" }
   ],
   "signature": "<b64u>"
 }
 ```
 
 - `version` is a positive integer that increases with every change. `issuedAt` is Unix
-  milliseconds. Both are non-negative integer literals (section 1) of at most 2^53 − 1. `kind`
-  is one of `primary`, `worker`, `surface`, `mcp`.
-- A roster's JCS encoding (with its signature) is at most **65000 bytes**, about 400 members,
+  milliseconds. Both are non-negative integer literals (section 1) of at most 2^53 − 1.
+- A roster's JCS encoding (with its signature) is at most **65000 bytes**, about 440 members,
   so that it always fits in one session message. A primary refuses to add a member beyond that,
   and a roster over the limit is invalid everywhere.
-- `members` is sorted by `id`. Exactly one member has kind `primary`, and its `ed25519` equals
-  `primary.ed25519`. Its `id` equals `network`.
-- **Signature** = Ed25519 by the primary over
+- `networkKey` is the network key's public half (section 2).
+- `members` is sorted by `id`, each id once.
+- `primary` is the node id of the **primary**, the member that holds the network seed; it must
+  be the `id` of one of `members`. It has nothing to do with `network`.
+- A roster or a member entry may carry other fields: they are signed like the rest and
+  otherwise ignored. An application that sorts its members into categories keeps them in its
+  own data, by node id.
+- **Signature** = Ed25519 by the network key over
   `UTF-8("frontier-link/1/roster") || JCS(roster with the "signature" member removed)`.
-- **Valid** when: the signature verifies against `primary.ed25519`; `network` equals the node id
-  derived from `primary.ed25519`; every member's `id` is derived from its `ed25519`; the rules
-  above hold.
-- A member **accepts** a roster only if it is valid, `primary.ed25519` equals the key the member
+- **Valid** when: the signature verifies against `networkKey`; `network` equals the id derived
+  from `networkKey`; every member's `id` is derived from its `ed25519`; `primary` is a member's
+  `id`; the rules above hold.
+- A member **accepts** a roster only if it is valid, `networkKey` equals the key the member
   pinned at pairing, and `version` is greater than the version it holds.
+
+### 3.1 The network seed and the primary
+
+Being primary is a trait of one member, the one the roster names primary, and of its relay
+connection: nothing more. A node keeps its own seed, its node id and its connection when it
+becomes primary or stops being one, and nobody is disconnected when the primary changes.
+
+- **Creating a network.** A node mints a network seed, derives the network key and id, and signs
+  version 1 listing itself alone, and itself as `primary`.
+- **Custody.** The application that runs a node keeps the network seed and gives it to the node
+  it wants to be the primary. Link never stores, sends or deletes it: no message of this
+  protocol carries it. Whoever holds the seed can make its node the primary, so keeping it to one
+  node is the application's.
+- **Signing.** Only a node holding the network seed signs a roster, and only while the roster it
+  holds names it primary.
+- **Becoming the primary.** A node started with the network seed whose roster names another
+  member primary claims it once registered: it signs the next roster with itself as `primary`,
+  nothing else changed (the former primary is an ordinary member of it), and publishes it
+  as any change (sections 4.2 and 8). It is the primary from then on. It claims only when it
+  starts: a node whose roster later names another member primary stops being the primary in
+  place (it closes its codes and ends its pairing channels, section 5.3) and signs nothing more,
+  whatever seed it holds.
+- **The relay** follows the roster: the primary is whichever member its roster names primary,
+  and when a newer roster names another, the relay demotes the former primary's connection in
+  place (section 4.2).
 
 ## 4. Connecting to the relay
 
@@ -134,7 +170,7 @@ node ignores such a message from the relay. Binary frames carry routed frames (s
    5. the roster is valid and its `network` equals `network` (`4008`);
    6. the **effective roster** is the newer of the presented roster and the newest the relay
       holds for the network. A presented roster newer than the relay's replaces it (it is signed
-      by the primary, so any member may deliver it);
+      with the network key, so any member may deliver it);
    7. `node` is a member of the effective roster (`4008`).
 4. Relay → node: `{"type":"registered","node":"<id>","rosterVersion":12}`. When the relay held a
    newer roster than the node presented, it adds `"roster":{ ... }` with that newer roster, and
@@ -162,12 +198,23 @@ copy wins and nothing is sent back.
 
 ### 4.2 Rosters at the relay
 
-- The relay keeps, in memory, the newest valid roster per network.
+- The relay keeps, in memory, the newest valid roster per network. The network's **primary**,
+  for the relay, is the member that roster names primary; its connection is the **primary
+  connection**, and every other is a member connection.
 - The primary pushes every new roster: `{"type":"roster","roster":{ ... }}`. The relay accepts it
-  from the primary only, if valid and newer, and then closes `4008` every connection of that
-  network whose node is no longer a member. There is no acknowledgement. An invalid or older
-  roster is answered with error `bad_request`, an equal version is ignored, and a push from any
-  other member is answered `forbidden`.
+  from any member of the network, if valid and newer: it is signed with the network key, so
+  whoever delivers it, a holder of the network seed signed it (a node claiming the primary is
+  not yet the relay's primary when it pushes, section 3.1). It then closes `4008` every
+  connection of that network whose node is no longer a member. There is no acknowledgement. An
+  invalid or older roster is answered with error `bad_request`, and an equal version is ignored.
+- **A new primary.** When the roster the relay adopts, at a push or at a registration, names another
+  member primary, the relay demotes the former primary's connection in place: it MUST NOT close
+  or disconnect it, and no close code is used. That connection stays registered as an ordinary
+  member connection, and the node goes on sending and receiving as before. The relay ends every
+  pairing channel of the demoted connection as when a primary leaves (section 5.2: `pairEnd` to
+  both sides, the newcomer closed `1000`), answers that node's `usage` asks `forbidden` from
+  then on, and treats the new primary's connection, if it is connected, as the primary
+  connection at once.
 - After registration, an unknown control message type is answered `bad_request` and the
   connection stays open. A node sending a frame of type `0x04` or an unknown type is closed
   `4000`.
@@ -193,7 +240,7 @@ Usage is request-only: the relay never pushes it.
   per-member figures.
 - Asks are limited per network: 3 at once, then one every 10 seconds. An ask beyond that is
   refused, not queued: `{"type":"error","code":"rate_limited","id":"<request id>"}`.
-- A `usage` request from a node that is not the primary is answered
+- A `usage` request from a node that is not the primary (section 4.2) is answered
   `{"type":"error","code":"forbidden","id":"<request id>"}`.
 - Asks, answers and refusals are charged to the network like any other traffic (section 9).
 
@@ -210,7 +257,7 @@ when answering a request. Codes: `forbidden`, `bad_request`, `unreachable`, `rat
   (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`), displayed as `XXXX-XXXX`. The hyphen is not part of the
   code; input is upper-cased, and `I`/`L` read as `1`, `O` as `0`.
 - Each code has a **code id**: 8 random bytes, `b64u` in links and JSON.
-- A code lives 15 minutes, admits one node, and fixes its kind (`worker`, `surface`, `mcp`).
+- A code lives 15 minutes and admits one node.
 - Five failed confirmations burn the code. A slot is reserved when an attempt starts; a failed
   confirmation keeps it; a timeout or a dropped connection refunds it.
 - Pairing link: `frontier://pair?v=1&n=<network id>&c=<code>&i=<code id b64u>&r=<relay URL, percent-encoded>`.
@@ -222,7 +269,7 @@ when answering a request. Codes: `forbidden`, `bad_request`, `unreachable`, `rat
 
 1. The newcomer connects to the relay, receives `hello`, and sends
    `{"type":"pair","network":"<id>","code":"<code id b64u>"}` instead of `register`.
-2. If the network's primary is not connected, the relay answers
+2. If the network's primary (section 4.2) is not connected, the relay answers
    `{"type":"error","code":"unreachable"}` and closes `1000`.
 3. Otherwise the relay picks a random 16-byte **channel id**, sends
    `{"type":"pairing","channel":"<b64u>"}` to the newcomer, and
@@ -300,9 +347,13 @@ empty associated data. Plaintext is UTF-8 JSON.
 
 After P6 the primary burns the code, pushes the new roster to the relay and its members (all but
 the newcomer, which holds it already from P6 and is not yet connected as a member, so a push to
-it would only fail and be tried again, section 8), and sends `pairEnd`. The newcomer pins
-`primary.ed25519` from the roster, checks it lists itself, and reconnects to register as a
-member.
+it would only fail and be tried again, section 8), and sends `pairEnd`. It tells its
+application the new member's node id and the code id that admitted it: an application that
+labels its members does so by the code it opened for each. The newcomer pins
+`networkKey` from the roster, checks it lists itself, and reconnects to register as a member.
+
+A primary that stops being one (section 3.1) closes every code it opened and ends every pairing
+channel it holds; the relay ends them too.
 
 ## 6. Routed frames
 
@@ -403,7 +454,7 @@ roster.
   side that is behind asks that peer for it (`roster-request`, section 7.3; the primary when it
   cannot open a session to the peer). If it shows the peer is behind, and the peer is on this
   side's roster, this side sends the peer its roster. A roster is accepted only under section
-  3's rules, signed by the pinned primary key, so it may come from any member.
+  3's rules, signed by the pinned network key, so it may come from any member.
 - Handshake timeout: 10 seconds per message.
 
 ### 7.2 Transport
@@ -490,7 +541,8 @@ Each decrypted plaintext starts with a type byte:
 - **Resigning.** `sig` = Ed25519 by the member over
   `lenStr("frontier-link/1/resign") || lenStr(network) || lenStr(node) || u64be(ts)`. The primary
   accepts it only from that member's own session and with `ts` within 5 minutes of its clock,
-  then publishes a roster without the member.
+  then publishes a roster without the member. Neither the primary nor a node started with the
+  network seed resigns.
 
 ### 7.4 Rates
 
@@ -582,9 +634,10 @@ timeout or a retry behind it. The same holds for the limits of sections 5.2 and 
   first up-to-date member it meets (section 7.1), so revocation reaches it with the primary
   offline and whatever the relay remembers: members enforce it themselves, and the relay is not
   trusted to.
-- A primary whose seed is lost cannot change the roster again: there is no second key that could
-  sign one, by design, since any such key could also admit or revoke. The way back is a new
-  network, with every node paired again.
+- A network whose seed is lost cannot change its roster again: there is no second key that
+  could sign one, by design, since any such key could also admit or revoke. The way back is a
+  new network, with every node paired again. A new primary (section 3.1) uses the one seed; it
+  never makes a second.
 - A client whose registration is closed `4008`, or that accepts a roster no longer listing it
   (in `registered`, from the primary or from a peer), enters a terminal `revoked` state and
   stops retrying. It is never `registered` (connected) after that, not even for the
@@ -694,6 +747,9 @@ A self-hosted relay defaults every limit to off; the values below are the public
 - A send to a peer that answers `unreachable` fails at once with a typed error. Nothing is queued
   for absent peers.
 - On `4009`, look the network up again and reconnect.
+- **A new primary closes nothing.** A node whose roster stops naming it primary, or starts to,
+  keeps its connection and its sessions: it neither closes nor reconnects (section 3.1), and the
+  relay closes neither (section 4.2).
 - **Relay errors.** `error` messages from the relay reach the application at most 16 a second
   with a burst of 64; the rest are dropped. A relay's messages never raise an event each without
   a bound.
@@ -702,14 +758,15 @@ A self-hosted relay defaults every limit to off; the values below are the public
   (handshakes, `credit`, `reset`, rosters, control messages) is handed over at once; a send that
   would pass the bound drops the connection, which reconnects as after any close, rather than
   growing behind a relay that has stopped reading. The bound is set by the largest honest
-  burst: a primary publishing a full roster to about 400 members queues some 26 MB at once, and
+  burst: a primary publishing a full roster to about 440 members queues some 29 MB at once, and
   must never be cut off for it, with room left for the handshakes and messages around it and a
-  slow link. A bound much nearer 26 MB would drop a primary for doing its job.
+  slow link. A bound much nearer 29 MB would drop a primary for doing its job.
 
 ## 12. Vectors
 
-`spec/vectors/` holds JSON vectors for: key and id derivation; roster signing and validation
-(valid and invalid cases); the registration signature; SPAKE2 (RFC 9382's, plus this
+`spec/vectors/` holds JSON vectors for: key and id derivation, of nodes and of networks (a
+network seed, its network key and network id); roster signing and validation (valid and invalid
+cases, among them a roster whose primary is not the node that created the network); the registration signature; SPAKE2 (RFC 9382's, plus this
 profile's); the Noise IK handshake and first transport messages; frame encoding; session message
 encoding; rosters given as text (`rosterTexts` in `relay.json`), whose validity turns on the
 bytes themselves: repeated names, `12.0`, `1.2e1`, `-0` and `1e309`, escaped lone surrogates,

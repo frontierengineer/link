@@ -3,14 +3,17 @@
 //! outbound WebSocket to a relay that only routes.
 //!
 //! ```no_run
-//! use link_client::{create_network, pair, Identity, Member, MemberKind, MemberOptions, PairOptions, PairTarget, Primary};
+//! use link_client::{create_network, pair, Identity, Member, MemberOptions, PairOptions, PairTarget, Primary};
 //!
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
-//! // The primary: create the network once, then persist the seed and the roster.
+//! // The primary: create the network once, then persist the node's seed, the network's seed and
+//! // the roster.
 //! let me = Identity::generate();
-//! let roster = create_network(&me, "wss://frontierengineer.link/v1", link_client::unix_ms())?;
-//! let primary = Primary::connect(MemberOptions::new(me, roster)).await?;
-//! let code = primary.open_pairing_code(MemberKind::Worker, Default::default())?;
+//! let (roster, network_key) = create_network(&me, "wss://frontierengineer.link/v1", link_client::unix_ms())?;
+//! let mut opts = MemberOptions::new(me, roster);
+//! opts.network_seed = Some(*network_key.seed());
+//! let primary = Primary::connect(opts).await?;
+//! let code = primary.open_pairing_code(Default::default())?;
 //!
 //! // The newcomer: pair once, then connect as a member from then on.
 //! let id = Identity::generate();
@@ -55,12 +58,12 @@ pub use crate::directory::{
 pub use crate::errors::{ErrorCode, LinkError};
 #[doc(hidden)]
 pub use crate::http::fetch_trusting;
-pub use crate::identity::{Identity, is_node_id, node_id_from_ed25519};
+pub use crate::identity::{Identity, NetworkKey, is_node_id, node_id_from_ed25519};
 pub use crate::json::{Json, JsonError};
 pub use crate::member::{CodeOptions, Member, MemberOptions, Primary, ResolveRelay};
 pub use crate::newcomer::{PairOptions, PairResult, PairTarget, pair};
 pub use crate::roster::{
-    MAX_ROSTER_BYTES, MemberKind, Roster, RosterMember, UnsignedRoster, acceptance_problem, create_network,
+    MAX_ROSTER_BYTES, Roster, RosterMember, UnsignedRoster, acceptance_problem, create_network, create_network_with,
     roster_problem, roster_signing_bytes, sign_roster,
 };
 pub use crate::types::*;

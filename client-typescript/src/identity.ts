@@ -1,5 +1,7 @@
 // Keys and ids (section 2). One 32-byte seed yields the node's Ed25519 identity
-// and its X25519 session key; the node id is a hash of the Ed25519 public key.
+// and its X25519 session key; the node id is a hash of the Ed25519 public key. A
+// network has a seed of its own, apart from every node's: it yields the network
+// key, which signs the roster, and the network id, a hash of that key.
 
 import { b32, fromB32, randomBytes, utf8, EMPTY } from './bytes.js';
 import { clampX25519, ed25519Public, ed25519Sign, hkdf, sha256, x25519Public } from './crypto.js';
@@ -31,6 +33,33 @@ export function identityFromSeed(seed: Uint8Array): Identity {
 
 export function createIdentity(): Identity {
   return identityFromSeed(randomBytes(32));
+}
+
+/** A network's key (section 2), held by its primary alone. */
+export interface NetworkKey {
+  /** The 32-byte network seed: as secret as a node's seed. */
+  readonly seed: Uint8Array;
+  /** The network id: 26 lowercase base32 characters. */
+  readonly id: string;
+  readonly ed25519: { readonly seed: Uint8Array; readonly pub: Uint8Array };
+  sign(message: Uint8Array): Uint8Array;
+}
+
+export function networkKeyFromSeed(seed: Uint8Array): NetworkKey {
+  if (!(seed instanceof Uint8Array) || seed.length !== 32) throw new TypeError('network seed must be 32 bytes');
+  const edSeed = hkdf(seed, EMPTY, utf8('frontier-link/1/network'), 32);
+  const edPub = ed25519Public(edSeed);
+  return Object.freeze({
+    seed: seed.slice(),
+    id: nodeIdFromEd25519(edPub),
+    ed25519: Object.freeze({ seed: edSeed, pub: edPub }),
+    sign: (message: Uint8Array) => ed25519Sign(edSeed, message),
+  });
+}
+
+/** A new network seed, minted once when a network is created (section 3.1). */
+export function createNetworkSeed(): Uint8Array {
+  return randomBytes(32);
 }
 
 /** `b32(SHA-256(ed25519Public)[0..16])`. */

@@ -13,9 +13,9 @@ protocol, cited below as "spec section N"), with no need to read another impleme
 
 - One JSON object per line, UTF-8, `\n`-terminated, on stdin (commands) and stdout (replies and
   events). Nothing else is written to stdout; logs go to stderr.
-- Payload bytes inside the driver protocol (`seed`, `bytes`) are standard base64 (with
-  padding). This is the test harness, not the wire: Link itself never carries base64.
-- Keys (`ed25519`, `pinnedPrimary`) are written exactly as a roster writes them: unpadded
+- Payload bytes inside the driver protocol (`seed`, `networkSeed`, `bytes`) are standard base64
+  (with padding). This is the test harness, not the wire: Link itself never carries base64.
+- Keys (`ed25519`, `pinnedNetworkKey`) are written exactly as a roster writes them: unpadded
   base64url, so they compare equal to the roster's own fields. Node ids are the roster's form too.
 - The driver handles commands concurrently: a slow command (`connect`, `pair`, `send`, `take`)
   never blocks a later one. Replies may therefore arrive out of order; `id` matches them up.
@@ -32,7 +32,8 @@ A driver holds at most one identity and at most one node at a time.
 
 1. `identity` sets the identity that `createNetwork`, `pair`, `connect` and `start` use. It may be
    called again at any time; a running node keeps the identity it started with.
-2. `createNetwork` (a primary) or `pair` (a newcomer) yields a roster. Neither starts a node.
+2. `createNetwork` (a primary) or `pair` (a newcomer) yields a roster, and `createNetwork` a
+   network seed too. Neither starts a node.
 3. `connect` or `start` creates the node and connects it to the relay. While a node exists that
    is not `closed`, another `connect` or `start` fails `invalid`. After `close` (which closes a
    `revoked` or `replaced` node too) they create a new node: no sessions, traffic counted afresh.
@@ -50,12 +51,12 @@ peer's roster does not list this node).
 | Command | Arguments | Result |
 |---|---|---|
 | `identity` | `seed?` (base64, 32 bytes; random when absent) | `seed`, `node` (the node id), `ed25519` |
-| `createNetwork` | `relay` (URL) | `roster`: version 1, this identity alone as primary, signed |
-| `pair` | `link`, or `network`+`code`+`codeId`+`relay`; `timeoutMs?` (default 60000, the whole exchange) | `roster`, `pinnedPrimary` (`roster.primary.ed25519`) |
-| `connect` | `role` (`member` or `primary`), `roster`, `pinnedPrimary?`, `relayUrl?`, `creditWindow?`, `timing?`, `autoTake?` (default `true`), `timeoutMs?` | `{}` once registered |
+| `createNetwork` | `relay` (URL) | `roster`: version 1, this identity alone as primary, signed with a network key minted for it; `networkSeed` (base64, 32 bytes) |
+| `pair` | `link`, or `network`+`code`+`codeId`+`relay`; `timeoutMs?` (default 60000, the whole exchange) | `roster`, `pinnedNetworkKey` (`roster.networkKey`) |
+| `connect` | `role` (`member` or `primary`), `roster`, `networkSeed?` (base64), `pinnedNetworkKey?`, `relayUrl?`, `creditWindow?`, `timing?`, `autoTake?` (default `true`), `timeoutMs?` | `{}` once registered |
 | `start` | as `connect`, without `timeoutMs` | `{}` at once; the node connects in the background |
 | `waitConnected` | `timeoutMs?` | `{}` once registered |
-| `state` | | `state`, `roster` (the newest held) |
+| `state` | | `state`, `roster` (the newest held), `primary` (whether this node acts as the primary now) |
 | `sessions` | `peer?` | `sessions`: the sessions held, below |
 | `send` | `peer`, and `bytes` (base64) or `size`+`fill` (see below) | `{}` once every fragment is handed to the relay connection |
 | `take` | `count` (default 1), `timeoutMs?` | `messages`: the taken messages, as `message` event bodies |
@@ -63,7 +64,7 @@ peer's roster does not list this node).
 | `resign` | | `{}` once the relay closed this node (`revoked`) |
 | `traffic` | | the traffic report, below |
 | `resetTraffic` | | `{}` |
-| `openPairingCode` | `kind`, `lifetimeMs?` (default 900000), `code?` | `code`, `codeId`, `kind`, `link`, `expiresAt` |
+| `openPairingCode` | `lifetimeMs?` (default 900000), `code?` | `code`, `codeId`, `link`, `expiresAt` |
 | `cancelPairingCode` | `codeId` | `{}` |
 | `revoke` | `node` | `roster`: the new roster, already published |
 | `usage` | | the usage report, below |
@@ -71,8 +72,14 @@ peer's roster does not list this node).
 | `exit` | | `{}`, then the driver closes its node and exits 0 |
 
 **Primary only:** `openPairingCode`, `cancelPairingCode`, `revoke` and `usage` fail `invalid` on a
-member. `resign` fails `invalid` on the primary; `syncRoster` on the primary answers its own
-roster at once.
+node that is not the primary now: one that does not hold the network seed, or whose roster names
+another member primary. `resign` fails `invalid` on the primary and on a node started with
+`networkSeed`; `syncRoster` on the primary answers its own roster at once.
+
+**A node started with `networkSeed`** whose roster names another member primary claims the
+primary once registered (spec section 3.1): it publishes the next roster, naming itself
+`primary`, nothing else changed, and raises a `roster` event for it. A node whose roster stops
+naming it primary stops acting as the primary in place, and stays connected.
 
 **`connect` and `waitConnected`** resolve once the node is registered. They reject with
 `revoked`, `replaced` or `closed` as soon as the node reaches that terminal state, and with
@@ -80,10 +87,11 @@ roster at once.
 `close` stops it.
 
 **`connect`/`start` arguments.** `roster` must be valid and list this identity, and
-`pinnedPrimary` (default `roster.primary.ed25519`) must equal `roster.primary.ed25519`; otherwise
-`invalid`. `relayUrl` defaults to `roster.relay`. `role: "primary"` requires this identity to be
-the roster's primary (`invalid` otherwise). `creditWindow` is the receive window granted per
-session, an integer from 1048576 (the initial credit, the default) to 2^32 − 1; more than the
+`pinnedNetworkKey` (default `roster.networkKey`) must equal `roster.networkKey`; otherwise
+`invalid`. `networkSeed`, when given, must derive `roster.networkKey` (`invalid` otherwise).
+`relayUrl` defaults to `roster.relay`. `role: "primary"` requires `networkSeed` (`invalid`
+otherwise); the node is then the primary, claiming it when the roster names another (above).
+`creditWindow` is the receive window granted per session, an integer from 1048576 (the initial credit, the default) to 2^32 − 1; more than the
 initial credit is granted as extra credit when a session comes up (spec section 7.3).
 
 **`timing`**, every field in milliseconds except `rekeyMessages`; an omitted field keeps its
@@ -120,9 +128,8 @@ handshake-init. `current` marks the one session per peer that new messages use; 
 replaced sessions kept for their grace (spec section 7.2). A handshake still in progress is not
 listed. So for a session both sides hold, one side's `localIndex` is the other's `remoteIndex`.
 
-**`openPairingCode`.** `kind` is `worker`, `surface` or `mcp`. `code` chooses the code instead of
-a random one: 8 Crockford base32 characters in any spelling spec section 5.1 accepts (`invalid`
-otherwise). The result's `code` is the display form `XXXX-XXXX`, `codeId` the code id (b64u),
+**`openPairingCode`.** A code admits one node. `code` chooses the code instead of a random one:
+8 Crockford base32 characters in any spelling spec section 5.1 accepts (`invalid` otherwise). The result's `code` is the display form `XXXX-XXXX`, `codeId` the code id (b64u),
 `link` the pairing link (spec section 5.1), `expiresAt` Unix milliseconds. When no further
 member fits under the roster limit it fails `roster-full`.
 
@@ -160,7 +167,7 @@ An event is `{"event": "<name>", ...body}`, written whenever the node raises it:
 | `disconnect` | `code`, `reason`: the relay connection closed, with its close code and reason (`""` when none) |
 | `moved` | `network`: the relay closed the connection 4009; the node reconnects to the same relay URL |
 | `message` | `from`, `size`, `sha256` (hex of the payload), and `bytes` (base64) when `size` is 65536 or less |
-| `paired` | `node`, `kind`, `version` (the new roster's) (primary only) |
+| `paired` | `node`, `codeId` (the code that admitted it), `version` (the new roster's) (primary only) |
 | `pairingFailed` | `codeId`, `reason`: a code from the table below (primary only) |
 | `relayError` | `code`, `message` (`""` when the relay sent none): a non-fatal `error` control message the node did not consume itself |
 
@@ -187,6 +194,7 @@ still raised on arrival, and the message stays untaken until a `take`.
 | `newcomer-left` | the relay ended the channel (`pairEnd`): the newcomer left or the relay timed out |
 | `timeout` | the primary's own 60-second limit on the channel ran out |
 | `relay-lost` | the primary's relay connection dropped mid-pairing |
+| `demoted` | the primary stopped being the primary mid-pairing: a newer roster names another (spec section 3.1) |
 | `already-member` | the newcomer's key is already on the roster |
 | `roster-full` | the roster has no room for the newcomer |
 

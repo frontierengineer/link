@@ -18,7 +18,6 @@ import {
   type Identity,
   type InboundMessage,
   type MemberOptions,
-  type PairingKind,
   type Roster,
   type Timing,
 } from '@frontierengineer/link-client';
@@ -142,6 +141,7 @@ const PAIRING_FAILED: [RegExp, string][] = [
   [/^the relay connection dropped$/, 'relay-lost'],
   [/ is already a member$/, 'already-member'],
   [/^the roster would be \d+ bytes/, 'roster-full'],
+  [/^another member is the primary now$/, 'demoted'],
 ];
 
 function pairingFailedReason(text: string): string {
@@ -161,9 +161,9 @@ function needNode(): Member | Primary {
   return node;
 }
 
-function needPrimary(): Primary {
+function needPrimary(): Member {
   const n = needNode();
-  if (!(n instanceof Primary)) throw invalid('only the primary can do this');
+  if (!n.isPrimary) throw invalid('only the primary can do this');
   return n;
 }
 
@@ -174,10 +174,11 @@ function open(args: Json): Member | Primary {
   if (role !== 'member' && role !== 'primary') throw invalid('role must be member or primary');
   const roster = args.roster as Roster;
   if (typeof roster !== 'object' || roster === null) throw invalid('roster must be an object');
-  if (role === 'primary' && roster.network !== id.id) throw invalid('this identity is not the network primary');
   const opts: MemberOptions = { identity: id, roster };
-  const pinnedPrimary = optStr(args, 'pinnedPrimary');
-  if (pinnedPrimary !== undefined) opts.pinnedPrimary = pinnedPrimary;
+  if (args.networkSeed !== undefined) opts.networkSeed = base64(args, 'networkSeed');
+  if (role === 'primary' && opts.networkSeed === undefined) throw invalid('the primary needs networkSeed');
+  const pinnedNetworkKey = optStr(args, 'pinnedNetworkKey');
+  if (pinnedNetworkKey !== undefined) opts.pinnedNetworkKey = pinnedNetworkKey;
   const relayUrl = optStr(args, 'relayUrl');
   if (relayUrl !== undefined) opts.relayUrl = relayUrl;
   const creditWindow = optInt(args, 'creditWindow');
@@ -198,10 +199,9 @@ function open(args: Json): Member | Primary {
   n.on('disconnect', (d) => event('disconnect', { code: d.code, reason: d.reason }));
   n.on('moved', (m) => event('moved', { network: m.network }));
   n.on('relayError', (e) => event('relayError', { code: e.code, message: e.message ?? '' }));
-  if (n instanceof Primary) {
-    n.on('paired', (p) => event('paired', { node: p.member.id, kind: p.member.kind, version: p.roster.version }));
-    n.on('pairingFailed', (f) => event('pairingFailed', { codeId: f.codeId, reason: pairingFailedReason(f.reason) }));
-  }
+  // Any member may become the primary (spec section 3.1).
+  n.on('paired', (p) => event('paired', { node: p.member.id, codeId: p.codeId, version: p.roster.version }));
+  n.on('pairingFailed', (f) => event('pairingFailed', { codeId: f.codeId, reason: pairingFailedReason(f.reason) }));
   // A message is announced as it arrives, before anything takes it: the client tells its
   // diagnostics hook of every message it delivers, so a minimal hook is the arrival seam.
   (n as unknown as Record<symbol, (hook: unknown) => void>)[DIAGNOSTICS]!({
@@ -233,7 +233,8 @@ const commands: Record<string, (args: Json) => Promise<Json> | Json> = {
   },
 
   createNetwork(args) {
-    return { roster: createNetwork({ identity: needIdentity(), relay: str(args, 'relay') }) };
+    const { roster, networkSeed } = createNetwork({ identity: needIdentity(), relay: str(args, 'relay') });
+    return { roster, networkSeed: b64(networkSeed) };
   },
 
   async pair(args) {
@@ -244,7 +245,7 @@ const commands: Record<string, (args: Json) => Promise<Json> | Json> = {
         : { network: str(args, 'network'), code: str(args, 'code'), codeId: str(args, 'codeId'), relay: str(args, 'relay') };
     const timeoutMs = optInt(args, 'timeoutMs');
     const r = await pair({ link, identity: id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
-    return { roster: r.roster, pinnedPrimary: r.pinnedPrimary };
+    return { roster: r.roster, pinnedNetworkKey: r.pinnedNetworkKey };
   },
 
   async connect(args) {
@@ -265,7 +266,7 @@ const commands: Record<string, (args: Json) => Promise<Json> | Json> = {
 
   state() {
     const n = needNode();
-    return { state: n.state, roster: n.roster };
+    return { state: n.state, roster: n.roster, primary: n.isPrimary };
   },
 
   async send(args) {
@@ -327,11 +328,10 @@ const commands: Record<string, (args: Json) => Promise<Json> | Json> = {
   },
 
   openPairingCode(args) {
-    const kind = str(args, 'kind') as PairingKind;
     const lifetimeMs = optInt(args, 'lifetimeMs');
     const code = optStr(args, 'code');
     return {
-      ...needPrimary().openPairingCode(kind, {
+      ...needPrimary().openPairingCode({
         ...(lifetimeMs !== undefined ? { lifetimeMs } : {}),
         ...(code !== undefined ? { code } : {}),
       }),

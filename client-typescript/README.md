@@ -13,14 +13,15 @@ can be passed in; the default is `globalThis.WebSocket`. Its only dependencies a
 ```ts
 import { createIdentity, identityFromSeed, createNetwork, Primary, Member, pair } from '@frontierengineer/link-client';
 
-// The primary: create the network once, then persist the seed and the roster.
+// The primary: create the network once, then persist both seeds and the roster.
 const me = createIdentity();                                   // me.seed: 32 secret bytes
-const roster = createNetwork({ identity: me, relay: 'wss://frontierengineer.link/v1' });
-const primary = await Primary.connect({ identity: me, roster });
+const { roster, networkSeed } = createNetwork({ identity: me, relay: 'wss://frontierengineer.link/v1' });
+const primary = await Primary.connect({ identity: me, roster, networkSeed });
 primary.on('roster', (r) => save(r));                         // every accepted roster: persist it
 
 // Invite a node. Show the code or the link; it admits one node for 15 minutes.
-const { code, codeId, link, expiresAt } = primary.openPairingCode('worker'); // or 'surface', 'mcp'
+const { code, codeId, link, expiresAt } = primary.openPairingCode();
+primary.on('paired', ({ member, codeId }) => label(member.id, codeId)); // your own categories, by code
 
 // The newcomer: pair once, then connect as a member from then on.
 const id = identityFromSeed(savedSeed);
@@ -37,10 +38,24 @@ member.close();
 **Identity.** `createIdentity()`, `identityFromSeed(seed)` give `{ seed, id, ed25519, x25519, sign }`.
 Persist `seed`; everything else derives from it (section 2).
 
-**Rosters.** `createNetwork({ identity, relay })` makes version 1 with the primary alone.
+**Network seed.** A network has a 32-byte seed of its own, minted by `createNetwork` apart from
+every node's seed (`createNetworkSeed()`). `networkKeyFromSeed(seed)` gives `{ seed, id, ed25519,
+sign }`: the network key signs every roster, and the network id derives from it, whichever node is
+primary (section 2). Its custody is the application's: the client never stores, sends or deletes
+it. A node started with `networkSeed` is the primary; when its roster names another member
+primary, it claims the primary once registered, publishing the next roster with itself as
+`primary`, nothing else changed (section 3.1). The former primary takes that roster and stops being the
+primary in place: its codes close and its pairing channels end, and its connection and sessions
+stay.
+
+**Rosters.** `createNetwork({ identity, relay, networkSeed? })` returns `{ roster, networkSeed }`:
+version 1 with the primary alone, signed by the network key. A roster is `{ network, version,
+issuedAt, relay, networkKey, primary, members, signature }`: `primary` is a member's node id, and
+each member is `{ id, ed25519, x25519 }`; `primaryOf(r)` is that member's entry. Members carry no
+categories: an application that has some keeps them in its own data, by node id.
 `rosterProblem(r)` returns why a roster is invalid, or `null`; `acceptanceProblem(r, pinned, held)`
 applies the acceptance rule; `canonicalize(value)` is RFC 8785 JCS. A roster's JCS encoding,
-signature included, is at most `MAX_ROSTER_BYTES` (65000 bytes, about 400 members; `rosterSize(r)`
+signature included, is at most `MAX_ROSTER_BYTES` (65000 bytes, about 440 members; `rosterSize(r)`
 measures it), so it always fits one session message; a larger one is invalid.
 
 **`Member`** (`Member.connect(options)` resolves once registered; `new Member(options)` starts
@@ -50,7 +65,8 @@ connecting and returns at once):
 |---|---|
 | `identity`, `roster` | required; the newest roster held |
 | `relayUrl` | defaults to `roster.relay` |
-| `pinnedPrimary` | defaults to `roster.primary.ed25519` |
+| `pinnedNetworkKey` | defaults to `roster.networkKey` |
+| `networkSeed` | the network seed, for the node to be the primary; it must derive `roster.networkKey` |
 | `WebSocket` | a WHATWG WebSocket constructor, used as given |
 | `WebSocketStream` | a WHATWG WebSocketStream constructor (real back-pressure). Without either option a member uses `globalThis.WebSocketStream` where it exists, else `globalThis.WebSocket` |
 | `creditWindow` | the receive window granted per session: 1 MiB (every session's initial credit) or more, granted as extra credit |
@@ -71,7 +87,7 @@ connecting and returns at once):
 - `syncRoster()` asks the primary for its newest roster. `resign()` leaves the network.
   Rosters also spread member to member: when a handshake shows a peer holds a newer roster,
   the member asks that peer for it, and hands its own to a peer that is behind. A roster is
-  taken only if the pinned primary signed it, so a revocation reaches every member that meets
+  taken only if the pinned network key signed it, so a revocation reaches every member that meets
   one that has it, with the primary offline and whatever the relay remembers.
   `roster`, `state`, `id`, `network`, `waitConnected(timeoutMs?)`, `close()`.
 - `traffic()` counts what this member sent and received, always on: `{ since, total, relay, peers }`,
@@ -87,10 +103,14 @@ A member reconnects after 500 ms, doubling to 10 s, forever, except after close 
 `revoked`) or 4005 (`replaced`: another copy of the identity connected); both are terminal. A member that registers with an older roster than the relay holds
 receives the newer one in `registered` and accepts it (a `roster` event) before it is `connected`.
 
-**`Primary`** extends `Member`: `Primary.connect(options)`, `openPairingCode(kind, { lifetimeMs?, code? })`
-returning `{ code, codeId, kind, link, expiresAt }` (`code` chooses the code instead of a random one;
+**The primary.** `isPrimary` says whether a member is the primary now: it holds the network seed
+and its roster names it. Only then do these work (each throws `InvalidError` otherwise):
+`openPairingCode({ lifetimeMs?, code? })`
+returning `{ code, codeId, link, expiresAt }` (`code` chooses the code instead of a random one;
 it must still be 8 Crockford characters, and a word is easier to guess than a random code), `cancelPairingCode(codeId)`,
-`revoke(nodeId)` returning the new roster, `usage()`. Extra events: `paired`, `pairingFailed`.
+`revoke(nodeId)` returning the new roster, `usage()`; events `paired` (`{ member, codeId, roster }`:
+the new member and the code that admitted it) and `pairingFailed`. `Primary`
+extends `Member` and requires `networkSeed`: `Primary.connect(options)`.
 `usage()` asks the relay (request-only: the relay never pushes) and resolves
 `{ network: { bytesHour, connections, limits: { rateBps, quotaBytesHour, trickleBps }, quotaUsed, slowed } }`.
 The relay allows `USAGE_BURST` (3) asks at once, then one per `USAGE_INTERVAL_MS` (10 s), per
@@ -99,7 +119,7 @@ network; beyond that it refuses and `usage()` rejects with `RateLimitedError` (c
 `pairingFailed`.
 
 **Pairing.** `pair({ link, identity, WebSocket?, timeoutMs? })` returns
-`{ roster, pinnedPrimary }`, or rejects with `PairingError`, `UnreachableError` (the primary is
+`{ roster, pinnedNetworkKey }`, or rejects with `PairingError`, `UnreachableError` (the primary is
 not connected) or `TimeoutError`. Codes: `generateCode`, `normalizeCode`, `formatCode`;
 links: `buildPairingLink`, `parsePairingLink`.
 

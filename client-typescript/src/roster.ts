@@ -1,23 +1,18 @@
-// The roster (section 3): the signed list of a network's members. Only the
-// primary signs it; every member checks it against the primary key it pinned.
+// The roster (section 3): the signed list of a network's members. The network
+// key signs it, held by the primary alone; every member checks it against the
+// network key it pinned.
 
 import { b64u, concat, equalBytes, fromB64uLen, utf8 } from './bytes.js';
 import { ed25519Verify } from './crypto.js';
-import { isNodeId, nodeIdFromEd25519, type Identity } from './identity.js';
+import { createNetworkSeed, isNodeId, networkKeyFromSeed, nodeIdFromEd25519, type Identity, type NetworkKey } from './identity.js';
 import { canonicalize } from './jcs.js';
+import { RosterFullError } from './errors.js';
 import { integerMember } from './json.js';
-
-export type MemberKind = 'primary' | 'worker' | 'surface' | 'mcp';
-export type PairingKind = Exclude<MemberKind, 'primary'>;
-
-export const MEMBER_KINDS: readonly MemberKind[] = ['primary', 'worker', 'surface', 'mcp'];
-export const PAIRING_KINDS: readonly PairingKind[] = ['worker', 'surface', 'mcp'];
 
 export interface RosterMember {
   id: string;
   ed25519: string;
   x25519: string;
-  kind: MemberKind;
 }
 
 export interface UnsignedRoster {
@@ -25,7 +20,10 @@ export interface UnsignedRoster {
   version: number;
   issuedAt: number;
   relay: string;
-  primary: { ed25519: string };
+  /** The network key's public half, b64u; `network` is derived from it. */
+  networkKey: string;
+  /** The node id of the primary: one of `members`. */
+  primary: string;
   members: RosterMember[];
 }
 
@@ -43,7 +41,7 @@ export function rosterSize(roster: Roster): number {
   return utf8(canonicalize(roster)).length;
 }
 
-/** The bytes the primary signs: the label followed by JCS of the roster without `signature`. */
+/** The bytes the network key signs: the label followed by JCS of the roster without `signature`. */
 export function rosterSigningBytes(roster: UnsignedRoster | Roster): Uint8Array {
   const { signature: _omit, ...rest } = roster as Roster;
   return concat(ROSTER_LABEL, utf8(canonicalize(rest)));
@@ -53,39 +51,79 @@ export function compareIds(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/** Sorts members, then signs. `primary` must be the roster's primary identity. */
-export function signRoster(unsigned: UnsignedRoster, primary: Identity): Roster {
+/** Sorts members, then signs with the network key. */
+export function signRoster(unsigned: UnsignedRoster, networkKey: NetworkKey): Roster {
   const members = [...unsigned.members].sort((a, b) => compareIds(a.id, b.id));
   const body: UnsignedRoster = { ...unsigned, members };
-  const signature = b64u(primary.sign(rosterSigningBytes(body)));
+  const signature = b64u(networkKey.sign(rosterSigningBytes(body)));
   const roster: Roster = { ...body, signature };
   const problem = rosterProblem(roster);
   if (problem) throw new Error(`signRoster: ${problem}`);
   return roster;
 }
 
-export function memberFromIdentity(identity: Identity, kind: MemberKind): RosterMember {
+export function memberFromIdentity(identity: Identity): RosterMember {
   return {
     id: identity.id,
     ed25519: b64u(identity.ed25519.pub),
     x25519: b64u(identity.x25519.pub),
-    kind,
   };
 }
 
-/** The first roster of a new network: version 1, the primary alone. */
-export function createNetwork(opts: { identity: Identity; relay: string; now?: number }): Roster {
-  return signRoster(
+/** An Ed25519 signature's b64u length, for measuring a roster before it is signed. */
+const PLACEHOLDER_SIGNATURE = 'A'.repeat(86);
+
+/** The roster after `prev`, with `members` and `primary` (the same primary when absent),
+ * unsigned: the next version, the same network. */
+export function nextUnsignedRoster(prev: Roster, members: RosterMember[], now: number, primary = prev.primary): UnsignedRoster {
+  return {
+    network: prev.network,
+    version: prev.version + 1,
+    issuedAt: Math.max(now, prev.issuedAt),
+    relay: prev.relay,
+    networkKey: prev.networkKey,
+    primary,
+    members: [...members].sort((a, b) => compareIds(a.id, b.id)),
+  };
+}
+
+/** The JCS size the roster after `prev`, with `members`, would have once signed. */
+export function nextRosterSize(prev: Roster, members: RosterMember[], now: number): number {
+  return rosterSize({ ...nextUnsignedRoster(prev, members, now), signature: PLACEHOLDER_SIGNATURE });
+}
+
+/** The roster after `prev`, with `members` and `primary`, signed. Throws RosterFullError over
+ * 65000 bytes. */
+export function signNextRoster(prev: Roster, members: RosterMember[], key: NetworkKey, now: number, primary = prev.primary): Roster {
+  const size = nextRosterSize(prev, members, now);
+  if (size > MAX_ROSTER_BYTES) throw new RosterFullError(size);
+  return signRoster(nextUnsignedRoster(prev, members, now, primary), key);
+}
+
+/**
+ * A new network (section 3.1): a network seed minted for it, apart from the node's own, and
+ * its first roster, version 1, with `identity` alone as the primary. Persist the network seed
+ * as secretly as the node's seed, and hand it to the primary as `networkSeed`.
+ */
+export function createNetwork(opts: { identity: Identity; relay: string; now?: number; networkSeed?: Uint8Array }): {
+  roster: Roster;
+  networkSeed: Uint8Array;
+} {
+  const networkSeed = opts.networkSeed?.slice() ?? createNetworkSeed();
+  const key = networkKeyFromSeed(networkSeed);
+  const roster = signRoster(
     {
-      network: opts.identity.id,
+      network: key.id,
       version: 1,
       issuedAt: opts.now ?? Date.now(),
       relay: opts.relay,
-      primary: { ed25519: b64u(opts.identity.ed25519.pub) },
-      members: [memberFromIdentity(opts.identity, 'primary')],
+      networkKey: b64u(key.ed25519.pub),
+      primary: opts.identity.id,
+      members: [memberFromIdentity(opts.identity)],
     },
-    opts.identity,
+    key,
   );
+  return { roster, networkSeed };
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -96,7 +134,7 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 export function rosterProblem(value: unknown): string | null {
   if (!isPlainObject(value)) return 'not an object';
   const r = value;
-  if (!isNodeId(r.network)) return 'network is not a node id';
+  if (!isNodeId(r.network)) return 'network is not an id';
   // Integer literals only (section 3): `12.0` and `1.2e1` are not versions, though JSON.parse
   // makes 12 of them.
   const version = integerMember(r, 'version');
@@ -104,16 +142,16 @@ export function rosterProblem(value: unknown): string | null {
   const issuedAt = integerMember(r, 'issuedAt');
   if (issuedAt === undefined || issuedAt < 0) return 'issuedAt is not a non-negative integer';
   if (typeof r.relay !== 'string') return 'relay is not a string';
-  if (!isPlainObject(r.primary)) return 'primary is not an object';
-  let primaryKey: Uint8Array;
+  let networkKey: Uint8Array;
   try {
-    primaryKey = fromB64uLen(r.primary.ed25519, 32, 'primary.ed25519');
+    networkKey = fromB64uLen(r.networkKey, 32, 'networkKey');
   } catch (e) {
     return (e as Error).message;
   }
-  if (nodeIdFromEd25519(primaryKey) !== r.network) return 'network is not derived from primary.ed25519';
+  if (nodeIdFromEd25519(networkKey) !== r.network) return 'network is not derived from networkKey';
+  if (!isNodeId(r.primary)) return 'primary is not a node id';
   if (!Array.isArray(r.members)) return 'members is not an array';
-  let primaries = 0;
+  let primaryListed = false;
   let prev: string | null = null;
   for (const m of r.members as unknown[]) {
     if (!isPlainObject(m)) return 'member is not an object';
@@ -128,14 +166,9 @@ export function rosterProblem(value: unknown): string | null {
       return (e as Error).message;
     }
     if (nodeIdFromEd25519(ed) !== m.id) return `member ${m.id}: id is not derived from its ed25519`;
-    if (typeof m.kind !== 'string' || !MEMBER_KINDS.includes(m.kind as MemberKind)) return `member ${m.id}: bad kind`;
-    if (m.kind === 'primary') {
-      primaries++;
-      if (m.ed25519 !== r.primary.ed25519) return 'primary member key differs from primary.ed25519';
-      if (m.id !== r.network) return 'primary member id differs from network';
-    }
+    if (m.id === r.primary) primaryListed = true;
   }
-  if (primaries !== 1) return 'roster must have exactly one primary member';
+  if (!primaryListed) return 'primary is not a member';
   let size: number;
   try {
     size = rosterSize(r as unknown as Roster);
@@ -155,7 +188,7 @@ export function rosterProblem(value: unknown): string | null {
   } catch (e) {
     return (e as Error).message;
   }
-  if (!ed25519Verify(sig, signed, primaryKey)) return 'signature does not verify';
+  if (!ed25519Verify(sig, signed, networkKey)) return 'signature does not verify';
   return null;
 }
 
@@ -164,20 +197,25 @@ export function isValidRoster(value: unknown): value is Roster {
 }
 
 /**
- * Section 3 acceptance: valid, signed by the pinned primary key, and newer than
+ * Section 3 acceptance: valid, signed by the pinned network key, and newer than
  * the version held. Returns the reason for refusal, or `null` to accept.
  */
-export function acceptanceProblem(candidate: unknown, pinnedPrimary: string, heldVersion: number): string | null {
+export function acceptanceProblem(candidate: unknown, pinnedNetworkKey: string, heldVersion: number): string | null {
   const problem = rosterProblem(candidate);
   if (problem) return problem;
   const r = candidate as Roster;
-  if (r.primary.ed25519 !== pinnedPrimary) return 'roster is signed by a different primary';
+  if (r.networkKey !== pinnedNetworkKey) return 'roster is signed by another network key';
   if (r.version <= heldVersion) return 'roster is not newer than the one held';
   return null;
 }
 
 export function findMember(roster: Roster, id: string): RosterMember | undefined {
   return roster.members.find((m) => m.id === id);
+}
+
+/** The member the roster names primary: the one holding the network seed (section 3.1). */
+export function primaryOf(roster: Roster): RosterMember {
+  return roster.members.find((m) => m.id === roster.primary)!;
 }
 
 export function findMemberByX25519(roster: Roster, x25519: Uint8Array): RosterMember | undefined {

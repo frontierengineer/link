@@ -3,6 +3,8 @@
 The Link relay: sections 4, 5.2, 6 and 9 of [`spec/protocol.md`](../spec/protocol.md). It
 verifies registrations and rosters, routes frames between members of one network, joins
 newcomers to their primary while they pair, and shapes traffic. It never parses a frame body.
+The primary is whichever member the newest roster names; when a newer roster names another,
+the former primary's connection is demoted in place, never closed (section 4.2).
 
 ```sh
 CGO_ENABLED=0 go build -o link-relay ./cmd/link-relay   # one static binary

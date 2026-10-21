@@ -53,7 +53,7 @@ func TestTLS(t *testing.T) {
 	c.challenge, _ = b64dec(hello["challenge"].(string))
 	p := keys(t, 1)
 	h.origin = "relay.test"
-	c.send(h.registerMsg(c, p, p.ID.String(), roster(t, 1, p)))
+	c.send(h.registerMsg(c, p, netID(p), roster(t, 1, p)))
 	if m := c.json(); m["type"] != "registered" {
 		t.Fatalf("got %v", m)
 	}

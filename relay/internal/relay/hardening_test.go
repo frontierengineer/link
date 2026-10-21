@@ -250,7 +250,7 @@ func TestPongsCoalesce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	c := h.s.networkOf(p.ID).members[p.ID]
+	c := h.s.networkOf(netKeys(t, p).ID).members[p.ID]
 	c.wmu.Lock()
 	queued := c.queued
 	c.wmu.Unlock()
@@ -275,7 +275,7 @@ func TestFramesBeforeRegistering(t *testing.T) {
 	for range maxEarly - 1 {
 		ok.ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second))
 	}
-	ok.send(h.registerMsg(ok, p, p.ID.String(), roster(t, 1, p)))
+	ok.send(h.registerMsg(ok, p, netID(p), roster(t, 1, p)))
 	for {
 		m := ok.json()
 		if m["type"] == "registered" {
@@ -296,7 +296,7 @@ func TestNewcomerPairFrameLimit(t *testing.T) {
 	pc := h.register(p, p, roster(t, 1, p))
 	for _, size := range []int{maxPairFrame, maxPairFrame + 1} {
 		n := h.dial()
-		n.send(map[string]any{"type": "pair", "network": p.ID.String(), "code": b64(make([]byte, 8))})
+		n.send(map[string]any{"type": "pair", "network": netID(p), "code": b64(make([]byte, 8))})
 		pm := pc.json()
 		raw, _ := link.DecodeKey(n.json()["channel"].(string), 16)
 		n.sendBinary(frame(typePair, link.ID(raw), make([]byte, size-18)))
@@ -404,7 +404,7 @@ func TestBackPressureIsPerRecipient(t *testing.T) {
 		}
 	}()
 	deadline := time.Now().Add(30 * time.Second)
-	for !h.s.networkOf(p.ID).members[a.ID].paused.Load() {
+	for !h.s.networkOf(netKeys(t, p).ID).members[a.ID].paused.Load() {
 		if time.Now().After(deadline) {
 			t.Fatal("the sender to a recipient that does not read was never paused")
 		}
@@ -459,7 +459,7 @@ func TestPrimaryPairFramesAreCharged(t *testing.T) {
 	p := keys(t, 1)
 	pc := h.register(p, p, roster(t, 1, p))
 	n := h.dial()
-	n.send(map[string]any{"type": "pair", "network": p.ID.String(), "code": b64(make([]byte, 8))})
+	n.send(map[string]any{"type": "pair", "network": netID(p), "code": b64(make([]byte, 8))})
 	pc.json() // pairing
 	raw, _ := link.DecodeKey(n.json()["channel"].(string), 16)
 	ch := link.ID(raw)
@@ -495,7 +495,7 @@ func TestIPPendingLimit(t *testing.T) {
 	if code, _ := h.dialStatus(); code != http.StatusTooManyRequests {
 		t.Fatalf("third pending connection: %d", code)
 	}
-	a.send(h.registerMsg(a, p, p.ID.String(), roster(t, 1, p)))
+	a.send(h.registerMsg(a, p, netID(p), roster(t, 1, p)))
 	if m := a.json(); m["type"] != "registered" {
 		t.Fatalf("got %v", m)
 	}
@@ -540,7 +540,7 @@ func (h *harness) registerFrom(ip string, k, network *link.Keys, rosterJSON []by
 	c := &client{t: h.t, ws: ws}
 	hello := c.json()
 	c.challenge, _ = link.B64u.DecodeString(hello["challenge"].(string))
-	c.send(h.registerMsg(c, k, network.ID.String(), rosterJSON))
+	c.send(h.registerMsg(c, k, netID(network), rosterJSON))
 	if m := c.json(); m["type"] != "registered" {
 		h.t.Fatalf("expected registered, got %v", m)
 	}
@@ -599,16 +599,16 @@ func TestIdleRostersFairShare(t *testing.T) {
 		c.IdleRostersBytes = 3 * full
 	})
 	// The attacker's address holds networks 0 to 3, the other address network 4.
-	goIdle(t, h, h.registerFrom("198.51.100.7", ks[4], ks[4], rs[4]), ks[4].ID)
+	goIdle(t, h, h.registerFrom("198.51.100.7", ks[4], ks[4], rs[4]), netKeys(t, ks[4]).ID)
 	for i := range 4 {
-		goIdle(t, h, h.registerFrom("203.0.113.9", ks[i], ks[i], rs[i]), ks[i].ID)
+		goIdle(t, h, h.registerFrom("203.0.113.9", ks[i], ks[i], rs[i]), netKeys(t, ks[i]).ID)
 	}
 	// Five full rosters against room for three: each cut frees a roster less its record, so the
 	// attacker's three longest idle are cut, and only the attacker's.
 	got := func() []string {
 		var out []string
 		for _, k := range ks {
-			out = append(out, h.s.held(k.ID))
+			out = append(out, h.s.held(netKeys(t, k).ID))
 		}
 		return out
 	}
@@ -619,7 +619,7 @@ func TestIdleRostersFairShare(t *testing.T) {
 	// its records go, longest idle first; the other address's roster stays whole throughout.
 	for _, i := range []byte{6, 7} {
 		k := keys(t, i)
-		goIdle(t, h, h.registerFrom("203.0.113.9", k, k, roster(t, 1, k)), k.ID)
+		goIdle(t, h, h.registerFrom("203.0.113.9", k, k, roster(t, 1, k)), netKeys(t, k).ID)
 	}
 	if g := got(); g[4] != "full" || slices.Contains(g[:4], "full") {
 		t.Fatalf("held %v", g)
@@ -640,22 +640,22 @@ func TestCompactRecordKeepsRevocation(t *testing.T) {
 	r1, r2 := roster(t, 1, p, w, x), roster(t, 2, p, w) // version 2 revokes x
 	parsed, _ := link.ParseRoster(r2)
 	h := start(t, func(c *Config) { c.IdleRostersBytes = rosterCost(compactRoster(parsed)) })
-	goIdle(t, h, h.register(p, p, r2), p.ID)
-	if got := h.s.held(p.ID); got != "compact" {
+	goIdle(t, h, h.register(p, p, r2), netKeys(t, p).ID)
+	if got := h.s.held(netKeys(t, p).ID); got != "compact" {
 		t.Fatalf("held %s", got)
 	}
 	// x presents version 1, which lists it: the record of version 2 does not.
 	c := h.dial()
-	c.send(h.registerMsg(c, x, p.ID.String(), r1))
+	c.send(h.registerMsg(c, x, netID(p), r1))
 	c.expectClose(4008)
 	// w presents version 1 too: listed, admitted, told version 2 exists.
 	c = h.dial()
-	c.send(h.registerMsg(c, w, p.ID.String(), r1))
+	c.send(h.registerMsg(c, w, netID(p), r1))
 	if m := c.json(); m["type"] != "registered" || m["rosterVersion"] != float64(2) || m["roster"] != nil {
 		t.Fatalf("got %v", m)
 	}
 	h.register(p, p, r2)
-	if got := h.s.held(p.ID); got != "full" {
+	if got := h.s.held(netKeys(t, p).ID); got != "full" {
 		t.Fatalf("held %s after the primary came back", got)
 	}
 }
@@ -684,22 +684,22 @@ func TestControlMessagesMustBeIJSON(t *testing.T) {
 	// A register whose `node` is named twice: the first (a stranger's id) is what a last-wins
 	// parser would never see.
 	c := h.dial()
-	raw(c, `{"node":"`+keys(t, 9).ID.String()+`",`+marshal(h.registerMsg(c, w, p.ID.String(), r))[1:])
+	raw(c, `{"node":"`+keys(t, 9).ID.String()+`",`+marshal(h.registerMsg(c, w, netID(p), r))[1:])
 	c.expectClose(closeBadRequest)
 
 	// A register carrying an escaped lone surrogate in a member it does not even check.
 	c = h.dial()
-	raw(c, `{"x":"\ud800",`+marshal(h.registerMsg(c, w, p.ID.String(), r))[1:])
+	raw(c, `{"x":"\ud800",`+marshal(h.registerMsg(c, w, netID(p), r))[1:])
 	c.expectClose(closeBadRequest)
 
 	// A register carrying a number out of range, which encoding/json reads without complaint.
 	c = h.dial()
-	raw(c, `{"x":1e309,`+marshal(h.registerMsg(c, w, p.ID.String(), r))[1:])
+	raw(c, `{"x":1e309,`+marshal(h.registerMsg(c, w, netID(p), r))[1:])
 	c.expectClose(closeBadRequest)
 
 	// The same register, well formed, is taken.
 	c = h.dial()
-	raw(c, marshal(h.registerMsg(c, w, p.ID.String(), r)))
+	raw(c, marshal(h.registerMsg(c, w, netID(p), r)))
 	if m := c.json(); m["type"] != "registered" {
 		t.Fatalf("registered: %v", m)
 	}
@@ -724,7 +724,7 @@ func TestControlMessageNamesAreCaseSensitive(t *testing.T) {
 	}
 	for _, rename := range [][2]string{{`"type":`, `"TYPE":`}, {`"node":`, `"Node":`}, {`"roster":`, `"Roster":`}} {
 		c := h.dial()
-		b, err := json.Marshal(h.registerMsg(c, w, p.ID.String(), r))
+		b, err := json.Marshal(h.registerMsg(c, w, netID(p), r))
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -6,15 +6,17 @@ import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createIdentity,
+  createNetworkSeed,
   MAX_ROSTER_BYTES,
   Member,
   memberFromIdentity,
+  networkKeyFromSeed,
   nodeIdFromEd25519,
   pair,
   Primary,
   rosterSize,
   signRoster,
-  type Identity,
+  type NetworkKey,
   type Roster,
   type RosterMember,
 } from '@frontierengineer/link-client';
@@ -29,13 +31,13 @@ before(() => {
 async function timedTransfer(env: Record<string, string>, size: number) {
   const net = await startNet({ env });
   try {
-    const worker = await net.add('worker');
-    const surface = await net.add('surface');
+    const alice = await net.add();
+    const bob = await net.add();
     const drops: number[] = [];
-    for (const m of [net.primary, worker, surface]) m.on('disconnect', (d) => drops.push(d.code));
-    const sIn = inbox(surface);
+    for (const m of [net.primary, alice, bob]) m.on('disconnect', (d) => drops.push(d.code));
+    const sIn = inbox(bob);
     const started = Date.now();
-    await worker.send(surface.id, new Uint8Array(size).fill(1));
+    await alice.send(bob.id, new Uint8Array(size).fill(1));
     const [got] = await sIn.next(1, 60_000);
     const took = Date.now() - started;
     assert.equal(got!.bytes.length, size);
@@ -67,14 +69,14 @@ test('shaping: LINK_RATE_BPS slows a transfer, and pings never drop the sender h
 test('liveness: members answer the relay\'s pings and stay connected', async () => {
   const net = await startNet({ env: { LINK_PING_INTERVAL: PING } });
   try {
-    const worker = await net.add('worker');
+    const alice = await net.add();
     const drops: number[] = [];
-    for (const m of [net.primary, worker]) m.on('disconnect', (d) => drops.push(d.code));
+    for (const m of [net.primary, alice]) m.on('disconnect', (d) => drops.push(d.code));
     // Three pings each, every one answered in time, or the relay would have dropped the member.
     await new Promise((r) => setTimeout(r, 3500));
     assert.deepEqual(drops, []);
     const pIn = inbox(net.primary);
-    await worker.send(net.primary.id, bytesOf('still here'));
+    await alice.send(net.primary.id, bytesOf('still here'));
     await pIn.next();
   } finally {
     await net.close();
@@ -83,14 +85,14 @@ test('liveness: members answer the relay\'s pings and stay connected', async () 
 
 function fakeMember(): RosterMember {
   const pub = randomBytes(32);
-  return { id: nodeIdFromEd25519(pub), ed25519: pub.toString('base64url'), x25519: randomBytes(32).toString('base64url'), kind: 'mcp' };
+  return { id: nodeIdFromEd25519(pub), ed25519: pub.toString('base64url'), x25519: randomBytes(32).toString('base64url') };
 }
 
-function rosterOf(primary: Identity, version: number, relay: string, members: RosterMember[]): Roster {
+function rosterOf(net: NetworkKey, version: number, relay: string, members: RosterMember[], primary = members[0]!.id): Roster {
   const sorted = [...members].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return signRoster(
-    { network: primary.id, version, issuedAt: Date.now(), relay, primary: { ed25519: Buffer.from(primary.ed25519.pub).toString('base64url') }, members: sorted },
-    primary,
+    { network: net.id, version, issuedAt: Date.now(), relay, networkKey: Buffer.from(net.ed25519.pub).toString('base64url'), primary, members: sorted },
+    net,
   );
 }
 
@@ -100,31 +102,33 @@ test('a roster at the 65000-byte limit travels in register, in registered and in
   try {
     const p = createIdentity();
     const w = createIdentity();
-    const base = [memberFromIdentity(p, 'primary'), memberFromIdentity(w, 'worker')];
-    const small = rosterOf(p, 1, relay.url, base);
+    const networkSeed = createNetworkSeed();
+    const net = networkKeyFromSeed(networkSeed);
+    const base = [memberFromIdentity(p), memberFromIdentity(w)];
+    const small = rosterOf(net, 1, relay.url, base);
     // Every entry has the same length: fill v2 so that exactly one more member fits.
     const entry = JSON.stringify(fakeMember()).length + 1;
-    const room = MAX_ROSTER_BYTES - rosterSize(rosterOf(p, 2, relay.url, base));
+    const room = MAX_ROSTER_BYTES - rosterSize(rosterOf(net, 2, relay.url, base));
     const fakes = Array.from({ length: Math.floor(room / entry) - 1 }, fakeMember);
-    const big = rosterOf(p, 2, relay.url, [...base, ...fakes]);
+    const big = rosterOf(net, 2, relay.url, [...base, ...fakes]);
     assert.ok(MAX_ROSTER_BYTES - rosterSize(big) >= entry && MAX_ROSTER_BYTES - rosterSize(big) < 2 * entry);
 
-    const primary = await Primary.connect({ identity: p, roster: big, timing: FAST });
+    const primary = await Primary.connect({ identity: p, roster: big, networkSeed, timing: FAST });
     opened.push(primary);
-    const worker = new Member({ identity: w, roster: small, timing: FAST });
-    opened.push(worker);
-    await worker.waitConnected(10_000);
-    assert.equal(worker.roster.version, 2, 'the relay handed the big roster back in registered');
+    const alice = new Member({ identity: w, roster: small, timing: FAST });
+    opened.push(alice);
+    await alice.waitConnected(10_000);
+    assert.equal(alice.roster.version, 2, 'the relay handed the big roster back in registered');
     const pIn = inbox(primary);
-    await worker.send(p.id, bytesOf('under the big roster'));
+    await alice.send(p.id, bytesOf('under the big roster'));
     await pIn.next();
 
-    // The last member that fits; v3 reaches the worker over their session, through the relay.
-    const { roster: v3 } = await pair({ link: primary.openPairingCode('surface').link, identity: createIdentity() });
+    // The last member that fits; v3 reaches alice over their session, through the relay.
+    const { roster: v3 } = await pair({ link: primary.openPairingCode().link, identity: createIdentity() });
     assert.ok(rosterSize(v3) <= MAX_ROSTER_BYTES && rosterSize(v3) > MAX_ROSTER_BYTES - entry);
-    await until(() => worker.roster.version === 3, 'the worker to receive v3 in a session');
+    await until(() => alice.roster.version === 3, 'alice to receive v3 in a session');
     // Full: the primary refuses another, and nobody accepts a roster over the limit.
-    assert.throws(() => primary.openPairingCode('mcp'), { code: 'roster-full' });
+    assert.throws(() => primary.openPairingCode(), { code: 'roster-full' });
     const over = { ...v3, relay: v3.relay + 'x'.repeat(MAX_ROSTER_BYTES) };
     assert.throws(() => new Member({ identity: w, roster: over as Roster, timing: FAST }), { code: 'invalid' });
   } finally {
@@ -163,26 +167,26 @@ test('128 KiB control messages: exactly 131072 bytes are read, one byte more clo
 test('control messages a member may not send are answered, and the connection stays open', async () => {
   const net = await startNet();
   try {
-    const worker = await net.add('worker');
+    const alice = await net.add();
     const errors: { code: string; id?: string }[] = [];
-    worker.on('relayError', (e) => errors.push(e));
+    alice.on('relayError', (e) => errors.push(e));
     const send = (msg: Record<string, unknown>) =>
-      (worker as unknown as { relay: { sendControl(m: Record<string, unknown>): boolean } }).relay.sendControl({ type: 'x', ...msg });
+      (alice as unknown as { relay: { sendControl(m: Record<string, unknown>): boolean } }).relay.sendControl({ type: 'x', ...msg });
     assert.ok(send({ type: 'usage', id: 'u1' }));
+    // Any member may push a roster (spec section 4.2): one the relay holds already is ignored.
     assert.ok(send({ type: 'roster', roster: net.primary.roster }));
     assert.ok(send({ type: 'nonsense', id: 'n1' }));
-    await until(() => errors.length === 3, 'three answers');
+    await until(() => errors.length === 2, 'two answers');
     assert.deepEqual(
       errors.map((e) => [e.code, e.id]),
       [
         ['forbidden', 'u1'],
-        ['forbidden', undefined],
         ['bad_request', 'n1'],
       ],
     );
-    assert.equal(worker.state, 'connected');
+    assert.equal(alice.state, 'connected');
     const pIn = inbox(net.primary);
-    await worker.send(net.primary.id, bytesOf('still connected'));
+    await alice.send(net.primary.id, bytesOf('still connected'));
     await pIn.next();
   } finally {
     await net.close();

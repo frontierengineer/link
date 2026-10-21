@@ -1,6 +1,7 @@
 //! `Member` and `Primary`: the async face of the node core. A member owns one relay connection
 //! (reconnecting with backoff), its sessions with the other members, the roster it holds, and
-//! the application's message stream.
+//! the application's message stream. Being primary is a trait of a member (section 3.1): it
+//! comes and goes in place, the connection untouched.
 //!
 //! One task per member runs the core's timers and dials; one task per connection reads the
 //! socket, and one writes it. The core itself is a synchronous state machine behind a mutex,
@@ -21,7 +22,7 @@ use crate::core::sessions::{Ctl, SessionInfo};
 use crate::core::{Clock, Node, NodeConfig, Observation, Outputs, close_code, primary};
 use crate::errors::LinkError;
 use crate::identity::Identity;
-use crate::roster::{MemberKind, Roster};
+use crate::roster::Roster;
 use crate::signed::Resignation;
 use crate::socket::{CLOSE_GRACE, close_info, connect, spawn_writer};
 use crate::types::{
@@ -43,8 +44,13 @@ pub struct MemberOptions {
     pub roster: Roster,
     /// Defaults to the roster's `relay`.
     pub relay_url: Option<String>,
-    /// The primary key pinned at pairing (b64u); defaults to the roster's `primary.ed25519`.
-    pub pinned_primary: Option<String>,
+    /// The network key pinned at pairing (b64u); defaults to the roster's `networkKey`.
+    pub pinned_network_key: Option<String>,
+    /// The network seed, when this node is to be the primary (section 3.1). It must derive the
+    /// roster's `networkKey`. Its custody is the caller's: Link never stores, sends or deletes
+    /// it. A node started with it whose roster names another member primary claims the network
+    /// once registered.
+    pub network_seed: Option<[u8; 32]>,
     /// The receive window granted each session: 1 MiB (the initial credit) up to 2^32 - 1.
     pub credit_window: Option<u64>,
     pub timing: Timing,
@@ -60,7 +66,8 @@ impl MemberOptions {
             identity,
             roster,
             relay_url: None,
-            pinned_primary: None,
+            pinned_network_key: None,
+            network_seed: None,
             credit_window: None,
             timing: Timing::default(),
             resolve_relay: None,
@@ -165,7 +172,8 @@ impl Member {
             NodeConfig {
                 identity: opts.identity,
                 roster: opts.roster,
-                pinned_primary: opts.pinned_primary,
+                pinned_network_key: opts.pinned_network_key,
+                network_seed: opts.network_seed,
                 relay_url: opts.relay_url,
                 credit_window: opts.credit_window.unwrap_or(DEFAULT_CREDIT_WINDOW),
                 timing: opts.timing,
@@ -349,9 +357,57 @@ impl Member {
         self.shared().with(Node::observe)
     }
 
+    /// Whether this member is the primary now: it holds the network seed, and the roster it
+    /// holds names it primary (section 3.1).
+    pub fn is_primary(&self) -> bool {
+        self.shared().lock().is_primary()
+    }
+
+    /// Whether this member was given the network seed.
+    pub fn holds_network_seed(&self) -> bool {
+        self.shared().lock().holds_network_seed()
+    }
+
+    /// Opens a code that admits one node. Fails with
+    /// `roster-full` when no further member fits under the roster limit, and `invalid` unless
+    /// this member is the primary.
+    pub fn open_pairing_code(&self, opts: CodeOptions) -> Result<PairingCode, LinkError> {
+        let lifetime = opts.lifetime.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        self.shared().with(|c| primary::open_pairing_code(c, lifetime, opts.code.as_deref()))
+    }
+
+    /// Withdraws an open code.
+    pub fn cancel_pairing_code(&self, code_id: &str) {
+        self.shared().with(|c| primary::cancel_pairing_code(c, code_id));
+    }
+
+    /// Removes a member and publishes the roster. Returns the new roster. Primary only.
+    pub fn revoke(&self, node_id: &str) -> Result<Roster, LinkError> {
+        self.shared().with(|c| primary::revoke(c, node_id))
+    }
+
+    /// Asks the relay for this network's usage. The relay allows `USAGE_BURST` asks at once and
+    /// then one per `USAGE_INTERVAL` per network; beyond that it refuses, and this fails with
+    /// `rate-limited`. Ask rarely, and keep the answer. Primary only.
+    pub async fn usage(&self) -> Result<UsageReport, LinkError> {
+        let id = crate::bytes::b64u(&crate::crypto::random_array::<9>());
+        let (tx, rx) = oneshot::channel();
+        self.shared().with(|c| primary::usage_begin(c, &id, tx));
+        match self.online().await {
+            Ok(()) => self.shared().with(|c| primary::usage_send(c, &id)),
+            Err(e) => self.shared().with(|c| primary::usage_finish(c, &id, Err(e))),
+        }
+        rx.await.unwrap_or_else(|_| Err(LinkError::member_closed()))
+    }
+
+    /// The node id the roster held names primary.
+    fn primary_id(&self) -> String {
+        self.shared().lock().roster().primary_id().to_owned()
+    }
+
     /// Asks the primary for its newest roster. True when a newer one was accepted.
     pub async fn sync_roster(&self) -> Result<bool, LinkError> {
-        let (me, network) = (self.id().to_owned(), self.network());
+        let (me, network) = (self.id().to_owned(), self.primary_id());
         if me == network {
             return Ok(false);
         }
@@ -387,7 +443,8 @@ impl Member {
     /// has closed this member (state `revoked`).
     pub async fn resign(&self) -> Result<(), LinkError> {
         let network = self.network();
-        if self.id() == network {
+        let primary = self.primary_id();
+        if self.id() == primary || self.holds_network_seed() {
             return Err(LinkError::invalid("the primary cannot resign"));
         }
         self.online().await?;
@@ -415,7 +472,8 @@ impl Member {
         loop {
             if self.state() == MemberState::Connected {
                 let (tx, rx) = oneshot::channel();
-                self.shared().with(|c| c.send_control(&network, Ctl::Resign(json.clone()), tx));
+                let to = self.primary_id();
+                self.shared().with(|c| c.send_control(&to, Ctl::Resign(json.clone()), tx));
                 tokio::select! {
                     _ = &mut revoked => return Ok(()),
                     _ = tokio::time::sleep_until(deadline) => return Err(LinkError::timeout("resigning")),
@@ -456,7 +514,8 @@ impl Member {
     }
 }
 
-/// The primary: a member that also opens pairing codes, revokes and asks for usage.
+/// A member started as the primary: it holds the network seed and its roster names it primary.
+/// Every capability is [`Member`]'s; the primary ones answer only while it is the primary.
 #[derive(Clone, Debug)]
 pub struct Primary {
     member: Member,
@@ -470,7 +529,7 @@ impl Deref for Primary {
     }
 }
 
-/// Options for [`Primary::open_pairing_code`].
+/// Options for [`Member::open_pairing_code`].
 #[derive(Clone, Debug, Default)]
 pub struct CodeOptions {
     /// How long the code admits a node (15 minutes by default).
@@ -481,7 +540,8 @@ pub struct CodeOptions {
 }
 
 impl Primary {
-    /// Creates the primary and starts connecting. The identity must be the roster's primary.
+    /// Creates the primary and starts connecting. `opts.network_seed` must be given; if the
+    /// roster names another member primary, this node claims the network once registered.
     pub fn new(opts: MemberOptions) -> Result<Primary, LinkError> {
         Ok(Primary { member: Member::start(opts, true)? })
     }
@@ -495,37 +555,6 @@ impl Primary {
 
     pub fn member(&self) -> &Member {
         &self.member
-    }
-
-    /// Opens a code that admits one node of `kind` (worker, surface or mcp). Fails with
-    /// `roster-full` when no further member fits under the roster limit.
-    pub fn open_pairing_code(&self, kind: MemberKind, opts: CodeOptions) -> Result<PairingCode, LinkError> {
-        let lifetime = opts.lifetime.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-        self.shared().with(|c| primary::open_pairing_code(c, kind, lifetime, opts.code.as_deref()))
-    }
-
-    /// Withdraws an open code.
-    pub fn cancel_pairing_code(&self, code_id: &str) {
-        self.shared().with(|c| primary::cancel_pairing_code(c, code_id));
-    }
-
-    /// Removes a member and publishes the roster. Returns the new roster.
-    pub fn revoke(&self, node_id: &str) -> Result<Roster, LinkError> {
-        self.shared().with(|c| primary::revoke(c, node_id))
-    }
-
-    /// Asks the relay for this network's usage. The relay allows `USAGE_BURST` asks at once and
-    /// then one per `USAGE_INTERVAL` per network; beyond that it refuses, and this fails with
-    /// `rate-limited`. Ask rarely, and keep the answer.
-    pub async fn usage(&self) -> Result<UsageReport, LinkError> {
-        let id = crate::bytes::b64u(&crate::crypto::random_array::<9>());
-        let (tx, rx) = oneshot::channel();
-        self.shared().with(|c| primary::usage_begin(c, &id, tx));
-        match self.online().await {
-            Ok(()) => self.shared().with(|c| primary::usage_send(c, &id)),
-            Err(e) => self.shared().with(|c| primary::usage_finish(c, &id, Err(e))),
-        }
-        rx.await.unwrap_or_else(|_| Err(LinkError::member_closed()))
     }
 }
 

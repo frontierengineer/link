@@ -75,8 +75,13 @@ type MemberOptions struct {
 	Roster   *Roster   // required: the newest roster held
 	// RelayURL defaults to the roster's relay.
 	RelayURL string
-	// PinnedPrimary is the primary key pinned at pairing; it defaults to the roster's.
-	PinnedPrimary string
+	// PinnedNetworkKey is the network key pinned at pairing; it defaults to the roster's.
+	PinnedNetworkKey string
+	// NetworkSeed is the network seed, for the node meant to be the primary (section 3.1). It
+	// must derive the roster's network key. A node started with it whose roster names another
+	// member primary claims the primary once registered. The seed is the caller's to keep: this
+	// package never stores, sends or deletes it.
+	NetworkSeed []byte
 	// CreditWindow is the receive window granted per session: 1 MiB (every session's
 	// initial credit, the default) to 2^32 - 1, the excess granted as extra credit.
 	CreditWindow int64
@@ -122,7 +127,10 @@ type Member struct {
 
 	relay *relayConn
 	sess  *sessionManager
-	prim  *primaryState
+	prim  *primaryState // while this node is the primary: it holds the seed and the roster names it
+
+	netKey   *NetworkKey // the network key, when this node was given the network seed
+	claiming bool        // it was, and its roster named another primary: it claims once registered
 
 	disp         dispatcher
 	events       listeners[Event]
@@ -179,12 +187,23 @@ func newMember(opts MemberOptions) (*Member, error) {
 	if opts.Roster.member(opts.Identity.ID()) == nil {
 		return nil, invalidError("this identity is not on the roster")
 	}
-	pinned := opts.PinnedPrimary
+	pinned := opts.PinnedNetworkKey
 	if pinned == "" {
-		pinned = opts.Roster.Primary.Ed25519
+		pinned = opts.Roster.NetworkKey
 	}
-	if pinned != opts.Roster.Primary.Ed25519 {
-		return nil, invalidError("the roster is not signed by the pinned primary")
+	if pinned != opts.Roster.NetworkKey {
+		return nil, invalidError("the roster is not signed by the pinned network key")
+	}
+	var netKey *NetworkKey
+	if opts.NetworkSeed != nil {
+		k, err := NetworkKeyFromSeed(opts.NetworkSeed)
+		if err != nil {
+			return nil, err
+		}
+		if b64u(k.edPub) != opts.Roster.NetworkKey {
+			return nil, invalidError("the network seed does not derive the roster's network key")
+		}
+		netKey = k
 	}
 	window := opts.CreditWindow
 	if window == 0 {
@@ -210,6 +229,8 @@ func newMember(opts MemberOptions) (*Member, error) {
 		creditWindow: window,
 		resolveRelay: opts.ResolveRelay,
 		liveness:     opts.liveness,
+		netKey:       netKey,
+		claiming:     netKey != nil && opts.Roster.PrimaryID() != opts.Identity.ID(),
 		inboxWake:    make(chan struct{}),
 		rosterOut:    map[string]*rosterOut{},
 		stateWake:    make(chan struct{}),
@@ -238,6 +259,7 @@ func (m *Member) start() {
 	m.lock()
 	defer m.unlock()
 	m.sess.startSweep()
+	m.syncRole()
 	m.relay.start()
 }
 
@@ -675,20 +697,22 @@ func (m *Member) OnArrival(listener func(InboundMessage)) (remove func()) {
 // SyncRoster asks the primary for its newest roster and reports whether a newer one was
 // accepted. The request is repeated until answered, since delivery is at most once.
 func (m *Member) SyncRoster(ctx context.Context) (bool, error) {
-	if m.ID() == m.Network() {
+	if m.ID() == m.Roster().PrimaryID() {
 		return false, nil
 	}
 	if err := m.waitOnline(ctx); err != nil {
 		return false, err
 	}
 	m.lock()
-	before, got, network := m.roster.Version, m.rosterWake, m.roster.Network
+	before, got := m.roster.Version, m.rosterWake
 	m.unlock()
 	deadline := m.sleep(m.timing.RequestTimeout)
 	retry := max(50*time.Millisecond, m.timing.RequestTimeout/4)
 	for {
 		m.lock()
-		m.sess.sendControl(network, sessionMessage{typ: sessRosterRequest}, func(error) {})
+		if primary := m.roster.PrimaryID(); primary != m.identity.ID() {
+			m.sess.sendControl(primary, sessionMessage{typ: sessRosterRequest}, func(error) {})
+		}
 		m.unlock()
 		select {
 		case <-got:
@@ -708,15 +732,20 @@ func (m *Member) SyncRoster(ctx context.Context) (bool, error) {
 // Resign leaves the network: it sends a signed resignation to the primary and returns once
 // the relay has closed this member (state revoked).
 func (m *Member) Resign(ctx context.Context) error {
-	if m.ID() == m.Network() {
+	m.lock()
+	held, primary := m.netKey != nil, m.roster.PrimaryID() == m.identity.ID()
+	m.unlock()
+	if primary {
 		return invalidError("the primary cannot resign")
+	}
+	if held {
+		return invalidError("a node holding the network seed cannot resign")
 	}
 	if err := m.waitOnline(ctx); err != nil {
 		return err
 	}
 	m.lock()
 	r := signResignation(m.identity, m.roster.Network, m.clock.Now().UnixMilli())
-	network := m.roster.Network
 	m.unlock()
 	body, err := json.Marshal(r)
 	if err != nil {
@@ -733,7 +762,7 @@ func (m *Member) Resign(ctx context.Context) error {
 			return nil
 		}
 		if sending && s == StateConnected {
-			m.sess.sendControl(network, sessionMessage{typ: sessResign, bytes: body}, func(error) {})
+			m.sess.sendControl(m.roster.PrimaryID(), sessionMessage{typ: sessResign, bytes: body}, func(error) {})
 		} else {
 			// Repeated only while connected, as the TypeScript client does; then it waits.
 			sending = false
@@ -795,6 +824,7 @@ func (m *Member) adoptRoster(r *Roster) {
 	}
 	m.sess.rosterChanged()
 	m.emit(RosterEvent{Roster: r.Clone()})
+	m.syncRole()
 	if m.roster.member(m.identity.ID()) == nil {
 		m.relay.revoke()
 	}
@@ -802,7 +832,7 @@ func (m *Member) adoptRoster(r *Roster) {
 
 // onPeerVersion spreads rosters member to member (section 7.1). A peer holding a newer roster
 // is asked for it: any member answers with the newest it holds, and a roster is taken only
-// if the pinned primary signed it, so the peer need not be trusted. A peer that is behind,
+// if the pinned network key signed it, so the peer need not be trusted. A peer that is behind,
 // and still on this member's roster, is handed this one.
 func (m *Member) onPeerVersion(from string, version uint64) {
 	mine := uint64(m.roster.Version)
@@ -920,7 +950,8 @@ func (m *Member) sendRoster(peer string) {
 }
 
 func (m *Member) askPrimary() {
-	if m.identity.ID() == m.roster.Network {
+	primary := m.roster.PrimaryID()
+	if m.identity.ID() == primary {
 		return
 	}
 	// A handshake from anyone claiming a newer roster leads here, and the relay can provoke
@@ -950,7 +981,7 @@ func (m *Member) askPrimary() {
 	m.hintTimer = nil
 	m.askedPrimary, m.hintWait, m.hintAnswered = now, wait, false
 	m.hintsSent++
-	m.sess.sendControl(m.roster.Network, sessionMessage{typ: sessRosterRequest}, func(error) {})
+	m.sess.sendControl(primary, sessionMessage{typ: sessRosterRequest}, func(error) {})
 }
 
 // The roster hint's wait between asks of the primary: from a second, doubling while asks bring
@@ -993,6 +1024,11 @@ func (m *Member) onRelayState(s State) {
 	}
 	m.emit(StateEvent{State: s})
 	wake(&m.stateWake)
+	if s == StateConnected && m.claiming {
+		// Section 3.1: claimed once, at the first registration, never on later rosters.
+		m.claiming = false
+		m.later(m.claim)
+	}
 	if s == StateConnected && len(m.offline) > 0 {
 		m.later(func() {
 			waiting := m.offline

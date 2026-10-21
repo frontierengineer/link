@@ -94,8 +94,24 @@ func main() {
 	roster := ro["roster"].(map[string]any)
 	signed := h(ro["signedBytes"].(string))
 	check(bytes.Equal(signed, append([]byte("frontier-link/1/roster"), []byte(ro["jcs"].(string))...)), "roster signed bytes = label || jcs")
-	pk := b64(roster["primary"].(map[string]any)["ed25519"].(string))
+	pk := b64(roster["networkKey"].(string))
 	check(ed25519.Verify(pk, signed, b64(ro["signature"].(string))), "roster signature")
+	{
+		// The network key comes from the network seed (section 2), and network is its id.
+		edSeed, _ := hkdf.Key(sha256.New, h(ro["networkSeed"].(string)), nil, "frontier-link/1/network", 32)
+		check(bytes.Equal(ed25519.NewKeyFromSeed(edSeed).Public().(ed25519.PublicKey), pk), "network key from network seed")
+		sum := sha256.Sum256(pk)
+		check(strings.ToLower(b32.EncodeToString(sum[:16])) == roster["network"], "network id from network key")
+	}
+	for _, n := range v["networkKeys"].([]any) {
+		n := n.(map[string]any)
+		edSeed, _ := hkdf.Key(sha256.New, h(n["networkSeed"].(string)), nil, "frontier-link/1/network", 32)
+		check(hex.EncodeToString(edSeed) == n["ed25519Seed"], "network ed25519 seed")
+		pub := ed25519.NewKeyFromSeed(edSeed).Public().(ed25519.PublicKey)
+		check(hex.EncodeToString(pub) == n["ed25519Public"], "network key")
+		sum := sha256.Sum256(pub)
+		check(strings.ToLower(b32.EncodeToString(sum[:16])) == n["networkId"], "network id")
+	}
 
 	for _, r := range v["register"].([]any) {
 		r := r.(map[string]any)

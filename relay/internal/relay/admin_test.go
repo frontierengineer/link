@@ -58,9 +58,9 @@ func (h *harness) registerHost(host string, k, network *link.Keys, rosterJSON []
 	h.t.Helper()
 	c := h.dialHost(host)
 	ts := time.Now().UnixMilli()
-	sig := ed25519.Sign(k.Ed25519, link.RegisterMessage(network.ID.String(), k.ID.String(), c.challenge, uint64(ts), normalOrigin(host)))
+	sig := ed25519.Sign(k.Ed25519, link.RegisterMessage(netID(network), k.ID.String(), c.challenge, uint64(ts), normalOrigin(host)))
 	c.send(map[string]any{
-		"type": "register", "network": network.ID.String(), "node": k.ID.String(), "ed25519": b64(k.Ed25519Public),
+		"type": "register", "network": netID(network), "node": k.ID.String(), "ed25519": b64(k.Ed25519Public),
 		"ts": ts, "sig": b64(sig), "roster": json.RawMessage(rosterJSON),
 	})
 	if m := c.json(); m["type"] != "registered" {

@@ -9,7 +9,7 @@ import { b64u, fromB64u, toHex } from '../src/bytes.js';
 import { ed25519 } from '@noble/curves/ed25519.js';
 import { ed25519Verify } from '../src/crypto.js';
 import { decodeFrame, FrameType } from '../src/frames.js';
-import { identityFromSeed, nodeIdFromBytes } from '../src/identity.js';
+import { identityFromSeed, networkKeyFromSeed, nodeIdFromBytes } from '../src/identity.js';
 import { canonicalize } from '../src/jcs.js';
 import { parseJson } from '../src/json.js';
 import { rosterProblem, rosterSigningBytes } from '../src/roster.js';
@@ -30,6 +30,17 @@ test('relay vectors: keys and ids derive as the relay derives them', () => {
   }
 });
 
+test('relay vectors: network keys and ids derive from network seeds as the relay derives them', () => {
+  assert.ok(v.networks.length >= 2);
+  for (const n of v.networks) {
+    const key = networkKeyFromSeed(fromB64u(n.seed));
+    assert.equal(b64u(key.ed25519.seed), n.ed25519Seed, n.seed);
+    assert.equal(b64u(key.ed25519.pub), n.ed25519, n.seed);
+    assert.equal(key.id, n.networkId, n.seed);
+    assert.equal(nodeIdFromBytes(Uint8Array.from(Buffer.from(n.networkIdRaw, 'hex'))), n.networkId);
+  }
+});
+
 test('relay vectors: rosters canonicalise, sign and validate as the relay says', () => {
   let valid = 0;
   for (const c of v.rosters) {
@@ -44,7 +55,7 @@ test('relay vectors: rosters canonicalise, sign and validate as the relay says',
     const input = rosterSigningBytes(unsigned);
     assert.equal(b64u(input), c.signingInput, `${c.description}: signing input`);
     assert.equal(signature, c.signature);
-    assert.ok(ed25519Verify(fromB64u(c.signature), input, fromB64u(c.roster.primary.ed25519)), `${c.description}: signature`);
+    assert.ok(ed25519Verify(fromB64u(c.signature), input, fromB64u(c.roster.networkKey)), `${c.description}: signature`);
   }
   assert.ok(valid > 0 && valid < v.rosters.length, 'both valid and invalid cases');
 });

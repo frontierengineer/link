@@ -12,7 +12,7 @@
 import { encodeFrame, decodeFrame, FrameType, type Frame, type SessionMessage } from '../../src/frames.js';
 import { b64u, randomBytes } from '../../src/bytes.js';
 import { nodeIdFromBytes, nodeIdToBytes, type Identity } from '../../src/identity.js';
-import { createIdentity, createNetwork, MAX_ROSTER_BYTES, memberFromIdentity, rosterSize, signRoster, type Roster } from '../../src/index.js';
+import { createIdentity, createNetwork, MAX_ROSTER_BYTES, memberFromIdentity, networkKeyFromSeed, rosterSize, signRoster, type NetworkKey, type Roster } from '../../src/index.js';
 import { DEFAULT_SESSION_TIMING, INITIAL_CREDIT, SessionManager, type SessionHost } from '../../src/sessions.js';
 import type { WebSocketLike } from '../../src/socket.js';
 
@@ -28,27 +28,31 @@ export interface Cast {
   attacker: Identity;
   victim: Identity;
   roster: Roster;
+  /** The network seed the primary holds, and the key it derives, which signs the roster. */
+  networkSeed: Uint8Array;
+  net: NetworkKey;
 }
 
-/** A network of a primary, an attacker and a victim (both workers), at version 2; with `full`,
- * as many more workers as fit the 65000-byte roster limit. */
+/** A network of a primary, an attacker and a victim (both members), at version 2; with `full`,
+ * as many more members as fit the 65000-byte roster limit. */
 export function cast(full = false): Cast {
   const primary = createIdentity();
   const attacker = createIdentity();
   const victim = createIdentity();
-  const v1 = createNetwork({ identity: primary, relay: 'ws://relay.test/v1' });
-  const members = [...v1.members, memberFromIdentity(attacker, 'worker'), memberFromIdentity(victim, 'worker')];
+  const { roster: v1, networkSeed } = createNetwork({ identity: primary, relay: 'ws://relay.test/v1' });
+  const net = networkKeyFromSeed(networkSeed);
+  const members = [...v1.members, memberFromIdentity(attacker), memberFromIdentity(victim)];
   if (full) {
     // Measured with a signature's worth of placeholder, then signed once.
     const signature = 'A'.repeat(86);
     for (;;) {
-      const more = [...members, memberFromIdentity(createIdentity(), 'worker')].sort((x, y) => (x.id < y.id ? -1 : 1));
+      const more = [...members, memberFromIdentity(createIdentity())].sort((x, y) => (x.id < y.id ? -1 : 1));
       if (rosterSize({ ...v1, version: 2, members: more, signature }) > MAX_ROSTER_BYTES) break;
       members.splice(0, members.length, ...more);
     }
   }
-  const roster = signRoster({ ...v1, version: 2, members }, primary);
-  return { primary, attacker, victim, roster };
+  const roster = signRoster({ ...v1, version: 2, members }, net);
+  return { primary, attacker, victim, roster, networkSeed, net };
 }
 
 export interface Received {

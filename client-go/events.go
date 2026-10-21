@@ -34,9 +34,11 @@ type RelayErrorEvent struct {
 	ID      string // the request it answers, if any
 }
 
-// PairedEvent (primary): a newcomer completed pairing and is on the published roster.
+// PairedEvent (primary): a newcomer completed pairing with the code CodeID and is on the
+// published roster.
 type PairedEvent struct {
 	Member RosterMember
+	CodeID string
 	Roster *Roster
 }
 
@@ -60,6 +62,7 @@ const (
 	FailRelayLost     = "relay-lost"     // the primary's relay connection dropped mid-pairing
 	FailAlreadyMember = "already-member" // the newcomer's key is already on the roster
 	FailRosterFull    = "roster-full"    // the roster has no room for the newcomer
+	FailDemoted       = "demoted"        // the primary stopped being the primary mid-pairing
 )
 
 func (StateEvent) isEvent()         {}

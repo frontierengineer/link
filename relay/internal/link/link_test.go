@@ -162,27 +162,25 @@ func testRoster(t *testing.T, mutate func(map[string]any)) []byte {
 	p, _ := DeriveKeys(bytes.Repeat([]byte{1}, 32))
 	w, _ := DeriveKeys(bytes.Repeat([]byte{2}, 32))
 	members := []any{}
-	for _, m := range []struct {
-		k    *Keys
-		kind string
-	}{{p, KindPrimary}, {w, KindWorker}} {
+	for _, k := range []*Keys{p, w} {
 		members = append(members, map[string]any{
-			"id": m.k.ID.String(), "ed25519": B64u.EncodeToString(m.k.Ed25519Public),
-			"x25519": B64u.EncodeToString(m.k.X25519Public), "kind": m.kind,
+			"id": k.ID.String(), "ed25519": B64u.EncodeToString(k.Ed25519Public),
+			"x25519": B64u.EncodeToString(k.X25519Public),
 		})
 	}
 	if members[0].(map[string]any)["id"].(string) > members[1].(map[string]any)["id"].(string) {
 		members[0], members[1] = members[1], members[0]
 	}
+	n, _ := DeriveNetworkKeys(bytes.Repeat([]byte{0x80}, 32))
 	r := map[string]any{
-		"network": p.ID.String(), "version": 3, "issuedAt": int64(1790000000000),
-		"relay": "wss://relay.example/v1", "primary": map[string]any{"ed25519": B64u.EncodeToString(p.Ed25519Public)},
-		"members": members,
+		"network": n.ID.String(), "version": 3, "issuedAt": int64(1790000000000),
+		"relay": "wss://relay.example/v1", "networkKey": B64u.EncodeToString(n.Ed25519Public),
+		"primary": p.ID.String(), "members": members,
 	}
 	if mutate != nil {
 		mutate(r)
 	}
-	if err := SignRoster(r, p.Ed25519); err != nil {
+	if err := SignRoster(r, n.Ed25519); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(r)
@@ -202,20 +200,22 @@ func TestRosterValidity(t *testing.T) {
 	}
 	other, _ := DeriveKeys(bytes.Repeat([]byte{9}, 32))
 	bad := map[string]func(map[string]any){
-		"version zero":     func(r map[string]any) { r["version"] = 0 },
-		"fractional":       func(r map[string]any) { r["version"] = 1.5 },
-		"unsorted members": func(r map[string]any) { m := r["members"].([]any); m[0], m[1] = m[1], m[0] },
-		"two primaries": func(r map[string]any) {
-			for _, m := range r["members"].([]any) {
-				m.(map[string]any)["kind"] = KindPrimary
-			}
-		},
-		"unknown kind": func(r map[string]any) { r["members"].([]any)[0].(map[string]any)["kind"] = "boss" },
+		"version zero":          func(r map[string]any) { r["version"] = 0 },
+		"fractional":            func(r map[string]any) { r["version"] = 1.5 },
+		"unsorted members":      func(r map[string]any) { m := r["members"].([]any); m[0], m[1] = m[1], m[0] },
+		"primary missing":       func(r map[string]any) { delete(r, "primary") },
+		"primary not a node id": func(r map[string]any) { r["primary"] = "P" },
+		"primary not a member":  func(r map[string]any) { r["primary"] = other.ID.String() },
 		"id not derived": func(r map[string]any) {
 			r["members"].([]any)[0].(map[string]any)["ed25519"] = B64u.EncodeToString(other.Ed25519Public)
 		},
-		"network not primary": func(r map[string]any) {
+		"network not derived from networkKey": func(r map[string]any) {
 			r["network"] = other.ID.String()
+		},
+		"networkKey missing": func(r map[string]any) { delete(r, "networkKey") },
+		"the old primary field instead of networkKey": func(r map[string]any) {
+			r["primary"] = map[string]any{"ed25519": r["networkKey"]}
+			delete(r, "networkKey")
 		},
 	}
 	for name, mutate := range bad {
@@ -230,6 +230,62 @@ func TestRosterValidity(t *testing.T) {
 	raw, _ := json.Marshal(r)
 	if _, err := ParseRoster(raw); err == nil {
 		t.Error("tampered roster accepted")
+	}
+}
+
+// Section 3: the primary is whichever member the roster names, whatever node created the
+// network, and the network key alone signs.
+func TestRosterWithAnotherPrimary(t *testing.T) {
+	w, _ := DeriveKeys(bytes.Repeat([]byte{2}, 32))
+	claimed := testRoster(t, func(r map[string]any) { r["primary"] = w.ID.String() })
+	r, err := ParseRoster(claimed)
+	if err != nil {
+		t.Fatalf("a roster naming the other member primary refused: %v", err)
+	}
+	if r.Primary != w.ID {
+		t.Fatalf("primary %s, want %s", r.Primary, w.ID)
+	}
+	// The network key is not the primary's, and a roster signed by the primary's own key is not valid.
+	if bytes.Equal(r.NetworkKey, w.Ed25519Public) {
+		t.Fatal("network key equals the primary's node key")
+	}
+	var tree map[string]any
+	_ = json.Unmarshal(claimed, &tree)
+	delete(tree, "signature")
+	if err := SignRoster(tree, w.Ed25519); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(tree)
+	if _, err := ParseRoster(raw); err == nil {
+		t.Fatal("a roster signed by the primary's node key accepted")
+	}
+}
+
+// Section 3: a field the protocol does not define, on a member or the roster, is signed and
+// otherwise ignored; a member's "kind" is such a field.
+func TestUnknownMemberFieldIgnored(t *testing.T) {
+	raw := testRoster(t, func(r map[string]any) {
+		r["members"].([]any)[0].(map[string]any)["kind"] = "label"
+		r["x"] = []any{1, "two"}
+	})
+	if _, err := ParseRoster(raw); err != nil {
+		t.Fatalf("a roster with fields the protocol does not define refused: %v", err)
+	}
+}
+
+// Section 2: a network's key and id come from its own seed, apart from any node's.
+func TestNetworkKeys(t *testing.T) {
+	seed := bytes.Repeat([]byte{0x80}, 32)
+	n, err := DeriveNetworkKeys(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k, _ := DeriveKeys(seed)
+	if bytes.Equal(n.Ed25519Public, k.Ed25519Public) || n.ID == k.ID {
+		t.Fatal("a network seed derives the key a node seed would")
+	}
+	if IDFromKey(n.Ed25519Public) != n.ID {
+		t.Fatal("network id is not derived from the network key")
 	}
 }
 

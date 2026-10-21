@@ -195,18 +195,22 @@ func TestOrigins(t *testing.T) {
 func TestRosterRules(t *testing.T) {
 	p, _ := NewIdentity()
 	w, _ := NewIdentity()
-	r, err := CreateNetwork(p, "wss://relay.example/v1", time.UnixMilli(1790000000000))
+	r, seed, err := CreateNetwork(p, "wss://relay.example/v1", time.UnixMilli(1790000000000), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := NetworkKeyFromSeed(seed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	u := r.UnsignedRoster
 	u.Version = 2
-	u.Members = append(u.Members, MemberFromIdentity(w, KindWorker))
-	r2, err := SignRoster(u, p)
+	u.Members = append(u.Members, MemberFromIdentity(w))
+	r2, err := SignRoster(u, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if AcceptanceProblem(r2, r.Primary.Ed25519, 1) != nil || AcceptanceProblem(r2, r.Primary.Ed25519, 2) == nil {
+	if AcceptanceProblem(r2, r.NetworkKey, 1) != nil || AcceptanceProblem(r2, r.NetworkKey, 2) == nil {
 		t.Error("acceptance")
 	}
 	// Unknown members survive a round trip and stay covered by the signature.
@@ -215,15 +219,22 @@ func TestRosterRules(t *testing.T) {
 	json.Unmarshal(raw, &tree)
 	tree["future"] = map[string]any{"z": 1, "a": []any{true}}
 	tree["members"].([]any)[0].(map[string]any)["note"] = "x"
-	tree["primary"].(map[string]any)["hint"] = "y"
+	// A member's kind is a field this version does not define: signed, kept and otherwise
+	// ignored. Only the top-level primary names the primary.
+	for _, mm := range tree["members"].([]any) {
+		mm.(map[string]any)["kind"] = "primary"
+	}
 	delete(tree, "signature")
 	text, _ := json.Marshal(tree)
 	canon, _ := Canonicalize(text)
-	tree["signature"] = b64u(p.Sign(append([]byte(rosterLabel), canon...)))
+	tree["signature"] = b64u(key.Sign(append([]byte(rosterLabel), canon...)))
 	text, _ = json.Marshal(tree)
 	ext, err := ValidateRoster(text)
 	if err != nil {
 		t.Fatalf("a roster with members this version does not define: %v", err)
+	}
+	if ext.PrimaryID() != r2.Primary || ext.Members[1].extra["kind"] != "primary" {
+		t.Fatalf("an unknown kind changed the primary, or was dropped: %+v", ext.UnsignedRoster)
 	}
 	again, _ := json.Marshal(ext)
 	if _, err := ValidateRoster(again); err != nil {
@@ -246,7 +257,7 @@ func TestRosterRules(t *testing.T) {
 		u.Relay = ""
 		base, _ := (&Roster{UnsignedRoster: u, Signature: strings.Repeat("A", 86)}).Size()
 		u.Relay = strings.Repeat("x", n-base)
-		got, err := SignRoster(u, p)
+		got, err := SignRoster(u, key)
 		if err != nil {
 			return nil
 		}
@@ -259,6 +270,80 @@ func TestRosterRules(t *testing.T) {
 	}
 	if r := sized(MaxRosterBytes + 1); r != nil {
 		t.Error("a roster one byte over accepted")
+	}
+}
+
+// Section 2: the network id is derived from the network's own seed, apart from the primary's
+// node seed; the network key alone signs the roster (section 3), and a roster after a move,
+// whose primary is not the node that created the network, is valid.
+func TestNetworkSeed(t *testing.T) {
+	p, _ := NewIdentity()
+	w, _ := NewIdentity()
+	seed := bytes.Repeat([]byte{0x80}, 32)
+	r, got, err := CreateNetwork(p, "wss://relay.example/v1", time.UnixMilli(1790000000000), seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, seed) {
+		t.Fatal("CreateNetwork did not keep the network seed given")
+	}
+	key, _ := NetworkKeyFromSeed(seed)
+	if r.Network != key.ID() || r.Network == p.ID() || r.NetworkKey != b64u(key.Ed25519Public()) {
+		t.Fatalf("network %s: not derived from the network seed (key %s), or the primary's id", r.Network, key.ID())
+	}
+	node, _ := IdentityFromSeed(seed)
+	if node.ID() == key.ID() {
+		t.Fatal("a network seed derives the id a node seed would")
+	}
+	if !bytes.Equal(key.Seed(), seed) || r.PrimaryID() != p.ID() {
+		t.Fatal("seed or primary")
+	}
+	// Two networks minted: two seeds, two ids.
+	r2, seed2, _ := CreateNetwork(p, "wss://relay.example/v1", time.Now(), nil)
+	if len(seed2) != 32 || bytes.Equal(seed2, seed) || r2.Network == r.Network {
+		t.Fatal("a minted network seed is not fresh")
+	}
+	// Signed by the primary's node key instead of the network key: refused.
+	resign := func(u UnsignedRoster, sign func([]byte) []byte) *Roster {
+		x := &Roster{UnsignedRoster: u}
+		b, _ := x.SigningBytes()
+		x.Signature = b64u(sign(b))
+		return x
+	}
+	if resign(r.UnsignedRoster, p.Sign).Problem() == nil {
+		t.Fatal("a roster signed by the primary's node key is valid")
+	}
+	if resign(r.UnsignedRoster, key.Sign).Problem() != nil {
+		t.Fatal("a roster signed by the network key is refused")
+	}
+	// Another primary: w, not the node that created the network; the same network key.
+	moved := r.UnsignedRoster
+	moved.Version = 2
+	moved.Primary = w.ID()
+	moved.Members = []RosterMember{MemberFromIdentity(p), MemberFromIdentity(w)}
+	m, err := SignRoster(moved, key)
+	if err != nil {
+		t.Fatalf("a roster naming another primary: %v", err)
+	}
+	if m.PrimaryID() != w.ID() || AcceptanceProblem(m, r.NetworkKey, 1) != nil {
+		t.Fatal("a roster naming another primary is not accepted under the pinned network key")
+	}
+	// primary must name a member, and be a node id.
+	for _, bad := range []string{p.ID()[:25], ""} {
+		u := moved
+		u.Primary = bad
+		if _, err := SignRoster(u, key); err == nil {
+			t.Errorf("primary %q accepted", bad)
+		}
+	}
+	stranger, _ := NewIdentity()
+	u := moved
+	u.Primary = stranger.ID()
+	if _, err := SignRoster(u, key); err == nil {
+		t.Error("a primary that is not a member accepted")
+	}
+	if _, err := NetworkKeyFromSeed(seed[:31]); err == nil {
+		t.Fatal("a 31-byte network seed accepted")
 	}
 }
 

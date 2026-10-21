@@ -22,7 +22,7 @@ use tokio::sync::{Notify, broadcast, oneshot, watch};
 use crate::bytes::{b64u, from_b64u_array};
 use crate::errors::LinkError;
 use crate::frames::{FRAME_HEADER, decode_frame, encode_frame, frame_type};
-use crate::identity::{Identity, node_id_from_bytes, node_id_to_bytes};
+use crate::identity::{Identity, NetworkKey, node_id_from_bytes, node_id_to_bytes};
 use crate::json::Json;
 use crate::roster::{Roster, acceptance_problem};
 use crate::signed::{origin_of, register_signing_bytes};
@@ -142,10 +142,14 @@ pub(crate) struct Outputs {
 pub(crate) struct NodeConfig {
     pub identity: Identity,
     pub roster: Roster,
-    pub pinned_primary: Option<String>,
+    pub pinned_network_key: Option<String>,
+    /// The network seed, when the caller gives it: its custody is the caller's.
+    pub network_seed: Option<[u8; 32]>,
     pub relay_url: Option<String>,
     pub credit_window: u64,
     pub timing: Timing,
+    /// The node must start as the primary: holding the seed (it claims, if the roster names
+    /// another member primary).
     pub primary: bool,
     pub has_resolver: bool,
     pub clock: Arc<dyn Clock>,
@@ -177,7 +181,12 @@ const MAX_TRAFFIC_PEERS: usize = 4096;
 pub(crate) struct Node {
     pub(crate) identity: Identity,
     roster: Roster,
-    pinned_primary: String,
+    pinned_network_key: String,
+    /// The network key, when the caller gave this node the network seed (section 3.1).
+    network_key: Option<NetworkKey>,
+    /// Started with the seed under a roster naming another member primary: it claims at its
+    /// first registration, and only then.
+    claim_at_start: bool,
     pub(crate) timing: TimingMs,
     clock: Arc<dyn Clock>,
     out: Outputs,
@@ -221,25 +230,32 @@ impl Node {
         if roster.member(cfg.identity.id()).is_none() {
             return Err(LinkError::invalid("this identity is not on the roster"));
         }
-        let pinned_primary = cfg.pinned_primary.unwrap_or_else(|| roster.primary_ed25519());
-        if pinned_primary != roster.primary_ed25519() {
-            return Err(LinkError::invalid("the roster is not signed by the pinned primary"));
+        let pinned_network_key = cfg.pinned_network_key.unwrap_or_else(|| roster.network_key_b64u());
+        if pinned_network_key != roster.network_key_b64u() {
+            return Err(LinkError::invalid("the roster is not signed by the pinned network key"));
         }
         if !(crate::types::INITIAL_CREDIT..=u64::from(u32::MAX)).contains(&cfg.credit_window) {
             return Err(LinkError::invalid("creditWindow must be an integer from 1 MiB to 2^32 - 1"));
         }
-        if cfg.primary && cfg.identity.id() != roster.network() {
-            return Err(LinkError::invalid("this identity is not the network primary"));
+        let network_key = cfg.network_seed.map(|s| NetworkKey::from_seed(&zeroize::Zeroizing::new(s)));
+        if network_key.as_ref().is_some_and(|k| &k.ed25519_public() != roster.network_key()) {
+            return Err(LinkError::invalid("the network seed does not derive the roster's network key"));
         }
+        if cfg.primary && network_key.is_none() {
+            return Err(LinkError::invalid("the primary needs the network seed"));
+        }
+        let claim_at_start = network_key.is_some() && cfg.identity.id() != roster.primary_id();
         let url = cfg.relay_url.unwrap_or_else(|| roster.relay().to_owned());
         let timing = TimingMs::from(cfg.timing);
         let now = cfg.clock.now_ms();
         let unix = cfg.clock.unix_ms();
-        Ok(Node {
+        let mut node = Node {
             sessions: Sessions::new(&timing, cfg.credit_window, now, &roster),
             identity: cfg.identity,
             roster,
-            pinned_primary,
+            pinned_network_key,
+            network_key,
+            claim_at_start,
             timing,
             clock: cfg.clock,
             out,
@@ -258,14 +274,16 @@ impl Node {
             ask_primary_after_register: false,
             overflow_pending: false,
             relay_errors: sessions::Bucket::default(),
-            primary: cfg.primary.then(PrimaryState::default),
+            primary: None,
             inbox: VecDeque::new(),
             observers: cfg.observer.into_iter().map(Watcher::Call).collect(),
             traffic_since: unix,
             traffic_total: PeerTraffic::default(),
             traffic_peers: BTreeMap::new(),
             relay_base: (0, 0),
-        })
+        };
+        node.refresh_role();
+        Ok(node)
     }
 
     pub(crate) fn now(&self) -> u64 {
@@ -305,6 +323,54 @@ impl Node {
 
     pub(crate) fn relay_url(&self) -> &str {
         &self.url
+    }
+
+    /// Whether this node is the primary now: it holds the network seed, and its roster names it.
+    pub(crate) fn is_primary(&self) -> bool {
+        self.primary.is_some()
+    }
+
+    pub(crate) fn holds_network_seed(&self) -> bool {
+        self.network_key.is_some()
+    }
+
+    pub(crate) fn network_key(&self) -> Option<&NetworkKey> {
+        self.network_key.as_ref()
+    }
+
+    // ── The primary trait (section 3.1) ──
+
+    /// Settles what this node is under the roster it holds: the primary (seed held, named
+    /// primary) or an ordinary member. A node that stops being the primary tears its primary
+    /// state down in place; the relay connection is never touched, and the seed the caller gave
+    /// stays where it is: its custody is the caller's.
+    fn refresh_role(&mut self) {
+        let named = self.network_key.is_some() && self.roster.primary_id() == self.id();
+        if named {
+            if self.primary.is_none() {
+                self.primary = Some(PrimaryState::default());
+            }
+        } else if self.primary.is_some() {
+            primary::stop(self);
+            self.primary = None;
+        }
+    }
+
+    /// Becoming the primary (section 3.1): a node started with the network seed whose roster
+    /// names another member primary claims it at its first registration. It signs the next
+    /// roster naming itself primary, the members unchanged, and publishes it like any change.
+    /// Never again on later rosters.
+    fn claim(&mut self) {
+        if !std::mem::take(&mut self.claim_at_start) {
+            return;
+        }
+        let me = self.id().to_owned();
+        if self.network_key.is_none() || self.roster.primary_id() == me {
+            return;
+        }
+        if let Ok(next) = primary::next_roster_naming(self, &me) {
+            primary::publish(self, next);
+        }
     }
 
     // ── The relay connection ──
@@ -563,7 +629,7 @@ impl Node {
     }
 
     /// The counts for `peer`. Every id a frame names gets its own, so `total` is the sum over
-    /// `peers`; past `MAX_TRAFFIC_PEERS` ids (a roster holds about 400) a new id that is not on
+    /// `peers`; past `MAX_TRAFFIC_PEERS` ids (a roster holds about 440) a new id that is not on
     /// the roster is counted in `total` only, so a relay cannot grow the map without bound.
     fn peer_traffic(&mut self, peer: &str) -> Option<&mut PeerTraffic> {
         if !self.traffic_peers.contains_key(peer)
@@ -628,6 +694,9 @@ impl Node {
             }
             if self.state == RelayState::Connecting {
                 self.set_state(RelayState::Registered);
+            }
+            if self.state == RelayState::Registered {
+                self.claim();
             }
             if std::mem::take(&mut self.ask_primary_after_register) && self.state == RelayState::Registered {
                 self.ask_primary();
@@ -750,7 +819,7 @@ impl Node {
 
     /// Applies section 3 acceptance. True when the roster was taken.
     pub(crate) fn offer_roster(&mut self, candidate: &Json) -> bool {
-        if acceptance_problem(candidate, &self.pinned_primary, self.roster.version()).is_some() {
+        if acceptance_problem(candidate, &self.pinned_network_key, self.roster.version()).is_some() {
             return false;
         }
         match Roster::from_json(candidate.clone()) {
@@ -769,7 +838,9 @@ impl Node {
         self.emit(Event::Roster(r));
         if !still_member {
             self.revoke_self();
+            return;
         }
+        self.refresh_role();
     }
 
     /// A session message other than `message` from a peer.
@@ -810,14 +881,14 @@ impl Node {
     }
 
     pub(crate) fn ask_primary(&mut self) {
-        if self.id() == self.network() {
+        if self.id() == self.roster.primary_id() {
             return;
         }
         #[cfg(test)]
         {
             self.sessions.primary_asks += 1;
         }
-        let primary = self.network().to_owned();
+        let primary = self.roster.primary_id().to_owned();
         sessions::send_control(self, &primary, Ctl::RosterRequest, None, FailAction::Ignore);
     }
 

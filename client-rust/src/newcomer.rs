@@ -43,8 +43,8 @@ pub struct PairOptions {
 pub struct PairResult {
     /// The roster that includes this node. Persist it with the identity.
     pub roster: Roster,
-    /// The primary's Ed25519 key, pinned from the roster: `roster.primary.ed25519` (b64u).
-    pub pinned_primary: String,
+    /// The network key, pinned from the roster: `roster.networkKey` (b64u).
+    pub pinned_network_key: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd)]
@@ -210,6 +210,6 @@ fn check_roster(value: Json, network: &str, id: &Identity) -> Result<PairResult,
     if !listed {
         return Err(LinkError::pairing("the roster does not list this node with its keys"));
     }
-    let pinned_primary = roster.primary_ed25519();
-    Ok(PairResult { roster, pinned_primary })
+    let pinned_network_key = roster.network_key_b64u();
+    Ok(PairResult { roster, pinned_network_key })
 }

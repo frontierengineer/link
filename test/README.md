@@ -23,8 +23,8 @@ Playwright's Chromium at the version `package.json` pins (`npx playwright instal
 - `membership.test.ts` — revocation (4008), resignation, refusal by a member whose roster is
   behind, the relay forgetting an idle network, usage, the quota and its trickle rate.
 - `browser.test.ts` — the client bundled for the browser with esbuild and loaded into headless
-  Chromium, where a surface pairs with a Node primary, exchanges small and several-MiB
-  messages with it and with a Node worker, receives a roster push, and is revoked.
+  Chromium, where a node pairs with a Node primary, exchanges small and several-MiB
+  messages with it and with another Node member, receives a roster push, and is revoked.
 - `origin.test.ts` — members dialling `ws://127.0.0.1:443` register: both sides drop `:443`.
   Needs permission to listen on 443 (root, or `net.ipv4.ip_unprivileged_port_start=0`); without
   it the test is skipped and says why, except with `LINK_REQUIRE_PORT_443=1`, as in CI.
@@ -36,7 +36,9 @@ Playwright's Chromium at the version `package.json` pins (`npx playwright instal
   receiver that does not take; rekeying on a timer and on a message count, seen through
   `sessions` and counted from the traffic report; reset after a peer restarts from its seed; unreachable peers; refusal by a
   member whose roster is behind; revocation; resignation; a revocation spreading member to
-  member with the primary offline; replacement (4005) by a copy of another implementation;
+  member with the primary offline; a new primary claimed by a node started with the network
+  seed, the former primary demoted in place and still connected; replacement (4005) by a copy
+  of another implementation;
   usage and its budget; traffic counters agreeing between sender and receiver; a network of
   every implementation at once; and, per implementation, the driver's lifecycle and error codes.
 

@@ -1,5 +1,7 @@
 //! Keys and ids (section 2). One 32-byte seed yields the node's Ed25519 identity and its X25519
-//! session key; the node id is a hash of the Ed25519 public key.
+//! session key; the node id is a hash of the Ed25519 public key. A network has a seed of its
+//! own, apart from every node's: it yields the network key, which signs the roster, and the
+//! network id, a hash of that key.
 
 use std::fmt;
 
@@ -88,6 +90,65 @@ impl Identity {
 impl fmt::Debug for Identity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Identity").field("id", &self.id).finish_non_exhaustive()
+    }
+}
+
+/// A network's key (section 2), held by its primary alone. Persist [`NetworkKey::seed`] as
+/// secretly as a node's seed.
+///
+/// The seed is zeroised when the key is dropped, and `Debug` never prints it.
+#[derive(Clone)]
+pub struct NetworkKey {
+    seed: Zeroizing<[u8; 32]>,
+    id: String,
+    signing: SigningKey,
+    ed25519_public: [u8; 32],
+}
+
+impl NetworkKey {
+    /// A new network seed, minted once when a network is created (section 3.1), and its key.
+    pub fn generate() -> NetworkKey {
+        let seed = Zeroizing::new(random_array::<32>());
+        NetworkKey::from_seed(&seed)
+    }
+
+    /// The key a network seed derives: `HKDF-SHA256(seed, info "frontier-link/1/network")`.
+    pub fn from_seed(seed: &[u8; 32]) -> NetworkKey {
+        let ed_seed = Zeroizing::new(hkdf_array::<32>(seed, &[], b"frontier-link/1/network"));
+        let signing = SigningKey::from_bytes(&ed_seed);
+        let ed25519_public = signing.verifying_key().to_bytes();
+        NetworkKey { seed: Zeroizing::new(*seed), id: node_id_from_ed25519(&ed25519_public), signing, ed25519_public }
+    }
+
+    /// The 32-byte network seed. Secret.
+    pub fn seed(&self) -> &[u8; 32] {
+        &self.seed
+    }
+
+    /// The network id: 26 lowercase base32 characters, derived from the network key.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The network key's public half, as a roster's `networkKey` carries it (raw).
+    pub fn ed25519_public(&self) -> [u8; 32] {
+        self.ed25519_public
+    }
+
+    /// The HKDF-derived Ed25519 seed (RFC 8032's private key). Secret.
+    pub fn ed25519_seed(&self) -> [u8; 32] {
+        self.signing.to_bytes()
+    }
+
+    /// An Ed25519 signature by the network key.
+    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
+        self.signing.sign(message).to_bytes()
+    }
+}
+
+impl fmt::Debug for NetworkKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NetworkKey").field("id", &self.id).finish_non_exhaustive()
     }
 }
 

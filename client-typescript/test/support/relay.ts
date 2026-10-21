@@ -9,7 +9,7 @@ import { b64u, fromB64uLen } from '../../src/bytes.js';
 import { decodeFrame, encodeFrame, FrameType, MAX_FRAME } from '../../src/frames.js';
 import { nodeIdFromBytes, nodeIdFromEd25519, nodeIdToBytes } from '../../src/identity.js';
 import { ed25519Verify } from '../../src/crypto.js';
-import { findMember, rosterProblem, type Roster } from '../../src/roster.js';
+import { findMember, primaryOf, rosterProblem, type Roster } from '../../src/roster.js';
 import { registerSigningBytes } from '../../src/signed.js';
 import { listen, type ServerSocket, type WsServer } from './ws-server.js';
 
@@ -156,10 +156,12 @@ export class TestRelay {
       return;
     }
     if (conn.state !== 'registered') return;
-    const isPrimary = conn.node === conn.network;
+    // The primary is the member the relay's roster names (section 4.2).
+    const isPrimary = conn.node === this.primaryOf(conn.network!);
     switch (msg.type) {
       case 'roster':
-        if (isPrimary) this.pushRoster(conn, msg.roster);
+        // From any member: the network key signed it (section 4.2).
+        this.pushRoster(conn, msg.roster);
         return;
       case 'usage':
         if (!isPrimary) {
@@ -216,7 +218,7 @@ export class TestRelay {
     const presented = roster as Roster;
     const held = this.rosters.get(network);
     const effective = held && held.version > presented.version ? held : presented;
-    if (effective === presented) this.rosters.set(network, presented);
+    if (effective === presented) this.adopt(presented);
     if (!findMember(effective, node)) return this.close(conn, 4008);
     let net = this.conns.get(network);
     if (!net) this.conns.set(network, (net = new Map()));
@@ -236,11 +238,26 @@ export class TestRelay {
     if (rosterProblem(roster) !== null) return;
     const r = roster as Roster;
     if (r.network !== conn.network || (held && r.version <= held.version)) return;
-    this.rosters.set(r.network, r);
+    this.adopt(r);
     if (!this.enforceRoster) return;
     for (const [node, c] of [...(this.conns.get(r.network) ?? [])]) {
       if (!findMember(r, node)) c.sock.close(4008);
     }
+  }
+
+  private primaryOf(network: string): string | undefined {
+    const r = this.rosters.get(network);
+    return r ? primaryOf(r).id : undefined;
+  }
+
+  /** Holds `r` as the network's roster. A move demotes the former primary's connection in place
+   * (section 4.2): its pairing channels end, and it stays connected. */
+  private adopt(r: Roster): void {
+    const before = this.primaryOf(r.network);
+    this.rosters.set(r.network, r);
+    if (before === undefined || before === primaryOf(r).id) return;
+    const demoted = this.conns.get(r.network)?.get(before);
+    for (const ch of [...this.channels.values()]) if (ch.primary === demoted) this.endChannel(ch, 'timeout');
   }
 
   /** Answers with what `usage` returns, for tests that need a quota or `slowed`. */
@@ -267,7 +284,8 @@ export class TestRelay {
 
   private pair(conn: Conn, msg: Record<string, unknown>): void {
     if (typeof msg.network !== 'string' || typeof msg.code !== 'string') return this.close(conn, 4000);
-    const primary = this.conns.get(msg.network)?.get(msg.network);
+    const named = this.primaryOf(msg.network);
+    const primary = named === undefined ? undefined : this.conns.get(msg.network)?.get(named);
     if (!primary) {
       conn.sock.sendText(JSON.stringify({ type: 'error', code: 'unreachable' }));
       return this.close(conn, 1000);

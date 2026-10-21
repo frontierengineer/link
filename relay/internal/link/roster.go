@@ -10,16 +10,8 @@ import (
 	"strings"
 )
 
-// RosterContext prefixes the bytes a primary signs for a roster.
+// RosterContext prefixes the bytes the network key signs for a roster.
 const RosterContext = "frontier-link/1/roster"
-
-// Member kinds.
-const (
-	KindPrimary = "primary"
-	KindWorker  = "worker"
-	KindSurface = "surface"
-	KindMCP     = "mcp"
-)
 
 const maxSafeInteger = 1<<53 - 1
 
@@ -31,17 +23,17 @@ const MaxRosterBytes = 65000
 type Member struct {
 	ID      ID
 	Ed25519 ed25519.PublicKey
-	Kind    string
 }
 
 // Roster is a roster that passed every validity rule of section 3.
 type Roster struct {
-	Network  ID
-	Version  int64
-	IssuedAt int64
-	Primary  ed25519.PublicKey
-	Members  []Member
-	Raw      json.RawMessage // as received, to hand to a member that holds an older one
+	Network    ID
+	Version    int64
+	IssuedAt   int64
+	NetworkKey ed25519.PublicKey // signs the roster; Network is derived from it
+	Primary    ID                // the member named primary, the one holding the network seed
+	Members    []Member
+	Raw        json.RawMessage // as received, to hand to a member that holds an older one
 }
 
 // Member returns the entry for id, or nil.
@@ -87,7 +79,7 @@ func ParseRoster(raw []byte) (*Roster, error) {
 		return nil, errors.New("roster: network missing")
 	}
 	if r.Network, ok = ParseID(netStr); !ok {
-		return nil, errors.New("roster: network is not a node id")
+		return nil, errors.New("roster: network is not an id")
 	}
 	if r.Version, err = integer(obj["version"]); err != nil || r.Version < 1 {
 		return nil, errors.New("roster: version must be a positive integer")
@@ -98,18 +90,20 @@ func ParseRoster(raw []byte) (*Roster, error) {
 	if _, ok := obj["relay"].(string); !ok {
 		return nil, errors.New("roster: relay missing")
 	}
-	primary, ok := obj["primary"].(map[string]any)
+	if r.NetworkKey, err = keyField(obj, "networkKey"); err != nil {
+		return nil, fmt.Errorf("roster: %w", err)
+	}
+	primaryStr, ok := obj["primary"].(string)
 	if !ok {
 		return nil, errors.New("roster: primary missing")
 	}
-	if r.Primary, err = keyField(primary, "ed25519"); err != nil {
-		return nil, fmt.Errorf("roster: primary: %w", err)
+	if r.Primary, ok = ParseID(primaryStr); !ok {
+		return nil, errors.New("roster: primary is not a node id")
 	}
 	members, ok := obj["members"].([]any)
 	if !ok || len(members) == 0 {
 		return nil, errors.New("roster: members missing")
 	}
-	primaries := 0
 	for i, mv := range members {
 		m, ok := mv.(map[string]any)
 		if !ok {
@@ -130,27 +124,16 @@ func ParseRoster(raw []byte) (*Roster, error) {
 		if IDFromKey(pub) != id {
 			return nil, fmt.Errorf("roster: member %d: id is not derived from its key", i)
 		}
-		kind, _ := m["kind"].(string)
-		switch kind {
-		case KindPrimary:
-			primaries++
-			if !bytes.Equal(pub, r.Primary) || id != r.Network {
-				return nil, errors.New("roster: the primary member does not match primary and network")
-			}
-		case KindWorker, KindSurface, KindMCP:
-		default:
-			return nil, fmt.Errorf("roster: member %d: unknown kind %q", i, kind)
-		}
 		if i > 0 && idStr <= members[i-1].(map[string]any)["id"].(string) {
 			return nil, errors.New("roster: members are not sorted by id")
 		}
-		r.Members = append(r.Members, Member{ID: id, Ed25519: pub, Kind: kind})
+		r.Members = append(r.Members, Member{ID: id, Ed25519: pub})
 	}
-	if primaries != 1 {
-		return nil, errors.New("roster: exactly one member must be the primary")
+	if r.Member(r.Primary) == nil {
+		return nil, errors.New("roster: primary is not a member")
 	}
-	if IDFromKey(r.Primary) != r.Network {
-		return nil, errors.New("roster: network is not derived from the primary key")
+	if IDFromKey(r.NetworkKey) != r.Network {
+		return nil, errors.New("roster: network is not derived from networkKey")
 	}
 	whole, err := Canonicalize(obj)
 	if err != nil {
@@ -171,7 +154,7 @@ func ParseRoster(raw []byte) (*Roster, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !VerifyEd25519(r.Primary, msg, sig) {
+	if !VerifyEd25519(r.NetworkKey, msg, sig) {
 		return nil, errors.New("roster: signature does not verify")
 	}
 	return r, nil
@@ -203,12 +186,12 @@ func integer(v any) (int64, error) {
 	return i, nil
 }
 
-// SignRoster adds a "signature" member to roster, signed by the primary's key.
-func SignRoster(roster map[string]any, primary ed25519.PrivateKey) error {
+// SignRoster adds a "signature" member to roster, signed by the network key.
+func SignRoster(roster map[string]any, networkKey ed25519.PrivateKey) error {
 	msg, err := SigningInput(roster)
 	if err != nil {
 		return err
 	}
-	roster["signature"] = B64u.EncodeToString(ed25519.Sign(primary, msg))
+	roster["signature"] = B64u.EncodeToString(ed25519.Sign(networkKey, msg))
 	return nil
 }

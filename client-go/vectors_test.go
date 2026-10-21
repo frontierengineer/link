@@ -71,8 +71,14 @@ type clientVectors struct {
 	Keys []struct {
 		Seed, Ed25519Seed, Ed25519Public, Ed25519PublicB64u, X25519Private, X25519Public, X25519PublicB64u, NodeIDBytes, NodeID string
 	} `json:"keys"`
+	NetworkKeys []struct {
+		NetworkSeed, Ed25519Seed, Ed25519Public, Ed25519PublicB64u string
+		NetworkIDBytes                                             string `json:"networkIdBytes"`
+		NetworkID                                                  string `json:"networkId"`
+	} `json:"networkKeys"`
 	Roster struct {
 		Signing struct {
+			NetworkSeed string
 			Roster      json.RawMessage
 			JCS         string `json:"jcs"`
 			SignedBytes string
@@ -91,11 +97,11 @@ type clientVectors struct {
 			Roster json.RawMessage
 		}
 		Acceptance []struct {
-			Name          string
-			Roster        json.RawMessage
-			PinnedPrimary string
-			HeldVersion   int64
-			Accept        bool
+			Name             string
+			Roster           json.RawMessage
+			PinnedNetworkKey string
+			HeldVersion      int64
+			Accept           bool
 		}
 	}
 	Register []struct {
@@ -167,7 +173,7 @@ type rfcVector struct {
 func loadClientVectors(t *testing.T) *clientVectors {
 	var v clientVectors
 	loadJSON(t, "spec/vectors/client.json", &v)
-	if len(v.Keys) == 0 || len(v.Roster.Invalid) < 10 || len(v.Frames) != 8 {
+	if len(v.Keys) == 0 || len(v.NetworkKeys) == 0 || len(v.Roster.Invalid) < 10 || len(v.Frames) != 8 {
 		t.Fatal("client.json did not load as expected")
 	}
 	return &v
@@ -192,6 +198,27 @@ func TestClientVectorsKeys(t *testing.T) {
 	}
 }
 
+// Section 2: a network's key and id from its network seed, apart from any node's.
+func TestClientVectorsNetworkKeys(t *testing.T) {
+	v := loadClientVectors(t)
+	for _, k := range v.NetworkKeys {
+		key, err := NetworkKeyFromSeed(hx(t, k.NetworkSeed))
+		if err != nil {
+			t.Fatal(err)
+		}
+		eqHex(t, "network ed25519 seed", key.edPriv.Seed(), k.Ed25519Seed)
+		eqHex(t, "network key", key.Ed25519Public(), k.Ed25519Public)
+		if b64u(key.edPub) != k.Ed25519PublicB64u || key.ID() != k.NetworkID {
+			t.Errorf("network key %s / id %s, want %s / %s", b64u(key.edPub), key.ID(), k.Ed25519PublicB64u, k.NetworkID)
+		}
+		raw, _ := nodeIDToBytes(key.ID())
+		eqHex(t, "network id bytes", raw[:], k.NetworkIDBytes)
+		if node := mustIdentity(t, hx(t, k.NetworkSeed)); node.ID() == key.ID() {
+			t.Error("the network seed derives the node id")
+		}
+	}
+}
+
 func TestClientVectorsRosters(t *testing.T) {
 	v := loadClientVectors(t)
 	s := v.Roster.Signing
@@ -207,11 +234,25 @@ func TestClientVectorsRosters(t *testing.T) {
 	if string(signed[len(rosterLabel):]) != s.JCS {
 		t.Error("jcs differs")
 	}
-	// Ed25519 is deterministic: the primary (keys[0]) signs the same signature.
-	primary := mustIdentity(t, hx(t, v.Keys[0].Seed))
-	again, err := SignRoster(r.UnsignedRoster, primary)
+	// Ed25519 is deterministic: the network key signs the same signature.
+	key, err := NetworkKeyFromSeed(hx(t, s.NetworkSeed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if key.ID() != r.Network || b64u(key.edPub) != r.NetworkKey {
+		t.Error("the signing roster's network is not its network seed's")
+	}
+	again, err := SignRoster(r.UnsignedRoster, key)
 	if err != nil || again.Signature != s.Signature || r.Signature != s.Signature {
 		t.Errorf("re-signed %v %v", again, err)
+	}
+	// The primary's own node key does not sign a valid roster.
+	primary := mustIdentity(t, hx(t, v.Keys[0].Seed))
+	byNode := &Roster{UnsignedRoster: r.UnsignedRoster}
+	b, _ := byNode.SigningBytes()
+	byNode.Signature = b64u(primary.Sign(b))
+	if byNode.Problem() == nil {
+		t.Error("a roster signed by the primary's node key is valid")
 	}
 	u, err := DecodeRoster(v.Roster.Unicode.Roster)
 	if err != nil {
@@ -239,14 +280,14 @@ func TestClientVectorsRosters(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got := AcceptanceProblem(r, c.PinnedPrimary, c.HeldVersion) == nil
+		got := AcceptanceProblem(r, c.PinnedNetworkKey, c.HeldVersion) == nil
 		if got != c.Accept {
 			t.Errorf("%s: accept %v", c.Name, got)
 		}
 		accepts = append(accepts, c.Accept)
 	}
-	if len(accepts) != 4 {
-		t.Error("expected four acceptance cases")
+	if len(accepts) != 5 {
+		t.Error("expected five acceptance cases")
 	}
 }
 
@@ -449,7 +490,7 @@ func TestClientVectorsSpake2Profile(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := checkPairedRoster(got6, roster.Network, newcomer)
-	if err != nil || res.PinnedPrimary != roster.Primary.Ed25519 {
+	if err != nil || res.PinnedNetworkKey != roster.NetworkKey {
 		t.Fatalf("paired roster: %v", err)
 	}
 }
@@ -610,6 +651,9 @@ type relayVectors struct {
 	Keys []struct {
 		Seed, Ed25519Seed, Ed25519, X25519Private, X25519, NodeID, NodeIDRaw string
 	}
+	Networks []struct {
+		Seed, Ed25519Seed, Ed25519, NetworkID, NetworkIDRaw string
+	}
 	Rosters []struct {
 		Description                  string
 		Roster                       json.RawMessage
@@ -634,8 +678,18 @@ type relayVectors struct {
 func TestRelayVectors(t *testing.T) {
 	var v relayVectors
 	loadJSON(t, "spec/vectors/relay.json", &v)
-	if len(v.Keys) != 4 || len(v.Rosters) != 13 || len(v.Registrations) != 2 || len(v.Frames) != 3 {
+	if len(v.Keys) != 4 || len(v.Networks) != 2 || len(v.Rosters) != 19 || len(v.Registrations) != 2 || len(v.Frames) != 3 {
 		t.Fatal("relay.json did not load as expected")
+	}
+	for _, n := range v.Networks {
+		key, err := NetworkKeyFromSeed(ub(t, n.Seed))
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := nodeIDToBytes(key.ID())
+		if b64u(key.edPriv.Seed()) != n.Ed25519Seed || b64u(key.edPub) != n.Ed25519 || key.ID() != n.NetworkID || hex.EncodeToString(raw[:]) != n.NetworkIDRaw {
+			t.Errorf("network keys for seed %s differ", n.Seed)
+		}
 	}
 	keyByID := map[string]*Identity{}
 	for _, k := range v.Keys {
@@ -899,9 +953,9 @@ func TestClientVectorsHandshakeStamps(t *testing.T) {
 		return n
 	}
 	from, _ := nodeIDToBytes(ini.ID())
-	primary := ids[roster.Network]
-	if primary == nil {
-		t.Fatal("the file does not hold the primary's key, to sign the roster changes")
+	primary, err := NetworkKeyFromSeed(hx(t, v.Roster.Signing.NetworkSeed))
+	if err != nil || primary.ID() != roster.Network {
+		t.Fatal("the file does not hold the network seed, to sign the roster changes")
 	}
 	answers := func() int {
 		relay.mu.Lock()

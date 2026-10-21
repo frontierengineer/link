@@ -326,23 +326,23 @@ test('R5 compressedNoGain: compressing ciphertext-like bytes is a finding; text 
 test('real members: throw mode fails the send before anything goes out; off, the member reports nothing', async () => {
   const net = await startNetwork();
   try {
-    const worker = await net.add('worker');
-    assert.equal(worker.diagnostics(), undefined);
-    await worker.send(net.primary.id, bytesOf('one session first'));
-    const off = enableDiagnostics(worker, { mode: 'throw' });
+    const alice = await net.add();
+    assert.equal(alice.diagnostics(), undefined);
+    await alice.send(net.primary.id, bytesOf('one session first'));
+    const off = enableDiagnostics(alice, { mode: 'throw' });
     const frames = net.relay.frameLog.length;
-    const before = worker.traffic().total.sent.messages;
-    await assert.rejects(worker.send(net.primary.id, enc.encode(Buffer.from(rnd(200)).toString('base64'))), DiagnosticFindingError);
+    const before = alice.traffic().total.sent.messages;
+    await assert.rejects(alice.send(net.primary.id, enc.encode(Buffer.from(rnd(200)).toString('base64'))), DiagnosticFindingError);
     assert.equal(net.relay.frameLog.length, frames, 'nothing reached the relay');
-    assert.equal(worker.traffic().total.sent.messages, before);
-    await worker.send(net.primary.id, rnd(500));
-    const r = worker.diagnostics()!;
+    assert.equal(alice.traffic().total.sent.messages, before);
+    await alice.send(net.primary.id, rnd(500));
+    const r = alice.diagnostics()!;
     assert.equal(r.mode, 'throw');
     assert.equal(r.counts.textEncodedBinary, 1);
     assert.equal(r.sent.messages, 2);
     off();
-    assert.equal(worker.diagnostics(), undefined);
-    await worker.send(net.primary.id, enc.encode(Buffer.from(rnd(200)).toString('base64'))); // off: sent as is
+    assert.equal(alice.diagnostics(), undefined);
+    await alice.send(net.primary.id, enc.encode(Buffer.from(rnd(200)).toString('base64'))); // off: sent as is
   } finally {
     await net.close();
   }
@@ -351,10 +351,10 @@ test('real members: throw mode fails the send before anything goes out; off, the
 test('real members: usage asks, an unreachable peer, and the credit self-check', async () => {
   const net = await startNetwork();
   try {
-    const worker = await net.add('worker');
-    const gone = await net.add('surface');
+    const alice = await net.add();
+    const gone = await net.add();
     enableDiagnostics(net.primary);
-    enableDiagnostics(worker);
+    enableDiagnostics(alice);
     await net.primary.usage();
     await net.primary.usage();
     await net.primary.usage();
@@ -364,14 +364,14 @@ test('real members: usage asks, an unreachable peer, and the credit self-check',
     assert.ok(u.nearBudget >= 1);
 
     gone.close();
-    await until(() => !net.relay.isConnected(net.primary.id, gone.id), 'the surface to leave');
-    for (let i = 0; i < 7; i++) await assert.rejects(worker.send(gone.id, bytesOf('anyone?')), { code: 'unreachable' });
-    assert.equal(worker.diagnostics()!.counts.unreachableRetries, 1);
+    await until(() => !net.relay.isConnected(net.primary.network, gone.id), 'bob to leave');
+    for (let i = 0; i < 7; i++) await assert.rejects(alice.send(gone.id, bytesOf('anyone?')), { code: 'unreachable' });
+    assert.equal(alice.diagnostics()!.counts.unreachableRetries, 1);
 
     // Bulk small messages: credit comes back in batches. The primary takes what arrives; a
     // receiver that took nothing would stop this sender at its pace, 64 KiB in.
     inbox(net.primary);
-    for (let i = 0; i < 500; i++) await worker.send(net.primary.id, new Uint8Array(300));
+    for (let i = 0; i < 500; i++) await alice.send(net.primary.id, new Uint8Array(300));
     await until(() => net.primary.diagnostics()!.findings.credits.messagesReceived >= 500, 'the messages');
     const c = net.primary.diagnostics()!.findings.credits;
     assert.ok(c.sentPerMessageReceived < 0.1, `${c.sent} credits for ${c.messagesReceived} messages`);

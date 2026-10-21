@@ -107,24 +107,33 @@ pub struct Net {
     pub relay: Relay,
     pub primary: Primary,
     pub timing: Timing,
+    /// The network's key (its seed included), as the application creating it would keep it.
+    pub network_key: NetworkKey,
 }
 
 impl Net {
     pub async fn start(env: &[(&str, &str)], timing: Timing) -> Net {
-        let relay = Relay::start(env);
-        let id = Identity::generate();
-        let roster = create_network(&id, &relay.url, unix_ms()).unwrap();
-        let mut opts = MemberOptions::new(id, roster);
-        opts.timing = timing;
-        let primary = Primary::new(opts).unwrap();
-        primary.wait_connected(Some(Duration::from_secs(15))).await.unwrap();
-        Net { relay, primary, timing }
+        Net::start_with(env, timing, |_| {}).await
     }
 
-    /// Pairs a new node of `kind` and returns its identity and roster without connecting it.
-    pub async fn pair_only(&self, kind: MemberKind) -> (Identity, Roster) {
+    /// As `start`, with `f` given the primary's options before it starts.
+    pub async fn start_with(env: &[(&str, &str)], timing: Timing, f: impl FnOnce(&mut MemberOptions)) -> Net {
+        let relay = Relay::start(env);
+        let id = Identity::generate();
+        let (roster, network_key) = create_network(&id, &relay.url, unix_ms()).unwrap();
+        let mut opts = MemberOptions::new(id, roster);
+        opts.timing = timing;
+        opts.network_seed = Some(*network_key.seed());
+        f(&mut opts);
+        let primary = Primary::new(opts).unwrap();
+        primary.wait_connected(Some(Duration::from_secs(15))).await.unwrap();
+        Net { relay, primary, timing, network_key }
+    }
+
+    /// Pairs a new node and returns its identity and roster without connecting it.
+    pub async fn pair_only(&self) -> (Identity, Roster) {
         let identity = Identity::generate();
-        let code = self.primary.open_pairing_code(kind, CodeOptions::default()).unwrap();
+        let code = self.primary.open_pairing_code(CodeOptions::default()).unwrap();
         let r = pair(PairOptions { target: PairTarget::Link(code.link), identity: identity.clone(), timeout: None })
             .await
             .unwrap();
@@ -132,12 +141,12 @@ impl Net {
     }
 
     /// Pairs a new node and connects it as a member; waits for the others to learn the roster.
-    pub async fn add(&self, kind: MemberKind, others: &[&Member]) -> Member {
-        self.add_with(kind, others, |_| {}).await
+    pub async fn add(&self, others: &[&Member]) -> Member {
+        self.add_with(others, |_| {}).await
     }
 
-    pub async fn add_with(&self, kind: MemberKind, others: &[&Member], f: impl FnOnce(&mut MemberOptions)) -> Member {
-        let (identity, roster) = self.pair_only(kind).await;
+    pub async fn add_with(&self, others: &[&Member], f: impl FnOnce(&mut MemberOptions)) -> Member {
+        let (identity, roster) = self.pair_only().await;
         let version = roster.version();
         let mut opts = MemberOptions::new(identity, roster);
         opts.timing = self.timing;

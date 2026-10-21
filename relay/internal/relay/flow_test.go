@@ -207,7 +207,7 @@ func TestBackPressurePausesTheSender(t *testing.T) {
 			if n := sent.Load(); n != last {
 				last, still = n, time.Now()
 			}
-			most = max(most, h.s.queuedFor(p.ID, p.ID))
+			most = max(most, h.s.queuedFor(netKeys(t, p).ID, p.ID))
 			time.Sleep(5 * time.Millisecond)
 		}
 		if most > queue+int64(wireSize(size)) {
@@ -279,14 +279,14 @@ func TestNetworkForgottenAfterTTL(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	// Still remembered: presenting version 3, it is handed the 5 the relay holds.
 	c := h.dial()
-	c.send(h.registerMsg(c, p, p.ID.String(), roster(t, 3, p)))
+	c.send(h.registerMsg(c, p, netID(p), roster(t, 3, p)))
 	if m := c.json(); m["rosterVersion"] != float64(5) || m["roster"] == nil {
 		t.Fatalf("got %v", m)
 	}
 	c.ws.Close()
 	time.Sleep(700 * time.Millisecond)
 	c = h.dial()
-	c.send(h.registerMsg(c, p, p.ID.String(), roster(t, 3, p)))
+	c.send(h.registerMsg(c, p, netID(p), roster(t, 3, p)))
 	if m := c.json(); m["type"] != "registered" || m["rosterVersion"] != float64(3) || m["roster"] != nil {
 		t.Fatalf("got %v", m)
 	}
@@ -299,7 +299,7 @@ func TestNetworkKeptWhileAMemberIsConnected(t *testing.T) {
 	h.register(w, p, r5)
 	time.Sleep(600 * time.Millisecond)
 	c := h.dial()
-	c.send(h.registerMsg(c, p, p.ID.String(), roster(t, 3, p, w)))
+	c.send(h.registerMsg(c, p, netID(p), roster(t, 3, p, w)))
 	if m := c.json(); m["rosterVersion"] != float64(5) {
 		t.Fatalf("got %v", m)
 	}
@@ -358,7 +358,7 @@ func TestBackPressureOnAnswersToTheSender(t *testing.T) {
 	h := start(t, nil)
 	p, w := keys(t, 1), keys(t, 2)
 	pc := h.register(p, p, roster(t, 1, p, w), smallBuffers)
-	c := h.s.networkOf(p.ID).members[p.ID]
+	c := h.s.networkOf(netKeys(t, p).ID).members[p.ID]
 	go func() {
 		f := frame(typeData, w.ID, nil)
 		for range 10_000_000 {

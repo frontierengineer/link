@@ -25,6 +25,11 @@ type clientVectors struct {
 		NodeIDBytes                                         string `json:"nodeIdBytes"`
 		NodeID                                              string `json:"nodeId"`
 	}
+	NetworkKeys []struct {
+		NetworkSeed, Ed25519Seed, Ed25519Public, Ed25519PublicB64u string
+		NetworkIDBytes                                             string `json:"networkIdBytes"`
+		NetworkID                                                  string `json:"networkId"`
+	}
 	Roster struct {
 		Signing struct {
 			Roster      json.RawMessage
@@ -41,11 +46,11 @@ type clientVectors struct {
 			Roster json.RawMessage
 		}
 		Acceptance []struct {
-			Name          string
-			Roster        json.RawMessage
-			PinnedPrimary string
-			HeldVersion   int64
-			Accept        bool
+			Name             string
+			Roster           json.RawMessage
+			PinnedNetworkKey string
+			HeldVersion      int64
+			Accept           bool
 		}
 	}
 	Register []struct {
@@ -78,7 +83,7 @@ func readClientVectors(t *testing.T) *clientVectors {
 	if err := json.Unmarshal(raw, &v); err != nil {
 		t.Fatal(err)
 	}
-	if len(v.Keys) == 0 || len(v.Register) == 0 || len(v.Frames) == 0 || len(v.Roster.Invalid) == 0 {
+	if len(v.Keys) == 0 || len(v.NetworkKeys) == 0 || len(v.Register) == 0 || len(v.Frames) == 0 || len(v.Roster.Invalid) == 0 {
 		t.Fatal("client.json is missing sections")
 	}
 	return &v
@@ -125,6 +130,31 @@ func TestClientVectorsKeys(t *testing.T) {
 	}
 }
 
+func TestClientVectorsNetworkKeys(t *testing.T) {
+	for _, nv := range readClientVectors(t).NetworkKeys {
+		k, err := link.DeriveNetworkKeys(unhex(t, nv.NetworkSeed))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]string{
+			"ed25519Seed":       hex.EncodeToString(k.Ed25519Seed),
+			"ed25519Public":     hex.EncodeToString(k.Ed25519Public),
+			"ed25519PublicB64u": b64(k.Ed25519Public),
+			"networkIdBytes":    hex.EncodeToString(k.ID[:]),
+			"networkId":         k.ID.String(),
+		}
+		want := map[string]string{
+			"ed25519Seed": nv.Ed25519Seed, "ed25519Public": nv.Ed25519Public, "ed25519PublicB64u": nv.Ed25519PublicB64u,
+			"networkIdBytes": nv.NetworkIDBytes, "networkId": nv.NetworkID,
+		}
+		for name, w := range want {
+			if got[name] != w {
+				t.Errorf("network seed %s: %s = %s, client says %s", nv.NetworkSeed, name, got[name], w)
+			}
+		}
+	}
+}
+
 // jcsWithoutSignature canonicalises a roster with its signature removed, as the relay does
 // before verifying it.
 func jcsWithoutSignature(t *testing.T, raw []byte) []byte {
@@ -157,7 +187,7 @@ func TestClientVectorsRosters(t *testing.T) {
 		t.Fatalf("signing: the relay refuses the client's signed roster: %v", err)
 	}
 	sig, _ := link.B64u.DecodeString(s.Signature)
-	if !ed25519.Verify(r.Primary, input, sig) {
+	if !ed25519.Verify(r.NetworkKey, input, sig) {
 		t.Error("signing: the signature does not verify")
 	}
 
@@ -179,11 +209,11 @@ func TestClientVectorsRosters(t *testing.T) {
 		}
 	}
 	// The relay has no pinned key, but it applies the same rule to the key it holds: a
-	// roster replaces another only if valid, for the same primary, and newer.
+	// roster replaces another only if valid, for the same network key, and newer.
 	for _, c := range v.Acceptance {
 		r, err := link.ParseRoster(c.Roster)
-		pinned, _ := link.B64u.DecodeString(c.PinnedPrimary)
-		accept := err == nil && bytes.Equal(r.Primary, pinned) && r.Version > c.HeldVersion
+		pinned, _ := link.B64u.DecodeString(c.PinnedNetworkKey)
+		accept := err == nil && bytes.Equal(r.NetworkKey, pinned) && r.Version > c.HeldVersion
 		if accept != c.Accept {
 			t.Errorf("acceptance %q: relay says %v, client says %v", c.Name, accept, c.Accept)
 		}
@@ -245,8 +275,12 @@ func TestClientVectorsRouted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if primary.ID.String() != v.Noise.Network {
-		t.Fatalf("the noise network %s is not keys[0]", v.Noise.Network)
+	nk, err := link.DeriveNetworkKeys(unhex(t, v.NetworkKeys[0].NetworkSeed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nk.ID.String() != v.Noise.Network {
+		t.Fatalf("the noise network %s is not networkKeys[0]", v.Noise.Network)
 	}
 	ik, _ := link.DeriveKeys(unhex(t, v.Noise.Initiator.Seed))
 	rk, _ := link.DeriveKeys(unhex(t, v.Noise.Responder.Seed))
@@ -254,9 +288,16 @@ func TestClientVectorsRouted(t *testing.T) {
 		t.Fatal("the noise nodes are not derived from their seeds")
 	}
 	h := start(t, nil)
-	r := roster(t, 1, primary, ik, rk)
-	ini := h.register(ik, primary, r)
-	res := h.register(rk, primary, r)
+	r := rosterOf(t, 1, nk, primary, ik, rk)
+	register := func(k *link.Keys) *client {
+		c := h.dial()
+		c.send(h.registerMsg(c, k, nk.ID.String(), r))
+		if m := c.json(); m["type"] != "registered" {
+			t.Fatalf("expected registered, got %v", m)
+		}
+		return c
+	}
+	ini, res := register(ik), register(rk)
 
 	through := func(name string, from, to *client, sent, delivered []byte) {
 		t.Helper()
@@ -309,7 +350,7 @@ func TestRelayVectorsRouted(t *testing.T) {
 		ks = append(ks, dk)
 	}
 	h := start(t, nil)
-	// Seed 0 is the primary, seed 1 a worker; seed 2 is listed but never connects.
+	// Seed 0 is the primary, seed 1 a member; seed 2 is listed but never connects.
 	r := roster(t, 1, ks[0], ks[1], ks[2])
 	conns := map[link.ID]*client{ks[0].ID: h.register(ks[0], ks[0], r), ks[1].ID: h.register(ks[1], ks[0], r)}
 	if len(v.Frames) < 3 {

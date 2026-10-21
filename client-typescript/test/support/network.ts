@@ -10,7 +10,6 @@ import {
   type Identity,
   type InboundMessage,
   type MemberOptions,
-  type PairingKind,
   type Timing,
 } from '../../src/index.js';
 import { TestRelay, type RelayOptions } from './relay.js';
@@ -20,9 +19,11 @@ export const FAST: Partial<Timing> = { backoffInitialMs: 20, backoffMaxMs: 200, 
 export interface TestNetwork {
   relay: TestRelay;
   primary: Primary;
+  /** The network seed the primary was started with: the test's to keep, as an application's. */
+  networkSeed: Uint8Array;
   members: Member[];
   /** Pairs and connects a new member. */
-  add(kind: PairingKind, opts?: Partial<MemberOptions>): Promise<Member>;
+  add(opts?: Partial<MemberOptions>): Promise<Member>;
   close(): Promise<void>;
 }
 
@@ -31,9 +32,11 @@ export async function startNetwork(
 ): Promise<TestNetwork> {
   const relay = await TestRelay.start(opts.relay);
   const id = createIdentity();
+  const { roster, networkSeed } = createNetwork({ identity: id, relay: relay.url });
   const primary = await Primary.connect({
     identity: id,
-    roster: createNetwork({ identity: id, relay: relay.url }),
+    roster,
+    networkSeed,
     timing: FAST,
     ...opts.member,
   });
@@ -41,10 +44,11 @@ export async function startNetwork(
   const net: TestNetwork = {
     relay,
     primary,
+    networkSeed,
     members,
-    async add(kind, more = {}) {
+    async add(more = {}) {
       const identity: Identity = createIdentity();
-      const code = primary.openPairingCode(kind);
+      const code = primary.openPairingCode();
       const { roster } = await pair({ link: code.link, identity });
       const m = await Member.connect({ identity, roster, timing: FAST, ...opts.member, ...more });
       members.push(m);

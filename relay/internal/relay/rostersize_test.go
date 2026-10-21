@@ -15,18 +15,19 @@ import (
 func sizedRoster(t *testing.T, version, size int, primary *link.Keys, others ...*link.Keys) []byte {
 	t.Helper()
 	build := func(relay string) ([]byte, int) {
-		ms := []any{map[string]any{"id": primary.ID.String(), "ed25519": b64(primary.Ed25519Public), "x25519": b64(primary.X25519Public), "kind": link.KindPrimary}}
+		ms := []any{map[string]any{"id": primary.ID.String(), "ed25519": b64(primary.Ed25519Public), "x25519": b64(primary.X25519Public)}}
 		for _, o := range others {
-			ms = append(ms, map[string]any{"id": o.ID.String(), "ed25519": b64(o.Ed25519Public), "x25519": b64(o.X25519Public), "kind": link.KindWorker})
+			ms = append(ms, map[string]any{"id": o.ID.String(), "ed25519": b64(o.Ed25519Public), "x25519": b64(o.X25519Public)})
 		}
 		slices.SortFunc(ms, func(a, b any) int {
 			return compareStr(a.(map[string]any)["id"].(string), b.(map[string]any)["id"].(string))
 		})
+		nk := netKeys(t, primary)
 		r := map[string]any{
-			"network": primary.ID.String(), "version": version, "issuedAt": time.Now().UnixMilli(),
-			"relay": relay, "primary": map[string]any{"ed25519": b64(primary.Ed25519Public)}, "members": ms,
+			"network": nk.ID.String(), "version": version, "issuedAt": time.Now().UnixMilli(),
+			"relay": relay, "networkKey": b64(nk.Ed25519Public), "primary": primary.ID.String(), "members": ms,
 		}
-		if err := link.SignRoster(r, primary.Ed25519); err != nil {
+		if err := link.SignRoster(r, nk.Ed25519); err != nil {
 			t.Fatal(err)
 		}
 		canon, err := link.Canonicalize(r)
@@ -51,7 +52,7 @@ func TestRosterSizeLimitAtTheRelay(t *testing.T) {
 	p, w := keys(t, 1), keys(t, 2)
 
 	c := h.dial()
-	c.send(h.registerMsg(c, p, p.ID.String(), sizedRoster(t, 1, link.MaxRosterBytes+1, p, w)))
+	c.send(h.registerMsg(c, p, netID(p), sizedRoster(t, 1, link.MaxRosterBytes+1, p, w)))
 	c.expectClose(4008)
 
 	pc := h.register(p, p, sizedRoster(t, 1, link.MaxRosterBytes, p, w))
@@ -59,9 +60,9 @@ func TestRosterSizeLimitAtTheRelay(t *testing.T) {
 	if m := pc.json(); m["type"] != "error" || m["code"] != "bad_request" || !strings.Contains(m["message"].(string), "limit") {
 		t.Fatalf("oversize push answered %v", m)
 	}
-	// The relay still holds v1: a worker presenting it registers, and is not handed anything newer.
+	// The relay still holds v1: a member presenting it registers, and is not handed anything newer.
 	wc := h.dial()
-	wc.send(h.registerMsg(wc, w, p.ID.String(), sizedRoster(t, 1, link.MaxRosterBytes, p, w)))
+	wc.send(h.registerMsg(wc, w, netID(p), sizedRoster(t, 1, link.MaxRosterBytes, p, w)))
 	if m := wc.json(); m["type"] != "registered" || m["rosterVersion"] != float64(1) || m["roster"] != nil {
 		t.Fatalf("got %v", m)
 	}

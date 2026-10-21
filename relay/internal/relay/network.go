@@ -261,10 +261,11 @@ func (c *conn) admit(r *link.Roster, id link.ID, pub ed25519.PublicKey, now time
 	n.mu.Lock()
 	sh.mu.Unlock()
 	var evict []*conn
+	var demoted *conn
 	var newer json.RawMessage
 	switch {
 	case r.Version > n.roster.Version:
-		evict = n.adoptLocked(r, s.mono())
+		evict, demoted = n.adoptLocked(r, s.mono())
 	case r.Version < n.roster.Version:
 		newer = n.roster.Raw // none from a compact record: the member learns it from its peers
 	case n.roster.Raw == nil && sameMembers(r, n.roster):
@@ -276,7 +277,6 @@ func (c *conn) admit(r *link.Roster, id link.ID, pub ed25519.PublicKey, now time
 		old = n.members[id]
 		n.members[id] = c
 		c.network, c.id, c.state = n, id, stateRegistered
-		c.primary = id == n.id
 		// Queued before the connection is visible to senders, so it is the first thing sent.
 		c.sendJSON(registeredMsg{Type: "registered", Node: id.String(), RosterVersion: n.roster.Version, Roster: newer})
 		if c.ipPending {
@@ -288,6 +288,9 @@ func (c *conn) admit(r *link.Roster, id link.ID, pub ed25519.PublicKey, now time
 	n.mu.Unlock()
 	for _, e := range evict {
 		e.closeWith(closeNotMember, "not a member", false)
+	}
+	if demoted != nil {
+		demoted.demote()
 	}
 	if !member {
 		c.closeWith(closeNotMember, "not a member", false)
@@ -315,10 +318,14 @@ func sameMembers(a, b *link.Roster) bool {
 	return true
 }
 
-// adoptLocked installs a newer roster and returns the connections of nodes it dropped.
-func (n *network) adoptLocked(r *link.Roster, now int64) []*conn {
+// adoptLocked installs a newer roster and returns the connections of nodes it dropped, and
+// the former primary's connection when the roster names another member primary: that one
+// stays, demoted in place (section 4.2).
+func (n *network) adoptLocked(r *link.Roster, now int64) (evict []*conn, demoted *conn) {
+	if r.Primary != n.roster.Primary && r.Member(n.roster.Primary) != nil {
+		demoted = n.members[n.roster.Primary]
+	}
 	n.roster = r
-	var evict []*conn
 	for id, mc := range n.members {
 		if r.Member(id) == nil {
 			delete(n.members, id)
@@ -328,15 +335,28 @@ func (n *network) adoptLocked(r *link.Roster, now int64) []*conn {
 	if len(n.members) == 0 {
 		n.emptySince = now
 	}
-	return evict
+	return evict, demoted
 }
 
-// pushRoster is section 4.2: from the primary only, valid and newer.
-func (c *conn) pushRoster(data []byte) {
-	if !c.primary {
-		c.sendError("forbidden", "only the primary pushes rosters", "")
-		return
+// demote makes the former primary's connection an ordinary member connection when a newer roster names another primary
+// (section 4.2): it is not closed, and stays registered; the pairing channels it held end as
+// when a primary leaves, with pairEnd to both sides.
+func (c *conn) demote() {
+	s := c.s
+	s.chmu.Lock()
+	var owned []*channel
+	for _, ch := range c.pairs {
+		owned = append(owned, ch)
 	}
+	s.chmu.Unlock()
+	for _, ch := range owned {
+		s.endChannel(ch, true, true)
+	}
+}
+
+// pushRoster is section 4.2: from any member, valid and newer. The roster is signed with the
+// network key, so whoever delivers it, a holder of the network seed signed it.
+func (c *conn) pushRoster(data []byte) {
 	var m struct {
 		Roster json.RawMessage `json:"roster"`
 	}
@@ -363,11 +383,14 @@ func (c *conn) pushRoster(data []byte) {
 		}
 		return
 	}
-	evict := n.adoptLocked(r, c.s.mono())
+	evict, demoted := n.adoptLocked(r, c.s.mono())
 	c.s.syncIdleLocked(n, c.ip)
 	n.mu.Unlock()
 	for _, e := range evict {
 		e.closeWith(closeNotMember, "not a member", false)
+	}
+	if demoted != nil {
+		demoted.demote()
 	}
 }
 
@@ -497,12 +520,13 @@ func (c *conn) usageRequest(data []byte) {
 		c.sendError("bad_request", "usage needs a string id", "")
 		return
 	}
-	if !c.primary {
+	s, n, now := c.s, c.network, c.s.mono()
+	n.mu.Lock()
+	if n.roster.Primary != c.id {
+		n.mu.Unlock()
 		c.sendError("forbidden", "only the primary may ask for usage", *m.ID)
 		return
 	}
-	s, n, now := c.s, c.network, c.s.mono()
-	n.mu.Lock()
 	if !allow(&n.usageTAT, now, int64(usageEvery), usageBurst*int64(usageEvery)) {
 		n.mu.Unlock()
 		c.sendError("rate_limited", "usage asked too often", *m.ID)

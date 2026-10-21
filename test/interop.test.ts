@@ -152,31 +152,34 @@ function handshakesStarted(t: PeerTraffic['sent'], messages: number, size: numbe
 each('pairing by link and by code fields; the roster reaches everyone; messages every way', ({ p, a, b }) =>
   scene({}, async (s) => {
     const P = await s.primary(p);
-    const A = await s.add(a, 'worker', 'a');
+    const A = await s.add(a, 'a');
     assert.equal(A.roster.version, 2);
-    assert.equal(A.pinnedPrimary, P.roster.primary.ed25519);
-    await P.d.waitFor('paired', (e) => e.node === A.id && e.kind === 'worker' && e.version === 2);
+    assert.equal(A.pinnedNetworkKey, P.roster.networkKey);
+    await P.d.waitFor('paired', (e) => e.node === A.id && typeof e.codeId === 'string' && e.version === 2);
 
     // The second node pairs from the code's parts, typed as a person might: lower case, o for 0, l for 1.
-    const code = await P.d.openPairingCode('surface');
+    const code = await P.d.openPairingCode();
     assert.match(code.code, /^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/);
-    assert.equal(code.kind, 'surface');
+    assert.deepEqual(Object.keys(code).sort(), ['code', 'codeId', 'expiresAt', 'link']);
     assert.ok(code.expiresAt > Date.now() + 14 * 60_000, 'a code lives 15 minutes');
     assert.ok(code.link.startsWith('frontier://pair?v=1&'), code.link);
     const bd = await s.spawn(b, 'b');
     const typed = code.code.toLowerCase().replace(/0/g, 'o').replace(/1/g, 'l');
-    const r = await bd.pair({ network: P.id, code: typed, codeId: code.codeId, relay: s.relay.url });
+    const r = await bd.pair({ network: P.roster.network, code: typed, codeId: code.codeId, relay: s.relay.url });
     assert.equal(r.roster.version, 3);
-    assert.equal(r.pinnedPrimary, P.roster.primary.ed25519);
+    assert.equal(r.pinnedNetworkKey, P.roster.networkKey);
     const entry = r.roster.members.find((m) => m.id === bd.id);
-    assert.equal(entry?.kind, 'surface');
+    assert.ok(entry);
+    assert.deepEqual(Object.keys(entry).sort(), ['ed25519', 'id', 'x25519'], 'a member is its id and keys, nothing else');
     assert.equal(entry.ed25519, bd.ed25519, 'listed with its own key, in the roster\'s form');
-    const B: Node = { d: bd, impl: b, id: bd.id, seed: bd.seed, roster: r.roster, pinnedPrimary: r.pinnedPrimary };
+    assert.equal(r.roster.primary, P.id);
+    const B: Node = { d: bd, impl: b, id: bd.id, seed: bd.seed, roster: r.roster, pinnedNetworkKey: r.pinnedNetworkKey };
     await s.join(B);
-    await P.d.waitFor('paired', (e) => e.node === B.id && e.kind === 'surface' && e.version === 3);
+    // The primary names the code that admitted it, so an application can label it by code.
+    await P.d.waitFor('paired', (e) => e.node === B.id && e.codeId === code.codeId && e.version === 3);
     // The primary pushed v3 to the first member over their session.
     const pushed = await A.d.waitFor('roster', (e) => e.roster.version === 3);
-    assert.equal(pushed.roster.members.find((m) => m.id === B.id)?.kind, 'surface');
+    assert.ok(pushed.roster.members.some((m) => m.id === B.id));
 
     const all = [P, A, B];
     const since = all.map((n) => n.d.mark());
@@ -193,20 +196,20 @@ each('a wrong code fails and counts, five burn the code; expired and cancelled c
     const ad = await s.spawn(a, 'a');
     const bd = await s.spawn(b, 'b');
     const wrong = (c: { code: string; codeId: string }) => ({
-      network: P.id,
+      network: P.roster.network,
       code: c.code === 'AAAA-AAAA' ? 'BBBB-BBBB' : 'AAAA-AAAA',
       codeId: c.codeId,
       relay: s.relay.url,
     });
 
     // One failed confirmation keeps the code: the right code still pairs.
-    const code = await P.d.openPairingCode('worker');
+    const code = await P.d.openPairingCode();
     await refusedWith(ad.pair(wrong(code)), 'pairing');
     assert.equal((await P.d.waitFor('pairingFailed', (e) => e.codeId === code.codeId)).reason, 'wrong-code');
     assert.equal((await ad.pair({ link: code.link })).roster.version, 2);
 
     // Five burn it.
-    const burn = await P.d.openPairingCode('surface');
+    const burn = await P.d.openPairingCode();
     for (let i = 0; i < 5; i++) await refusedWith(bd.pair(wrong(burn)), 'pairing');
     await until(() => P.d.seen('pairingFailed').filter((e) => e.codeId === burn.codeId).length === 5, 'five failures at the primary');
     assert.deepEqual(P.d.seen('pairingFailed').filter((e) => e.codeId === burn.codeId).map((e) => e.reason), Array(5).fill('wrong-code'));
@@ -215,18 +218,18 @@ each('a wrong code fails and counts, five burn the code; expired and cancelled c
     assert.equal(P.d.seen('pairingFailed').filter((e) => e.codeId === burn.codeId)[5]!.reason, 'unknown-code');
 
     // An expired code, and a cancelled one.
-    const short = await P.d.openPairingCode('mcp', { lifetimeMs: 300 });
+    const short = await P.d.openPairingCode({ lifetimeMs: 300 });
     await sleep(600);
     await refusedWith(bd.pair({ link: short.link }), 'pairing');
     assert.equal((await P.d.waitFor('pairingFailed', (e) => e.codeId === short.codeId)).reason, 'unknown-code');
-    const cancelled = await P.d.openPairingCode('mcp');
+    const cancelled = await P.d.openPairingCode();
     await P.d.cancelPairingCode(cancelled.codeId);
     await refusedWith(bd.pair({ link: cancelled.link }), 'pairing');
     assert.equal((await P.d.waitFor('pairingFailed', (e) => e.codeId === cancelled.codeId)).reason, 'unknown-code');
 
     // None of that admitted anyone; a fresh code does.
     assert.equal((await P.d.state()).roster.version, 2);
-    const fresh = await P.d.openPairingCode('mcp');
+    const fresh = await P.d.openPairingCode();
     assert.equal((await bd.pair({ link: fresh.link })).roster.version, 3);
   }),
 );
@@ -234,8 +237,8 @@ each('a wrong code fails and counts, five burn the code; expired and cancelled c
 each('small messages both ways arrive whole and in order', ({ p, a, b }) =>
   scene({}, async (s) => {
     const P = await s.primary(p);
-    const A = await s.add(a, 'worker', 'a');
-    const B = await s.add(b, 'surface', 'b');
+    const A = await s.add(a, 'a');
+    const B = await s.add(b, 'b');
     const N = 20;
     const size = (i: number) => (i * 211) % 1500; // the first is empty
     const since = [P, A, B].map((n) => n.d.mark());
@@ -264,8 +267,8 @@ each('small messages both ways arrive whole and in order', ({ p, a, b }) =>
 each('several-MiB messages both ways at once, checked by sha256', ({ p, a, b }) =>
   scene({}, async (s) => {
     await s.primary(p);
-    const A = await s.add(a, 'worker', 'a');
-    const B = await s.add(b, 'surface', 'b');
+    const A = await s.add(a, 'a');
+    const B = await s.add(b, 'b');
     const big = 6 * 1024 * 1024 + 17;
     const back = 3 * 1024 * 1024;
     await Promise.all([A.d.send(B.id, { size: big, fill: 3 }, 120_000), B.d.send(A.id, { size: back, fill: 9 }, 120_000)]);
@@ -280,8 +283,8 @@ each('several-MiB messages both ways at once, checked by sha256', ({ p, a, b }) 
 each('flow control: a receiver that takes nothing holds its credit, the sender stalls, take releases it', ({ p, a, b }) =>
   scene({}, async (s) => {
     await s.primary(p);
-    const A = await s.add(a, 'worker', 'a');
-    const B = await s.add(b, 'surface', 'b', { autoTake: false });
+    const A = await s.add(a, 'a');
+    const B = await s.add(b, 'b', { autoTake: false });
     const size = 700 * 1024;
     const since = B.d.mark();
     // The first arrives while the receiver holds nothing, so its fragments are credited as they
@@ -321,8 +324,8 @@ each('rekeying on a timer: handshakes repeat while traffic continues both ways',
   // MIN messages (over 3 s) went and a's current session changed three times, within 30 s.
   scene({ timing: { ...FAST, rekeyIntervalMs: 250, retireGraceMs: 2000 } }, async (s) => {
     await s.primary(p);
-    const A = await s.add(a, 'worker', 'a');
-    const B = await s.add(b, 'surface', 'b');
+    const A = await s.add(a, 'a');
+    const B = await s.add(b, 'b');
     await A.d.resetTraffic();
     let since = B.d.mark();
     const MIN = 40;
@@ -374,8 +377,8 @@ each('rekeying after a message count: handshakes repeat while traffic continues'
   // plus however long the handshake takes; 8 messages and 20 s bound it however loaded the machine.
   scene({ timing: { ...FAST, rekeyMessages: 4 } }, async (s) => {
     await s.primary(p);
-    const A = await s.add(a, 'worker', 'a');
-    const B = await s.add(b, 'surface', 'b');
+    const A = await s.add(a, 'a');
+    const B = await s.add(b, 'b');
     await A.d.resetTraffic();
     const since = B.d.mark();
     let n = 0;
@@ -424,8 +427,8 @@ each('rekeying after a message count: handshakes repeat while traffic continues'
 each('reset: a peer restarted from its seed has no sessions; it answers reset and the sender handshakes again', ({ p, a, b }) =>
   scene({}, async (s) => {
     await s.primary(p);
-    const A = await s.add(a, 'worker', 'a');
-    const B = await s.add(b, 'surface', 'b');
+    const A = await s.add(a, 'a');
+    const B = await s.add(b, 'b');
     await A.d.send(B.id, { bytes: textB64('one') });
     assert.deepEqual(await texts(B.d, A.id, 1), ['one']);
     const first = await sessionsAgree(A, B);
@@ -456,8 +459,8 @@ each('reset: a peer restarted from its seed has no sessions; it answers reset an
 each('unreachable: a send to a member that is not connected fails at once; so does one to a peer that left', ({ p, a, b }) =>
   scene({}, async (s) => {
     await s.primary(p);
-    const A = await s.add(a, 'worker', 'a');
-    const X = await s.pairOnly(b, 'mcp', 'absent');
+    const A = await s.add(a, 'a');
+    const X = await s.pairOnly(b, 'absent');
     await rosterAtLeast(A.d, X.roster.version);
     const started = Date.now();
     await refusedWith(A.d.send(X.id, { bytes: textB64('x') }), 'unreachable');
@@ -472,7 +475,7 @@ each('unreachable: a send to a member that is not connected fails at once; so do
     assert.equal((await X.d.state()).state, 'closed');
 
     // A peer that leaves mid-session: the relay answers the next frame unreachable.
-    const B = await s.add(b, 'surface', 'b');
+    const B = await s.add(b, 'b');
     await A.d.send(B.id, { bytes: textB64('1') });
     assert.deepEqual(await texts(B.d, A.id, 1), ['1']);
     await B.d.close();
@@ -498,9 +501,9 @@ each('refused: a member whose roster lacks the sender refuses it, then catches u
   // relay knows no better. Only the member itself can catch up.
   scene({ env: { LINK_NETWORK_TTL: '500ms' } }, async (s) => {
     const P = await s.primary(p);
-    const A = await s.add(a, 'worker', 'a'); // v2
+    const A = await s.add(a, 'a'); // v2
     await A.d.shutdown();
-    const B = await s.add(b, 'surface', 'b'); // v3, which A never saw
+    const B = await s.add(b, 'b'); // v3, which A never saw
     const pRoster = (await P.d.state()).roster;
     await B.d.shutdown();
     await P.d.shutdown();
@@ -517,7 +520,7 @@ each('refused: a member whose roster lacks the sender refuses it, then catches u
     assert.equal((await A2.d.state()).roster.version, 2, 'the primary is away, so A cannot catch up yet');
 
     const P2 = await s.spawn(p, 'primary again', P.seed);
-    await P2.connect({ role: 'primary', roster: pRoster, timing: FAST });
+    await P2.connect({ role: 'primary', roster: pRoster, networkSeed: P.networkSeed, timing: FAST });
     assert.equal((await A2.d.syncRoster()).version, 3);
     const since = A2.d.mark();
     await B2.d.send(A.id, { bytes: textB64('now you do') });
@@ -525,11 +528,67 @@ each('refused: a member whose roster lacks the sender refuses it, then catches u
   }),
 );
 
+each('a new primary: a node started with the network seed claims it; the former primary is demoted in place, still connected', ({ p, a, b }) =>
+  scene({}, async (s) => {
+    const P = await s.primary(p);
+    const A = await s.add(a, 'a');
+    const B = await s.add(b, 'b');
+    const held = (await A.d.state()).roster;
+    const since = P.d.mark();
+
+    // The test, as the application, gives a's node the network seed and starts it with it.
+    await A.d.close();
+    await A.d.connect({ role: 'primary', roster: held, networkSeed: P.networkSeed, timing: FAST });
+    const claimed = (await A.d.state()).roster;
+    assert.equal((await A.d.state()).primary, true);
+    assert.equal(claimed.version, held.version + 1);
+    assert.equal(claimed.primary, A.id);
+    assert.deepEqual(claimed.members, held.members, 'nothing else changed: the former primary is an ordinary member');
+    assert.equal(claimed.network, P.roster.network);
+    assert.equal(claimed.networkKey, P.roster.networkKey);
+
+    // The former primary takes it and stops being the primary, on the same connection.
+    await P.d.waitFor('roster', (e) => e.roster.version === claimed.version, 10_000, since);
+    await B.d.waitFor('roster', (e) => e.roster.version === claimed.version);
+    const st = await P.d.state();
+    assert.equal(st.state, 'connected');
+    assert.equal(st.primary, false);
+    await refusedWith(P.d.openPairingCode(), 'invalid');
+    await refusedWith(P.d.revoke(B.id), 'invalid');
+    await refusedWith(P.d.usage(), 'invalid');
+
+    // Everyone still talks to everyone.
+    await A.d.send(P.id, { bytes: textB64('to the former primary') });
+    assert.deepEqual(await texts(P.d, A.id, 1, since), ['to the former primary']);
+    await P.d.send(A.id, { bytes: textB64('to the new primary') });
+    assert.deepEqual(await texts(A.d, P.id, 1), ['to the new primary']);
+    await B.d.send(P.id, { bytes: textB64('from b') });
+    assert.deepEqual(await texts(P.d, B.id, 1, since), ['from b']);
+
+    // The new primary does the primary's work: usage, pairing, revocation.
+    assert.ok((await A.d.usage()).network.connections >= 3);
+    const cd = await s.spawn(p, 'c');
+    const code = await A.d.openPairingCode();
+    const { roster: withC } = await cd.pair({ link: code.link });
+    assert.equal(withC.primary, A.id);
+    await cd.connect({ role: 'member', roster: withC, timing: FAST });
+    const r = await A.d.revoke(B.id);
+    assert.ok(lacks(r, B.id));
+    await B.d.waitFor('state', (e) => e.state === 'revoked', 10_000);
+    await P.d.waitFor('roster', (e) => e.roster.version === r.version, 10_000, since);
+
+    // Nobody was disconnected by the change: the former primary saw no close and no state change.
+    assert.deepEqual(P.d.seen('disconnect', since), []);
+    assert.deepEqual(P.d.seen('state', since), []);
+    assert.equal((await P.d.state()).state, 'connected');
+  }),
+);
+
 each('revocation: the revoked node ends revoked for good; the others stop accepting it', ({ p, a, b }) =>
   scene({}, async (s) => {
     const P = await s.primary(p);
-    const A = await s.add(a, 'worker', 'a');
-    const B = await s.add(b, 'surface', 'b');
+    const A = await s.add(a, 'a');
+    const B = await s.add(b, 'b');
     await B.d.send(A.id, { bytes: textB64('before') });
     assert.deepEqual(await texts(A.d, B.id, 1), ['before']);
     await A.d.send(B.id, { bytes: textB64('a session both ways') });
@@ -553,7 +612,7 @@ each('revocation: the revoked node ends revoked for good; the others stop accept
     // A copy of the revoked identity, of another implementation, with its old roster, is
     // turned away at registration.
     const again = await s.spawn(p, 'b copy', B.seed);
-    await again.start({ role: 'member', roster: B.roster, pinnedPrimary: B.pinnedPrimary, timing: FAST });
+    await again.start({ role: 'member', roster: B.roster, pinnedNetworkKey: B.pinnedNetworkKey, timing: FAST });
     await refusedWith(again.waitConnected(10_000), 'revoked');
   }),
 );
@@ -561,8 +620,8 @@ each('revocation: the revoked node ends revoked for good; the others stop accept
 each('resignation: the primary publishes a roster without the member, which the relay then closes', ({ p, a, b }) =>
   scene({}, async (s) => {
     const P = await s.primary(p);
-    const A = await s.add(a, 'worker', 'a');
-    const B = await s.add(b, 'surface', 'b');
+    const A = await s.add(a, 'a');
+    const B = await s.add(b, 'b');
     const since = B.d.mark();
     await B.d.resign();
     assert.equal((await B.d.state()).state, 'revoked');
@@ -579,9 +638,9 @@ each('a revocation spreads member to member while the primary is offline', ({ p,
   // a carries the revocation, b learns it, and x (of p's implementation) is revoked.
   scene({ env: { LINK_NETWORK_TTL: '300ms' } }, async (s) => {
     const P = await s.primary(p);
-    const W = await s.pairOnly(a, 'worker', 'a');
-    const T = await s.pairOnly(b, 'surface', 'b');
-    const X = await s.pairOnly(p, 'worker', 'x');
+    const W = await s.pairOnly(a, 'a');
+    const T = await s.pairOnly(b, 'b');
+    const X = await s.pairOnly(p, 'x');
     const before = (await P.d.state()).roster; // v4, as X and T hold it
     await s.join(W, { roster: before });
     const after = await P.d.revoke(X.id);
@@ -614,8 +673,8 @@ each('a revocation spreads member to member while the primary is offline', ({ p,
 each('replacement: a second copy of an identity, of another implementation, replaces the first (4005)', ({ p, a, b }) =>
   scene({}, async (s) => {
     await s.primary(p);
-    const A = await s.add(a, 'worker', 'a');
-    const B = await s.add(b, 'surface', 'b');
+    const A = await s.add(a, 'a');
+    const B = await s.add(b, 'b');
     const since = A.d.mark();
     const copy: Node = { ...A, d: await s.spawn(p, 'a copy', A.seed) };
     await s.join(copy);
@@ -641,9 +700,9 @@ each('usage: the primary reads the network totals and limits; asks beyond the bu
   };
   return scene({ env }, async (s) => {
     const P = await s.primary(p);
-    const A = await s.add(a, 'worker', 'a');
-    const B = await s.add(b, 'surface', 'b');
-    await s.pairOnly(a, 'mcp', 'never connected');
+    const A = await s.add(a, 'a');
+    const B = await s.add(b, 'b');
+    await s.pairOnly(a, 'never connected');
     const before = await P.d.usage();
     // Totals only: the relay keeps no per-member figures.
     assert.deepEqual(Object.keys(before), ['network']);
@@ -671,8 +730,8 @@ each('usage: the primary reads the network totals and limits; asks beyond the bu
 each('traffic: what the sender counts sent, the receiver counts received', ({ p, a, b }) =>
   scene({}, async (s) => {
     await s.primary(p);
-    const A = await s.add(a, 'worker', 'a');
-    const B = await s.add(b, 'surface', 'b');
+    const A = await s.add(a, 'a');
+    const B = await s.add(b, 'b');
     // A first exchange, so the counts below are of an established session only.
     await A.d.send(B.id, { bytes: textB64('hello') });
     await B.d.messages(1, { from: A.id });
@@ -730,9 +789,9 @@ for (const impl of available) {
       await refusedWith(bare.state(), 'invalid');
 
       const P = await s.primary(impl);
-      const M = await s.add(impl, 'worker', 'm');
+      const M = await s.add(impl, 'm');
       // Primary only, and member only.
-      await refusedWith(M.d.openPairingCode('worker'), 'invalid');
+      await refusedWith(M.d.openPairingCode(), 'invalid');
       await refusedWith(M.d.cancelPairingCode('AAAAAAAAAAA'), 'invalid');
       await refusedWith(M.d.revoke(P.id), 'invalid');
       await refusedWith(M.d.usage(), 'invalid');
@@ -740,8 +799,7 @@ for (const impl of available) {
       assert.equal((await P.d.syncRoster()).version, (await P.d.state()).roster.version);
       await refusedWith(P.d.revoke(P.id), 'invalid');
       await refusedWith(P.d.revoke(randomNodeId()), 'invalid');
-      await refusedWith(P.d.call('openPairingCode', { kind: 'primary' }), 'invalid');
-      await refusedWith(P.d.openPairingCode('worker', { code: 'ABC' }), 'invalid');
+      await refusedWith(P.d.openPairingCode({ code: 'ABC' }), 'invalid');
       // Arguments a node refuses.
       await refusedWith(M.d.take(1), 'invalid');
       await refusedWith(M.d.send(M.id, { bytes: textB64('me') }), 'invalid');
@@ -753,9 +811,9 @@ for (const impl of available) {
       await refusedWith(q.connect({ role: 'member', roster, timing: FAST }), 'invalid'); // not on it
       await refusedWith(q.connect({ role: 'primary', roster: M.roster, timing: FAST }), 'invalid');
       const copy = await s.spawn(impl, 'm copy', M.seed);
-      await refusedWith(copy.connect({ role: 'primary', roster: M.roster, timing: FAST }), 'invalid'); // not the primary
+      await refusedWith(copy.connect({ role: 'primary', roster: M.roster, timing: FAST }), 'invalid'); // no network seed
       await refusedWith(copy.connect({ role: 'member', roster: M.roster, creditWindow: 1000, timing: FAST }), 'invalid');
-      await refusedWith(copy.connect({ role: 'member', roster: M.roster, pinnedPrimary: M.d.ed25519, timing: FAST }), 'invalid');
+      await refusedWith(copy.connect({ role: 'member', roster: M.roster, pinnedNetworkKey: M.d.ed25519, timing: FAST }), 'invalid');
       await refusedWith(copy.state(), 'invalid');
       assert.equal((await M.d.state()).state, 'connected', 'none of that disturbed the member');
 
@@ -784,7 +842,7 @@ for (const p of available) {
       const P = await s.primary(p);
       const members = available.length > 1 ? available : [p, p];
       const nodes = [P];
-      for (const [i, impl] of members.entries()) nodes.push(await s.add(impl, i % 2 ? 'surface' : 'worker', `m${i}`));
+      for (const [i, impl] of members.entries()) nodes.push(await s.add(impl, `m${i}`));
       const since = nodes.map((n) => n.d.mark());
       await Promise.all(
         nodes.map(async (x, i) => {

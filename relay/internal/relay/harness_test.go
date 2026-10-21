@@ -62,15 +62,39 @@ func b64(b []byte) string { return link.B64u.EncodeToString(b) }
 
 func b64dec(s string) ([]byte, error) { return link.B64u.DecodeString(s) }
 
-// roster makes a roster signed by primary, listing it and the others as workers.
+// netKeys is the network key of the network whose first primary is k, in these tests: derived
+// from a network seed of its own, apart from k's seed (section 2).
+func netKeys(t testing.TB, k *link.Keys) *link.NetworkKeys {
+	nk, err := link.DeriveNetworkKeys(k.Ed25519Seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return nk
+}
+
+// netID is the id of the network whose first primary is k.
+func netID(k *link.Keys) string {
+	nk, _ := link.DeriveNetworkKeys(k.Ed25519Seed)
+	return nk.ID.String()
+}
+
+// roster makes a roster of the network primary created, signed by its network key, listing
+// primary, named primary, and the others.
 func roster(t testing.TB, version int, primary *link.Keys, others ...*link.Keys) []byte {
 	t.Helper()
-	member := func(k *link.Keys, kind string) map[string]any {
-		return map[string]any{"id": k.ID.String(), "ed25519": b64(k.Ed25519Public), "x25519": b64(k.X25519Public), "kind": kind}
+	return rosterOf(t, version, netKeys(t, primary), primary, others...)
+}
+
+// rosterOf makes a roster of network nk, signed by its network key, listing primary, named
+// primary, and the others: primary need not be the node that created it.
+func rosterOf(t testing.TB, version int, nk *link.NetworkKeys, primary *link.Keys, others ...*link.Keys) []byte {
+	t.Helper()
+	member := func(k *link.Keys) map[string]any {
+		return map[string]any{"id": k.ID.String(), "ed25519": b64(k.Ed25519Public), "x25519": b64(k.X25519Public)}
 	}
-	ms := []map[string]any{member(primary, link.KindPrimary)}
+	ms := []map[string]any{member(primary)}
 	for _, o := range others {
-		ms = append(ms, member(o, link.KindWorker))
+		ms = append(ms, member(o))
 	}
 	slices.SortFunc(ms, func(a, b map[string]any) int { return compareStr(a["id"].(string), b["id"].(string)) })
 	members := make([]any, len(ms))
@@ -78,11 +102,11 @@ func roster(t testing.TB, version int, primary *link.Keys, others ...*link.Keys)
 		members[i] = m
 	}
 	r := map[string]any{
-		"network": primary.ID.String(), "version": version, "issuedAt": time.Now().UnixMilli(),
-		"relay": "wss://relay.test/v1", "primary": map[string]any{"ed25519": b64(primary.Ed25519Public)},
-		"members": members,
+		"network": nk.ID.String(), "version": version, "issuedAt": time.Now().UnixMilli(),
+		"relay": "wss://relay.test/v1", "networkKey": b64(nk.Ed25519Public),
+		"primary": primary.ID.String(), "members": members,
 	}
-	if err := link.SignRoster(r, primary.Ed25519); err != nil {
+	if err := link.SignRoster(r, nk.Ed25519); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(r)
@@ -154,11 +178,12 @@ func (h *harness) registerMsg(c *client, k *link.Keys, network string, rosterJSO
 	}
 }
 
-// register connects k as a member of the network in rosterJSON and waits for registered.
+// register connects k as a member of the network in rosterJSON, the one first created by
+// network (netID), and waits for registered.
 func (h *harness) register(k *link.Keys, network *link.Keys, rosterJSON []byte, opts ...dialOpt) *client {
 	h.t.Helper()
 	c := h.dial(opts...)
-	c.send(h.registerMsg(c, k, network.ID.String(), rosterJSON))
+	c.send(h.registerMsg(c, k, netID(network), rosterJSON))
 	m := c.json()
 	if m["type"] != "registered" || m["node"] != k.ID.String() {
 		h.t.Fatalf("expected registered, got %v", m)

@@ -101,6 +101,25 @@ func DeriveKeys(seed []byte) (*Keys, error) {
 	}, nil
 }
 
+// NetworkKeys is a network's key derived from its network seed (section 2).
+type NetworkKeys struct {
+	Ed25519Seed   []byte
+	Ed25519       ed25519.PrivateKey
+	Ed25519Public ed25519.PublicKey
+	ID            ID // the network id
+}
+
+// DeriveNetworkKeys derives the network key and the network id from a 32-byte network seed.
+func DeriveNetworkKeys(seed []byte) (*NetworkKeys, error) {
+	edSeed, err := hkdf.Key(sha256.New, seed, nil, "frontier-link/1/network", 32)
+	if err != nil {
+		return nil, err
+	}
+	priv := ed25519.NewKeyFromSeed(edSeed)
+	pub := priv.Public().(ed25519.PublicKey)
+	return &NetworkKeys{Ed25519Seed: edSeed, Ed25519: priv, Ed25519Public: pub, ID: IDFromKey(pub)}, nil
+}
+
 func appendLenStr(b []byte, s string) []byte {
 	b = binary.BigEndian.AppendUint32(b, uint32(len(s)))
 	return append(b, s...)

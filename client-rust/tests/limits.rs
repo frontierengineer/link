@@ -30,12 +30,12 @@ fn drops(events: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<u16> {
 
 async fn timed_transfer(env: &[(&str, &str)], size: usize) -> (Duration, Vec<u16>, UsageReport) {
     let net = Net::start(env, fast()).await;
-    let worker = net.add(MemberKind::Worker, &[]).await;
-    let surface = net.add(MemberKind::Surface, &[&worker]).await;
-    let mut evs: Vec<_> = [net.primary.member(), &worker, &surface].iter().map(|m| events_from_now(m)).collect();
+    let alice = net.add(&[]).await;
+    let bob = net.add(&[&alice]).await;
+    let mut evs: Vec<_> = [net.primary.member(), &alice, &bob].iter().map(|m| events_from_now(m)).collect();
     let started = Instant::now();
-    worker.send(surface.id(), vec![1u8; size]).await.unwrap();
-    let got = recv_within(&surface, SECS(60)).await;
+    alice.send(bob.id(), vec![1u8; size]).await.unwrap();
+    let got = recv_within(&bob, SECS(60)).await;
     let took = started.elapsed();
     assert_eq!(got.bytes.len(), size);
     let usage = net.primary.usage().await.unwrap();
@@ -62,37 +62,37 @@ async fn shaping_slows_a_transfer_and_pings_never_drop_the_sender_held_back() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn liveness_members_answer_the_relays_pings_and_stay_connected() {
     let net = Net::start(&[("LINK_PING_INTERVAL", "100ms")], fast()).await;
-    let worker = net.add(MemberKind::Worker, &[]).await;
+    let alice = net.add(&[]).await;
     let mut e1 = events_from_now(&net.primary);
-    let mut e2 = events_from_now(&worker);
+    let mut e2 = events_from_now(&alice);
     sleep_ms(1500).await;
     assert!(drops(&mut e1).is_empty() && drops(&mut e2).is_empty());
-    worker.send(net.primary.id(), &b"still here"[..]).await.unwrap();
+    alice.send(net.primary.id(), &b"still here"[..]).await.unwrap();
     recv_within(&net.primary, SECS(5)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn credit_is_batched_bulk_small_messages_bring_back_few_credit_frames() {
     let net = Net::start(&[], fast()).await;
-    let worker = net.add(MemberKind::Worker, &[]).await;
-    let surface = net.add(MemberKind::Surface, &[&worker]).await;
-    worker.reset_traffic();
-    surface.reset_traffic();
+    let alice = net.add(&[]).await;
+    let bob = net.add(&[&alice]).await;
+    alice.reset_traffic();
+    bob.reset_traffic();
     let n = 2000;
     // The application takes messages as they arrive, as the TypeScript test's inbox does;
     // otherwise the sender's pace (64 KiB un-credited) would stop it, by design.
-    let reader = surface.clone();
+    let reader = bob.clone();
     let taken = tokio::spawn(async move {
         for _ in 0..n {
             recv_within(&reader, SECS(30)).await;
         }
     });
     for i in 0..n {
-        worker.send(surface.id(), vec![i as u8; 200]).await.unwrap();
+        alice.send(bob.id(), vec![i as u8; 200]).await.unwrap();
     }
     taken.await.unwrap();
     sleep_ms(400).await; // the last batch's timer
-    let back = surface.traffic().peers[worker.id()].sent;
+    let back = bob.traffic().peers[alice.id()].sent;
     assert_eq!(back.messages, 0);
     assert!((back.frames as f64) / (n as f64) < 0.1, "{} credit frames for {n} messages", back.frames);
 }
@@ -100,9 +100,9 @@ async fn credit_is_batched_bulk_small_messages_bring_back_few_credit_frames() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn flow_control_two_senders_into_one_slow_reader_neither_overruns_the_window() {
     let net = Net::start(&[], fast()).await;
-    let a = net.add(MemberKind::Worker, &[]).await;
-    let b = net.add(MemberKind::Worker, &[&a]).await;
-    let r = net.add(MemberKind::Surface, &[&a, &b]).await;
+    let a = net.add(&[]).await;
+    let b = net.add(&[&a]).await;
+    let r = net.add(&[&a, &b]).await;
     let chunk = 256 * 1024;
     let send_all = |m: Member, to: String| {
         tokio::spawn(async move {
@@ -139,20 +139,21 @@ fn fake_member() -> RosterMember {
     let mut x = [0u8; 32];
     ed.copy_from_slice(&Identity::generate().ed25519_public());
     x.copy_from_slice(&Identity::generate().x25519_public());
-    RosterMember::new(MemberKind::Mcp, ed, x)
+    RosterMember::new(ed, x)
 }
 
-fn roster_of(primary: &Identity, version: u64, relay: &str, members: Vec<RosterMember>) -> Roster {
+fn roster_of(key: &NetworkKey, version: u64, relay: &str, primary: &Identity, members: Vec<RosterMember>) -> Roster {
     sign_roster(
         &UnsignedRoster {
-            network: primary.id().into(),
+            network: key.id().into(),
             version,
             issued_at: unix_ms(),
             relay: relay.into(),
-            primary: primary.ed25519_public(),
+            network_key: key.ed25519_public(),
+            primary: primary.id().into(),
             members,
         },
-        primary,
+        key,
     )
     .unwrap()
 }
@@ -162,47 +163,45 @@ async fn a_roster_at_the_65000_byte_limit_travels_in_register_registered_and_a_s
     let relay = Relay::start(&[]);
     let p = Identity::generate();
     let w = Identity::generate();
-    let base =
-        vec![RosterMember::from_identity(&p, MemberKind::Primary), RosterMember::from_identity(&w, MemberKind::Worker)];
-    let small = roster_of(&p, 1, &relay.url, base.clone());
+    let key = NetworkKey::generate();
+    let base = vec![RosterMember::from_identity(&p), RosterMember::from_identity(&w)];
+    let small = roster_of(&key, 1, &relay.url, &p, base.clone());
     // Every entry has the same length: fill v2 so that exactly one more member fits.
     let entry = Json::object([
         ("id", Json::str("a".repeat(26))),
         ("ed25519", Json::str("A".repeat(43))),
         ("x25519", Json::str("A".repeat(43))),
-        ("kind", Json::str("mcp")),
     ])
     .to_json_string()
     .unwrap()
     .len()
         + 1;
-    let room = MAX_ROSTER_BYTES - roster_of(&p, 2, &relay.url, base.clone()).size();
+    let room = MAX_ROSTER_BYTES - roster_of(&key, 2, &relay.url, &p, base.clone()).size();
     let mut members = base.clone();
     members.extend((0..room / entry - 1).map(|_| fake_member()));
-    let big = roster_of(&p, 2, &relay.url, members);
+    let big = roster_of(&key, 2, &relay.url, &p, members);
     let left = MAX_ROSTER_BYTES - big.size();
     assert!(left >= entry && left < 2 * entry, "{left} bytes left");
 
-    let primary = Primary::connect(opts(p.clone(), big)).await.unwrap();
-    let worker = Member::new(opts(w.clone(), small)).unwrap();
-    worker.wait_connected(Some(SECS(10))).await.unwrap();
-    assert_eq!(worker.roster().version(), 2, "the relay handed the big roster back in registered");
-    worker.send(p.id(), &b"under the big roster"[..]).await.unwrap();
+    let mut po = opts(p.clone(), big);
+    po.network_seed = Some(*key.seed());
+    let primary = Primary::connect(po).await.unwrap();
+    let alice = Member::new(opts(w.clone(), small)).unwrap();
+    alice.wait_connected(Some(SECS(10))).await.unwrap();
+    assert_eq!(alice.roster().version(), 2, "the relay handed the big roster back in registered");
+    alice.send(p.id(), &b"under the big roster"[..]).await.unwrap();
     recv_within(&primary, SECS(5)).await;
 
-    // The last member that fits; v3 reaches the worker over their session, through the relay.
-    let code = primary.open_pairing_code(MemberKind::Surface, CodeOptions::default()).unwrap();
+    // The last member that fits; v3 reaches alice over their session, through the relay.
+    let code = primary.open_pairing_code(CodeOptions::default()).unwrap();
     let v3 = pair(PairOptions { target: PairTarget::Link(code.link), identity: Identity::generate(), timeout: None })
         .await
         .unwrap()
         .roster;
     assert!(v3.size() <= MAX_ROSTER_BYTES && v3.size() > MAX_ROSTER_BYTES - entry);
-    until(|| worker.roster().version() == 3, "the worker to receive v3 in a session").await;
+    until(|| alice.roster().version() == 3, "alice to receive v3 in a session").await;
     // Full: the primary refuses another, and nobody accepts a roster over the limit.
-    assert_eq!(
-        primary.open_pairing_code(MemberKind::Mcp, CodeOptions::default()).unwrap_err().code(),
-        ErrorCode::RosterFull
-    );
+    assert_eq!(primary.open_pairing_code(CodeOptions::default()).unwrap_err().code(), ErrorCode::RosterFull);
     let mut over = v3.json().clone();
     if let Json::Object(m) = &mut over {
         for (k, v) in m.iter_mut() {
@@ -218,7 +217,7 @@ async fn a_roster_at_the_65000_byte_limit_travels_in_register_registered_and_a_s
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn moved_4009_the_member_looks_the_network_up_again_and_reconnects_there() {
     let net = Net::start(&[], fast()).await;
-    let (identity, roster) = net.pair_only(MemberKind::Worker).await;
+    let (identity, roster) = net.pair_only().await;
     // The relay node the roster names closes every connection 4009.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let old = format!("ws://{}/v1", listener.local_addr().unwrap());
@@ -281,8 +280,10 @@ async fn reconnect_after_the_relay_restarts_and_sends_wait_for_it() {
     let relay = Relay::start(&[]);
     let port = relay.port;
     let p = Identity::generate();
-    let roster = create_network(&p, &relay.url, unix_ms()).unwrap();
-    let primary = Primary::connect(opts(p, roster)).await.unwrap();
+    let (roster, key) = create_network(&p, &relay.url, unix_ms()).unwrap();
+    let mut po = opts(p, roster);
+    po.network_seed = Some(*key.seed());
+    let primary = Primary::connect(po).await.unwrap();
     let mut events = events_from_now(&primary);
     drop(relay);
     until(|| primary.state() != MemberState::Connected, "the primary to notice").await;

@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use link_client::{
-    ErrorCode, Event, Identity, InboundMessage, Json, LinkError, Member, MemberKind, MemberOptions, MemberState,
-    Observed, PairOptions, PairTarget, Primary, Roster, Timing, TrafficReport, create_network, pair, unix_ms,
+    ErrorCode, Event, Identity, InboundMessage, Json, LinkError, Member, MemberOptions, MemberState, Observed,
+    PairOptions, PairTarget, Primary, Roster, Timing, TrafficReport, create_network, pair, unix_ms,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -90,11 +90,13 @@ impl Driver {
         self.lock().node.clone().ok_or_else(|| invalid("no node: send `connect` or `start` first"))
     }
 
-    fn primary(&self) -> Result<Primary, Failure> {
-        match self.node()? {
-            Node::Primary(p) => Ok(p),
-            Node::Member(_) => Err(invalid("only the primary can do this")),
+    /// The node, when it is the primary now (whichever way it started).
+    fn primary(&self) -> Result<Member, Failure> {
+        let m = self.node()?.member().clone();
+        if !m.is_primary() {
+            return Err(invalid("only the primary can do this"));
         }
+        Ok(m)
     }
 }
 
@@ -248,11 +250,11 @@ fn event_json(e: &Event) -> Json {
             "relayError",
             vec![("code", Json::str(code)), ("message", Json::str(message.clone().unwrap_or_default()))],
         ),
-        Event::Paired { member, roster } => event(
+        Event::Paired { member, code_id, roster } => event(
             "paired",
             vec![
                 ("node", Json::str(member.id())),
-                ("kind", Json::str(member.kind().as_str())),
+                ("codeId", Json::str(code_id)),
                 ("version", Json::int(roster.version())),
             ],
         ),
@@ -296,8 +298,13 @@ fn open(driver: &Arc<Driver>, args: &Json) -> Result<Node, Failure> {
     let roster =
         args.get("roster").filter(|r| r.as_object().is_some()).ok_or_else(|| invalid("roster must be an object"))?;
     let roster = Roster::from_json(roster.clone()).map_err(|_| invalid("the roster is not valid"))?;
+    let network_seed: Option<[u8; 32]> = match args.get("networkSeed") {
+        None => None,
+        Some(_) => Some(b64_arg(args, "networkSeed")?.try_into().map_err(|_| invalid("networkSeed must be 32 bytes"))?),
+    };
     let mut opts = MemberOptions::new(identity, roster);
-    opts.pinned_primary = opt_str(args, "pinnedPrimary")?.map(str::to_owned);
+    opts.pinned_network_key = opt_str(args, "pinnedNetworkKey")?.map(str::to_owned);
+    opts.network_seed = network_seed;
     opts.relay_url = opt_str(args, "relayUrl")?.map(str::to_owned);
     opts.credit_window = opt_int(args, "creditWindow")?;
     opts.timing = timing_of(args.get("timing"))?;
@@ -349,8 +356,9 @@ async fn command(driver: &Arc<Driver>, cmd: &str, args: &Json) -> Reply {
             Ok(reply)
         }
         "createNetwork" => {
-            let roster = create_network(&driver.identity()?, str_arg(args, "relay")?, unix_ms()).map_err(invalid)?;
-            Ok(obj(vec![("roster", roster.json().clone())]))
+            let (roster, key) =
+                create_network(&driver.identity()?, str_arg(args, "relay")?, unix_ms()).map_err(invalid)?;
+            Ok(obj(vec![("roster", roster.json().clone()), ("networkSeed", Json::str(b64(key.seed())))]))
         }
         "pair" => {
             let identity = driver.identity()?;
@@ -365,7 +373,7 @@ async fn command(driver: &Arc<Driver>, cmd: &str, args: &Json) -> Reply {
             };
             let timeout = opt_ms(args, "timeoutMs")?;
             let r = pair(PairOptions { target, identity, timeout }).await?;
-            Ok(obj(vec![("roster", r.roster.json().clone()), ("pinnedPrimary", Json::str(r.pinned_primary))]))
+            Ok(obj(vec![("roster", r.roster.json().clone()), ("pinnedNetworkKey", Json::str(r.pinned_network_key))]))
         }
         "connect" => {
             let timeout = opt_ms(args, "timeoutMs")?;
@@ -385,7 +393,11 @@ async fn command(driver: &Arc<Driver>, cmd: &str, args: &Json) -> Reply {
         "state" => {
             let node = driver.node()?;
             let m = node.member();
-            Ok(obj(vec![("state", Json::str(m.state().as_str())), ("roster", m.roster().json().clone())]))
+            Ok(obj(vec![
+                ("state", Json::str(m.state().as_str())),
+                ("roster", m.roster().json().clone()),
+                ("primary", Json::Bool(m.is_primary())),
+            ]))
         }
         "sessions" => {
             let node = driver.node()?;
@@ -467,17 +479,14 @@ async fn command(driver: &Arc<Driver>, cmd: &str, args: &Json) -> Reply {
         }
         "openPairingCode" => {
             let p = driver.primary()?;
-            let kind = MemberKind::parse(str_arg(args, "kind")?)
-                .ok_or_else(|| invalid("kind must be one of worker, surface, mcp"))?;
             let opts = link_client::CodeOptions {
                 lifetime: opt_ms(args, "lifetimeMs")?,
                 code: opt_str(args, "code")?.map(str::to_owned),
             };
-            let c = p.open_pairing_code(kind, opts)?;
+            let c = p.open_pairing_code(opts)?;
             Ok(obj(vec![
                 ("code", Json::str(c.code)),
                 ("codeId", Json::str(c.code_id)),
-                ("kind", Json::str(c.kind.as_str())),
                 ("link", Json::str(c.link)),
                 ("expiresAt", Json::int(c.expires_at)),
             ]))

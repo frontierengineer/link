@@ -33,8 +33,8 @@ export interface PairOptions {
 export interface PairResult {
   /** The roster that includes this node. Persist it with the identity. */
   roster: Roster;
-  /** The primary's Ed25519 key, pinned from the roster: `roster.primary.ed25519`. */
-  pinnedPrimary: string;
+  /** The network key, pinned from the roster: `roster.networkKey`. */
+  pinnedNetworkKey: string;
 }
 
 /** Pairs `identity` into the network the link names. */
@@ -138,5 +138,5 @@ function checkRoster(value: unknown, network: string, id: Identity): PairResult 
   if (!me || me.ed25519 !== b64u(id.ed25519.pub) || me.x25519 !== b64u(id.x25519.pub)) {
     throw new PairingError('the roster does not list this node with its keys');
   }
-  return { roster, pinnedPrimary: roster.primary.ed25519 };
+  return { roster, pinnedNetworkKey: roster.networkKey };
 }

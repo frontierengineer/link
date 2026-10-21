@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use crate::roster::{MemberKind, Roster, RosterMember};
+use crate::roster::{Roster, RosterMember};
 
 /// Every message larger than this is refused (section 7.3).
 pub const MAX_MESSAGE: usize = 64 * 1024 * 1024;
@@ -108,6 +108,8 @@ pub enum Event {
     /// Primary only: a newcomer completed pairing and is on the published roster.
     Paired {
         member: RosterMember,
+        /// The code it paired with.
+        code_id: String,
         roster: Roster,
     },
     /// Primary only: a pairing attempt ended without a new member. `message` says it in words.
@@ -142,6 +144,9 @@ pub enum PairingFailure {
     AlreadyMember,
     /// The roster has no room for the newcomer.
     RosterFull,
+    /// The primary stopped being the primary mid-pairing: a newer roster names another member
+    /// (section 3.1).
+    Demoted,
 }
 
 impl PairingFailure {
@@ -157,6 +162,7 @@ impl PairingFailure {
             PairingFailure::RelayLost => "relay-lost",
             PairingFailure::AlreadyMember => "already-member",
             PairingFailure::RosterFull => "roster-full",
+            PairingFailure::Demoted => "demoted",
         }
     }
 }
@@ -175,6 +181,9 @@ pub type Observer = std::sync::Arc<dyn Fn(&Observed) + Send + Sync>;
 /// Everything a member reports, in one ordered stream: its events, and each message as it
 /// arrives (the message stays for `recv`; observing it does not take it).
 #[derive(Clone, Debug)]
+// An `Event` is several hundred bytes and a message a few dozen; an observation stream holds at
+// most 1024 of them, so boxing the event would save little and cost an allocation per event.
+#[allow(clippy::large_enum_variant)]
 pub enum Observed {
     Event(Event),
     Message(InboundMessage),
@@ -287,7 +296,6 @@ pub struct PairingCode {
     pub code: String,
     /// b64u of the 8-byte code id.
     pub code_id: String,
-    pub kind: MemberKind,
     /// The `frontier://pair?...` link carrying network, code, code id and relay.
     pub link: String,
     /// Unix milliseconds.

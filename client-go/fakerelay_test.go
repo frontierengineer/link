@@ -179,7 +179,8 @@ func (s *fakeSock) control(data []byte) {
 		raw, _ := json.Marshal(msg["roster"])
 		ro, err := ValidateRoster(raw)
 		r.mu.Lock()
-		if err != nil || ro.Version <= r.roster.Version || s.node != ro.Network {
+		// From any member (section 4.2): the network key signed it.
+		if err != nil || ro.Version <= r.roster.Version || ro.Network != r.roster.Network {
 			r.mu.Unlock()
 			return
 		}
@@ -316,6 +317,8 @@ type testNet struct {
 	relay   *fakeRelay
 	clock   *fakeClock
 	ids     []*Identity // ids[0] is the primary
+	seed    []byte      // the network seed
+	key     *NetworkKey
 	roster  *Roster
 	members []*Member
 }
@@ -326,6 +329,13 @@ const testRelayURL = "wss://relay.test/v1"
 func newTestNet(t *testing.T, n int) *testNet {
 	t.Helper()
 	tn := &testNet{t: t, relay: newFakeRelay(t), clock: newFakeClock(time.UnixMilli(1790000000000))}
+	var err error
+	if tn.seed, err = NewNetworkSeed(); err != nil {
+		t.Fatal(err)
+	}
+	if tn.key, err = NetworkKeyFromSeed(tn.seed); err != nil {
+		t.Fatal(err)
+	}
 	for range n {
 		id, err := NewIdentity()
 		if err != nil {
@@ -342,21 +352,18 @@ func newTestNet(t *testing.T, n int) *testNet {
 	return tn
 }
 
-// sign makes a roster of version v listing ids (ids[0] must be the primary).
+// sign makes a roster of version v listing ids, the first of them the primary, signed by the
+// network key.
 func (tn *testNet) sign(v int64, ids ...*Identity) *Roster {
 	tn.t.Helper()
 	members := []RosterMember{}
-	for i, id := range ids {
-		kind := KindWorker
-		if i == 0 {
-			kind = KindPrimary
-		}
-		members = append(members, MemberFromIdentity(id, kind))
+	for _, id := range ids {
+		members = append(members, MemberFromIdentity(id))
 	}
 	r, err := SignRoster(UnsignedRoster{
-		Network: tn.ids[0].ID(), Version: v, IssuedAt: 1790000000000, Relay: testRelayURL,
-		Primary: RosterPrimary{Ed25519: b64u(tn.ids[0].edPub)}, Members: members,
-	}, tn.ids[0])
+		Network: tn.key.ID(), Version: v, IssuedAt: 1790000000000, Relay: testRelayURL,
+		NetworkKey: b64u(tn.key.edPub), Primary: ids[0].ID(), Members: members,
+	}, tn.key)
 	if err != nil {
 		tn.t.Fatal(err)
 	}
@@ -383,6 +390,7 @@ func (tn *testNet) start(i int, mutate ...func(*MemberOptions)) *Member {
 	var m *Member
 	var err error
 	if i == 0 {
+		o.NetworkSeed = tn.seed
 		var p *Primary
 		p, err = NewPrimary(o)
 		if p != nil {

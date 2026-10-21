@@ -31,7 +31,6 @@ type driver struct {
 	mu       sync.Mutex
 	identity *link.Identity
 	node     *link.Member
-	prim     *link.Primary
 	autoTake bool
 }
 
@@ -90,28 +89,28 @@ type command struct {
 	ID  json.RawMessage `json:"id"`
 	Cmd *string         `json:"cmd"`
 
-	Seed          *string         `json:"seed"`
-	Relay         string          `json:"relay"`
-	Link          string          `json:"link"`
-	Network       string          `json:"network"`
-	Code          string          `json:"code"`
-	CodeID        string          `json:"codeId"`
-	TimeoutMs     *int64          `json:"timeoutMs"`
-	Role          string          `json:"role"`
-	Roster        json.RawMessage `json:"roster"`
-	PinnedPrimary string          `json:"pinnedPrimary"`
-	RelayURL      string          `json:"relayUrl"`
-	CreditWindow  int64           `json:"creditWindow"`
-	Timing        *timing         `json:"timing"`
-	AutoTake      *bool           `json:"autoTake"`
-	Peer          string          `json:"peer"`
-	Bytes         *string         `json:"bytes"`
-	Size          *int64          `json:"size"`
-	Fill          *int64          `json:"fill"`
-	Count         *int            `json:"count"`
-	Kind          string          `json:"kind"`
-	LifetimeMs    int64           `json:"lifetimeMs"`
-	Node          string          `json:"node"`
+	Seed             *string         `json:"seed"`
+	Relay            string          `json:"relay"`
+	Link             string          `json:"link"`
+	Network          string          `json:"network"`
+	Code             string          `json:"code"`
+	CodeID           string          `json:"codeId"`
+	TimeoutMs        *int64          `json:"timeoutMs"`
+	Role             string          `json:"role"`
+	Roster           json.RawMessage `json:"roster"`
+	PinnedNetworkKey string          `json:"pinnedNetworkKey"`
+	NetworkSeed      *string         `json:"networkSeed"`
+	RelayURL         string          `json:"relayUrl"`
+	CreditWindow     int64           `json:"creditWindow"`
+	Timing           *timing         `json:"timing"`
+	AutoTake         *bool           `json:"autoTake"`
+	Peer             string          `json:"peer"`
+	Bytes            *string         `json:"bytes"`
+	Size             *int64          `json:"size"`
+	Fill             *int64          `json:"fill"`
+	Count            *int            `json:"count"`
+	LifetimeMs       int64           `json:"lifetimeMs"`
+	Node             string          `json:"node"`
 }
 
 type timing struct {
@@ -238,16 +237,16 @@ func (d *driver) member() (*link.Member, error) {
 	return d.node, nil
 }
 
-func (d *driver) primary() (*link.Member, *link.Primary, error) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if d.node == nil {
-		return nil, nil, invalid("no node: connect or start first")
+// primary is the node, when it is the primary now.
+func (d *driver) primary() (*link.Member, error) {
+	m, err := d.member()
+	if err != nil {
+		return nil, err
 	}
-	if d.prim == nil {
-		return d.node, nil, invalid("this node is not a primary")
+	if !m.IsPrimary() {
+		return m, invalid("this node is not the primary")
 	}
-	return d.node, d.prim, nil
+	return m, nil
 }
 
 func (d *driver) ident() (*link.Identity, error) {
@@ -338,11 +337,11 @@ func (d *driver) run(c command) (*link.Member, result, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		r, err := link.CreateNetwork(id, c.Relay, time.Now())
+		r, seed, err := link.CreateNetwork(id, c.Relay, time.Now(), nil)
 		if err != nil {
 			return nil, nil, invalid("%v", err)
 		}
-		return nil, result{"roster": rosterValue(r)}, nil
+		return nil, result{"roster": rosterValue(r), "networkSeed": base64.StdEncoding.EncodeToString(seed)}, nil
 
 	case "pair":
 		id, err := d.ident()
@@ -360,7 +359,7 @@ func (d *driver) run(c command) (*link.Member, result, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		return nil, result{"roster": rosterValue(res.Roster), "pinnedPrimary": res.PinnedPrimary}, nil
+		return nil, result{"roster": rosterValue(res.Roster), "pinnedNetworkKey": res.PinnedNetworkKey}, nil
 
 	case "connect", "start":
 		m, err := d.open(c)
@@ -393,7 +392,7 @@ func (d *driver) run(c command) (*link.Member, result, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		return m, result{"state": string(m.State()), "roster": rosterValue(m.Roster())}, nil
+		return m, result{"state": string(m.State()), "roster": rosterValue(m.Roster()), "primary": m.IsPrimary()}, nil
 
 	case "sessions":
 		m, err := d.member()
@@ -466,43 +465,43 @@ func (d *driver) run(c command) (*link.Member, result, error) {
 		return m, result{}, nil
 
 	case "openPairingCode":
-		m, p, err := d.primary()
+		m, err := d.primary()
 		if err != nil {
 			return m, nil, err
 		}
-		pc, err := p.OpenPairingCode(link.MemberKind(c.Kind), link.PairingCodeOptions{
+		pc, err := m.OpenPairingCode(link.PairingCodeOptions{
 			Lifetime: time.Duration(c.LifetimeMs) * time.Millisecond, Code: c.Code,
 		})
 		if err != nil {
 			return m, nil, err
 		}
-		return m, result{"code": pc.Code, "codeId": pc.CodeID, "kind": string(pc.Kind), "link": pc.Link, "expiresAt": pc.ExpiresAt.UnixMilli()}, nil
+		return m, result{"code": pc.Code, "codeId": pc.CodeID, "link": pc.Link, "expiresAt": pc.ExpiresAt.UnixMilli()}, nil
 
 	case "cancelPairingCode":
-		m, p, err := d.primary()
+		m, err := d.primary()
 		if err != nil {
 			return m, nil, err
 		}
-		p.CancelPairingCode(c.CodeID)
+		m.CancelPairingCode(c.CodeID)
 		return m, result{}, nil
 
 	case "revoke":
-		m, p, err := d.primary()
+		m, err := d.primary()
 		if err != nil {
 			return m, nil, err
 		}
-		r, err := p.Revoke(c.Node)
+		r, err := m.Revoke(c.Node)
 		if err != nil {
 			return m, nil, err
 		}
 		return m, result{"roster": rosterValue(r)}, nil
 
 	case "usage":
-		m, p, err := d.primary()
+		m, err := d.primary()
 		if err != nil {
 			return m, nil, err
 		}
-		u, err := p.Usage(context.Background())
+		u, err := m.Usage(context.Background())
 		if err != nil {
 			return m, nil, err
 		}
@@ -562,9 +561,15 @@ func (d *driver) open(c command) (*link.Member, error) {
 		return nil, invalid("roster: %v", err)
 	}
 	auto := c.AutoTake == nil || *c.AutoTake
+	var seed []byte
+	if c.NetworkSeed != nil {
+		if seed, err = base64.StdEncoding.DecodeString(*c.NetworkSeed); err != nil || len(seed) != 32 {
+			return nil, invalid("networkSeed must be 32 bytes of base64")
+		}
+	}
 	opts := link.MemberOptions{
-		Identity: id, Roster: roster, RelayURL: c.RelayURL, PinnedPrimary: c.PinnedPrimary,
-		CreditWindow: c.CreditWindow, Timing: c.Timing.toLink(), OnEvent: d.event,
+		Identity: id, Roster: roster, RelayURL: c.RelayURL, PinnedNetworkKey: c.PinnedNetworkKey,
+		NetworkSeed: seed, CreditWindow: c.CreditWindow, Timing: c.Timing.toLink(), OnEvent: d.event,
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -572,9 +577,9 @@ func (d *driver) open(c command) (*link.Member, error) {
 		return nil, invalid("this driver already runs a node; close it first")
 	}
 	var m *link.Member
-	var p *link.Primary
 	switch c.Role {
 	case "primary":
+		var p *link.Primary
 		if p, err = link.NewPrimary(opts); err == nil {
 			m = p.Member
 		}
@@ -586,7 +591,7 @@ func (d *driver) open(c command) (*link.Member, error) {
 	if err != nil {
 		return nil, err
 	}
-	d.node, d.prim, d.autoTake = m, p, auto
+	d.node, d.autoTake = m, auto
 	if auto {
 		m.OnMessage(func(msg link.InboundMessage) { d.write(event("message", messageBody(msg))) })
 	} else {
@@ -623,7 +628,7 @@ func (d *driver) event(e link.Event) {
 	case link.MovedEvent:
 		d.write(event("moved", map[string]any{"network": e.Network}))
 	case link.PairedEvent:
-		d.write(event("paired", map[string]any{"node": e.Member.ID, "kind": string(e.Member.Kind), "version": e.Roster.Version}))
+		d.write(event("paired", map[string]any{"node": e.Member.ID, "codeId": e.CodeID, "version": e.Roster.Version}))
 	case link.PairingFailedEvent:
 		d.write(event("pairingFailed", map[string]any{"codeId": e.CodeID, "reason": e.Code}))
 	case link.RelayErrorEvent:

@@ -1,14 +1,27 @@
 // A member of a network: one relay connection, sessions with the other
-// members, the roster it holds, and the application's message stream.
+// members, the roster it holds, and the application's message stream. Any
+// member may be the primary (section 3.1): while it holds the network seed and
+// its roster names it primary, it acts as one, on the same connection.
 
 import { DIAGNOSTICS, type CoreStats, type DiagnosticsHook, type DiagnosticsReport } from './diag-hook.js';
+import { b64u } from './bytes.js';
 import { ClosedError, InvalidError, ReplacedError, RevokedError, TimeoutError, UnreachableError, type LinkError } from './errors.js';
 import { Emitter } from './events.js';
 import { decodeFrame, encodeFrame, FRAME_HEADER, FrameType, type SessionMessage } from './frames.js';
-import { nodeIdFromBytes, nodeIdToBytes, type Identity } from './identity.js';
+import { networkKeyFromSeed, nodeIdFromBytes, nodeIdToBytes, type Identity, type NetworkKey } from './identity.js';
 import { integerMember, parseJson } from './json.js';
 import { RelayConnection, type RelayState } from './relay.js';
-import { acceptanceProblem, cloneRoster, findMember, isValidRoster, type Roster } from './roster.js';
+import { PrimaryRole, type PairingCode, type UsageReport } from './primary-role.js';
+import {
+  acceptanceProblem,
+  cloneRoster,
+  findMember,
+  isValidRoster,
+  primaryOf,
+  signNextRoster,
+  type Roster,
+  type RosterMember,
+} from './roster.js';
 import { Bucket, DEFAULT_CREDIT_WINDOW, DEFAULT_SESSION_TIMING, INITIAL_CREDIT, SessionManager, type SessionTiming } from './sessions.js';
 import { signResignation } from './signed.js';
 import { chooseSocket, type ControlMessage, type WebSocketConstructor, type WebSocketStreamConstructor } from './socket.js';
@@ -35,8 +48,15 @@ export interface MemberOptions {
   roster: Roster;
   /** Defaults to `roster.relay`. */
   relayUrl?: string;
-  /** The primary key pinned at pairing; defaults to `roster.primary.ed25519`. */
-  pinnedPrimary?: string;
+  /** The network key pinned at pairing; defaults to `roster.networkKey`. */
+  pinnedNetworkKey?: string;
+  /**
+   * The network seed, for the node its application wants to be the primary (section 3.1); it
+   * must derive `roster.networkKey`. Its custody is the application's: the member never stores,
+   * sends or deletes it. When the roster names another member primary, this node claims the
+   * primary once registered.
+   */
+  networkSeed?: Uint8Array;
   /** A WHATWG WebSocket constructor. When given, it is used as is. */
   WebSocket?: WebSocketConstructor;
   /** A WHATWG WebSocketStream constructor, for real back-pressure. Without either option, a
@@ -122,7 +142,15 @@ export type MemberEvents = {
   moved: { network: string };
   /** A non-fatal `error` control message from the relay. */
   relayError: { code: string; message?: string; id?: string };
+  /** A newcomer completed pairing and is on the published roster (the primary only). `codeId`
+   * is the code that admitted it: an application that labels its members does so by code. */
+  paired: { member: RosterMember; codeId: string; roster: Roster };
+  /** A pairing attempt ended without a new member (the primary only). */
+  pairingFailed: { codeId: string; reason: string };
 };
+
+/** Why a primary's pairing channels end when it stops being the primary. */
+export const DEMOTED_REASON = 'another member is the primary now';
 
 function mapState(s: RelayState): MemberState {
   return s === 'registered' ? 'connected' : s;
@@ -131,7 +159,13 @@ function mapState(s: RelayState): MemberState {
 export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   readonly identity: Identity;
   protected currentRoster: Roster;
-  protected readonly pinnedPrimary: string;
+  protected readonly pinnedNetworkKey: string;
+  /** The network key, when this node was given the network seed. */
+  private readonly netKey: NetworkKey | undefined;
+  /** Being the primary, while this node is (section 3.1). */
+  private prim: PrimaryRole | undefined;
+  /** Started with the seed while the roster names another primary: it claims at registration. */
+  private claimPending: boolean;
   protected readonly relay: RelayConnection;
   protected readonly sessions: SessionManager;
   protected readonly timing: Timing;
@@ -162,8 +196,15 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     if (!findMember(opts.roster, opts.identity.id)) throw new InvalidError('this identity is not on the roster');
     this.identity = opts.identity;
     this.currentRoster = cloneRoster(opts.roster);
-    this.pinnedPrimary = opts.pinnedPrimary ?? opts.roster.primary.ed25519;
-    if (this.pinnedPrimary !== opts.roster.primary.ed25519) throw new InvalidError('the roster is not signed by the pinned primary');
+    this.pinnedNetworkKey = opts.pinnedNetworkKey ?? opts.roster.networkKey;
+    if (this.pinnedNetworkKey !== opts.roster.networkKey) throw new InvalidError('the roster is not signed by the pinned network key');
+    if (opts.networkSeed !== undefined) {
+      if (!(opts.networkSeed instanceof Uint8Array) || opts.networkSeed.length !== 32) throw new InvalidError('networkSeed must be 32 bytes');
+      const key = networkKeyFromSeed(opts.networkSeed);
+      if (b64u(key.ed25519.pub) !== opts.roster.networkKey) throw new InvalidError("networkSeed does not derive the roster's networkKey");
+      this.netKey = key;
+    }
+    this.claimPending = this.netKey !== undefined && primaryOf(opts.roster).id !== opts.identity.id;
     this.timing = { ...DEFAULT_TIMING, ...opts.timing };
     this.now = opts.now ?? Date.now;
     this.mono = monotonic(opts.monotonicNow ?? (() => performance.now()));
@@ -214,6 +255,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     });
     this.relay.on('control', (msg) => this.onControl(msg));
     this.relay.on('binary', (b) => this.onBinary(b));
+    this.syncRole();
     // Started after construction completes, so subclass fields exist before the first event.
     queueMicrotask(() => this.relay.start());
   }
@@ -244,6 +286,42 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
 
   get relayUrl(): string {
     return this.relay.relayUrl;
+  }
+
+  /** Whether this node is the primary now: it holds the network seed and its roster names it. */
+  get isPrimary(): boolean {
+    return this.prim !== undefined;
+  }
+
+  // ── The primary's operations (section 3.1): InvalidError unless this node is the primary ──
+
+  /**
+   * Opens a code that admits one node for 15 minutes. The code is random unless `code` gives
+   * one (any spelling `normalizeCode` accepts): a chosen code is easier to say and easier to
+   * guess, and like every code it burns after five wrong confirmations.
+   */
+  openPairingCode(opts: { lifetimeMs?: number; code?: string } = {}): PairingCode {
+    return this.requirePrimary().openPairingCode(opts);
+  }
+
+  /** Withdraws an open code. */
+  cancelPairingCode(codeId: string): void {
+    this.prim?.cancelPairingCode(codeId);
+  }
+
+  /** Removes a member and publishes the roster. Returns the new roster. */
+  revoke(nodeId: string): Roster {
+    return this.requirePrimary().revoke(nodeId);
+  }
+
+  /**
+   * Asks the relay for this network's usage. The relay allows USAGE_BURST asks at once and then
+   * one per USAGE_INTERVAL_MS per network; beyond that it refuses, and this rejects with
+   * RateLimitedError. Ask rarely, and keep the answer.
+   */
+  usage(): Promise<UsageReport> {
+    if (!this.prim) return Promise.reject(new InvalidError('this node is not the primary'));
+    return this.prim.usage();
   }
 
   /**
@@ -388,7 +466,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
 
   /** Asks the primary for its newest roster. Resolves true when a newer one was accepted. */
   async syncRoster(): Promise<boolean> {
-    if (this.id === this.network) return false;
+    if (this.id === primaryOf(this.currentRoster).id) return false;
     await this.online();
     const before = this.currentRoster.version;
     const got = this.waitForRoster(this.timing.requestTimeoutMs);
@@ -401,7 +479,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     );
     const retry = Math.max(50, this.timing.requestTimeoutMs / 4);
     while (!answered) {
-      await this.sessions.sendControl(this.network, { type: 'roster-request' }).catch(() => undefined);
+      await this.sessions.sendControl(primaryOf(this.currentRoster).id, { type: 'roster-request' }).catch(() => undefined);
       await Promise.race([got.catch(() => undefined), new Promise((r) => setTimeout(r, retry))]);
     }
     await got;
@@ -413,7 +491,8 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
    * once the relay has closed this member (state `revoked`).
    */
   async resign(): Promise<void> {
-    if (this.id === this.network) throw new InvalidError('the primary cannot resign');
+    if (this.id === primaryOf(this.currentRoster).id) throw new InvalidError('the primary cannot resign');
+    if (this.netKey) throw new InvalidError('a node started with the network seed cannot resign');
     await this.online();
     const r = signResignation(this.identity, this.network, this.now());
     const done = new Promise<void>((resolve, reject) => {
@@ -437,7 +516,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     );
     const retry = Math.max(50, this.timing.requestTimeoutMs / 4);
     while (!finished && this.state === 'connected') {
-      await this.sessions.sendControl(this.network, { type: 'resign', json: JSON.stringify(r) }).catch(() => undefined);
+      await this.sessions.sendControl(primaryOf(this.currentRoster).id, { type: 'resign', json: JSON.stringify(r) }).catch(() => undefined);
       await Promise.race([settled, new Promise((t) => setTimeout(t, retry))]);
     }
     return done;
@@ -445,6 +524,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
 
   close(): void {
     if (this.relay.state === 'closed') return;
+    this.prim?.close();
     this.relay.close();
     this.sessions.close();
     this.cancelRosterOffers(true);
@@ -503,7 +583,9 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
               : new ClosedError('relay connection lost');
       this.sessions.dropAll(err);
     }
+    if (s === 'registered' && this.claimPending) this.claimPrimary();
     if (this.relay.terminal) {
+      this.prim?.close();
       this.sessions.close();
       this.cancelRosterOffers(true);
       for (const r of this.readers.splice(0)) r({ value: undefined, done: true });
@@ -513,10 +595,13 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     for (const w of this.stateWaiters.splice(0)) w();
   }
 
-  /** Hook for the primary. */
-  protected onConnectionState(_s: RelayState): void {}
+  /** Hook for subclasses. */
+  protected onConnectionState(s: RelayState): void {
+    this.prim?.onConnectionState(s);
+  }
 
   protected onControl(msg: ControlMessage): void {
+    if (this.prim?.onControl(msg)) return;
     if (msg.type === 'error') {
       const e: { code: string; message?: string; id?: string } = { code: String(msg.code) };
       if (typeof msg.message === 'string') e.message = msg.message;
@@ -542,8 +627,9 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     this.sessions.handleFrame(f, from);
   }
 
-  /** Hook for the primary. */
-  protected onPairFrame(_channel: Uint8Array, _body: Uint8Array): void {}
+  protected onPairFrame(channel: Uint8Array, body: Uint8Array): void {
+    this.prim?.onPairFrame(channel, body);
+  }
 
   private deliver(msg: InboundMessage, release: () => void): void {
     const t = this.peerTraffic(msg.from).received;
@@ -596,15 +682,63 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
         return;
       }
       case 'resign':
-        this.onResign(from, msg.json);
+        this.prim?.onResign(from, msg.json);
         return;
       default:
         return;
     }
   }
 
-  /** Hook for the primary. */
-  protected onResign(_from: string, _json: string): void {}
+  // ── The network seed (section 3.1) ──
+
+  private requirePrimary(): PrimaryRole {
+    if (!this.prim) throw new InvalidError('this node is not the primary');
+    return this.prim;
+  }
+
+  /**
+   * Settles what this node is after a roster change: the primary while it holds the network
+   * seed and its roster names it. Stopping being the primary closes nothing but its codes and
+   * pairing channels: the connection and every session stay.
+   */
+  private syncRole(): void {
+    const named = primaryOf(this.currentRoster).id;
+    const primary = this.netKey !== undefined && named === this.id;
+    if (primary && !this.prim) {
+      this.prim = new PrimaryRole({
+        id: this.id,
+        roster: () => this.currentRoster,
+        networkKey: () => this.netKey!,
+        relay: this.relay,
+        sessions: this.sessions,
+        timing: this.timing,
+        now: () => this.now(),
+        mono: () => this.mono(),
+        diag: () => this.diag,
+        adopt: (r) => this.adoptRoster(r),
+        online: () => this.online(),
+        isTerminal: () => this.isTerminal(),
+        emit: (event, value) => this.emitAny(event, value),
+      });
+    } else if (!primary && this.prim) {
+      const role = this.prim;
+      this.prim = undefined;
+      role.stop(DEMOTED_REASON);
+    }
+  }
+
+  /**
+   * Claims the primary (section 3.1), once, at the first registration of a node started with
+   * the network seed while its roster names another member primary: the next roster names this
+   * node primary, nothing else changed, and is published as any change.
+   */
+  private claimPrimary(): void {
+    this.claimPending = false;
+    const r = this.currentRoster;
+    if (!this.netKey || r.primary === this.id) return;
+    this.adoptRoster(signNextRoster(r, r.members, this.netKey, this.now(), this.id));
+    this.prim?.republish();
+  }
 
   /** Sends a peer this member's roster (it asked, or a handshake showed it behind) at once, or
    * once at the end of ROSTER_ANSWER_INTERVAL_MS after the last, however often meanwhile. */
@@ -641,7 +775,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
 
   /** Applies section 3 acceptance. Returns true when the roster was taken. */
   protected offerRoster(candidate: unknown): boolean {
-    if (acceptanceProblem(candidate, this.pinnedPrimary, this.currentRoster.version) !== null) return false;
+    if (acceptanceProblem(candidate, this.pinnedNetworkKey, this.currentRoster.version) !== null) return false;
     this.adoptRoster(candidate as Roster);
     return true;
   }
@@ -649,6 +783,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   protected adoptRoster(r: Roster): void {
     this.currentRoster = cloneRoster(r);
     this.sessions.rosterChanged();
+    this.syncRole();
     this.emitAny('roster', cloneRoster(r));
     if (!findMember(r, this.id)) this.relay.revoke();
   }
@@ -656,7 +791,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   /**
    * Rosters spread member to member (section 7.1). A peer holding a newer roster is asked for
    * it: any member answers with the newest it holds, and a roster is taken only if the pinned
-   * primary signed it, so the peer need not be trusted. A peer that is behind, and still on this
+   * network key signed it, so the peer need not be trusted. A peer that is behind, and still on this
    * member's roster, is handed this one. So a change, a revocation above all, reaches every
    * member that meets one which has it: no need for the primary to be online, nor for the relay
    * to remember.
@@ -674,8 +809,9 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   }
 
   private askPrimary(): void {
-    if (this.id === this.network) return;
-    this.sessions.sendControl(this.network, { type: 'roster-request' }).catch(() => undefined);
+    const primary = primaryOf(this.currentRoster).id;
+    if (this.id === primary) return;
+    this.sessions.sendControl(primary, { type: 'roster-request' }).catch(() => undefined);
   }
 
   private waitForRoster(timeoutMs: number): Promise<void> {

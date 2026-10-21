@@ -77,7 +77,7 @@ test('the exchange: P1..P6 between newcomer and primary', () => {
   const keys = b.onP5(p5);
   assert.deepEqual(keys.ed25519, me.ed25519.pub);
   assert.deepEqual(keys.x25519, me.x25519.pub);
-  const roster = createNetwork({ identity: primary, relay: 'wss://r/v1', now: 1 });
+  const { roster } = createNetwork({ identity: primary, relay: 'wss://r/v1', now: 1 });
   assert.deepEqual(a.onP6(b.p6(roster)), roster);
 
   // P5 is sealed with okm[0..32], counter 0.

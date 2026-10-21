@@ -200,7 +200,7 @@ test(`a received Noise message over ${MAX_NOISE_MESSAGE} bytes ends the session 
 
 test('a roster in `registered` that drops this node leaves it revoked, never connected', async () => {
   const c = cast();
-  const v3 = signRoster({ ...c.roster, version: 3, members: c.roster.members.filter((m) => m.id !== c.victim.id) }, c.primary);
+  const v3 = signRoster({ ...c.roster, version: 3, members: c.roster.members.filter((m) => m.id !== c.victim.id) }, c.net);
   const relay = new ScriptedRelay();
   relay.registered = (msg) => JSON.stringify({ type: 'registered', node: msg.node, rosterVersion: 3, roster: v3 });
   const m = new Member({ identity: c.victim, roster: c.roster, WebSocket: relay.WebSocket, timing: FAST });
@@ -239,7 +239,7 @@ const textOf = (r: Roster, edit: (t: string) => string) => edit(canonicalize(r))
 test('a roster with a repeated member name is refused, though JSON.parse would take it', async () => {
   const { c, m, attacker } = await memberUnderAttack();
   try {
-    const v3 = signRoster({ ...c.roster, version: 3 }, c.primary);
+    const v3 = signRoster({ ...c.roster, version: 3 }, c.net);
     // The review's document: a genuine signed roster behind a prefix that repeats its names.
     const dup = textOf(v3, (t) => `{"version":999,"members":[],${t.slice(1)}`);
     assert.equal(rosterProblem(JSON.parse(dup)), null, 'last-wins parsing finds it valid');
@@ -258,7 +258,7 @@ test('a roster with a repeated member name is refused, though JSON.parse would t
 test('version and issuedAt must be integer literals: 12.0 and 1.2e1 are refused', async () => {
   const { c, m, attacker } = await memberUnderAttack();
   try {
-    const v3 = signRoster({ ...c.roster, version: 3 }, c.primary);
+    const v3 = signRoster({ ...c.roster, version: 3 }, c.net);
     const cases = [
       textOf(v3, (t) => t.replace('"version":3', '"version":3.0')),
       textOf(v3, (t) => t.replace('"version":3', '"version":0.3e1')),
@@ -676,7 +676,7 @@ test('a primary refuses `pairing`s for code ids it never opened without an event
   const relay = new ScriptedRelay();
   // A clock the test moves, so no budget refills while the flood is read.
   let clock = 0;
-  const p = new Primary({ identity: c.primary, roster: c.roster, WebSocket: relay.WebSocket, timing: FAST, monotonicNow: () => clock });
+  const p = new Primary({ identity: c.primary, roster: c.roster, networkSeed: c.networkSeed, WebSocket: relay.WebSocket, timing: FAST, monotonicNow: () => clock });
   const events: { codeId: string; reason: string }[] = [];
   p.on('pairingFailed', (e) => events.push(e));
   try {
@@ -693,7 +693,7 @@ test('a primary refuses `pairing`s for code ids it never opened without an event
     // refusal on every channel is still answered (so neither those ids nor anyone else holding
     // the code id can use up an honest newcomer's answer), repeats on one channel once a second,
     // and the event once a second per code and reason.
-    const code = p.openPairingCode('worker');
+    const code = p.openPairingCode();
     p.cancelPairingCode(code.codeId);
     for (let i = 0; i < 2000; i++) pairing(b64u(randomBytes(8)));
     let before = pairEnds();
@@ -792,12 +792,12 @@ test('a relay cycling pairing and pairEnd on an open code sets up channels withi
   const c = cast();
   const relay = new ScriptedRelay();
   let clock = 0;
-  const p = new Primary({ identity: c.primary, roster: c.roster, WebSocket: relay.WebSocket, timing: FAST, monotonicNow: () => clock });
+  const p = new Primary({ identity: c.primary, roster: c.roster, networkSeed: c.networkSeed, WebSocket: relay.WebSocket, timing: FAST, monotonicNow: () => clock });
   const events: { codeId: string; reason: string }[] = [];
   p.on('pairingFailed', (e) => events.push(e));
   try {
     await p.waitConnected(2000);
-    const code = p.openPairingCode('worker');
+    const code = p.openPairingCode();
     const pairEnds = () => relay.socket.texts.filter((t) => t.type === 'pairEnd').length;
     // 100 cycles: a channel set up on the open code, then ended by the relay (refunding the slot).
     for (let i = 0; i < 100; i++) {
@@ -888,7 +888,7 @@ test('roster hints back off: doubling from 1 s to 5 min while they bring nothing
     clock += 1;
     provoke();
     const at = asked;
-    const v3 = signRoster({ ...c.roster, version: 3 }, c.primary);
+    const v3 = signRoster({ ...c.roster, version: 3 }, c.net);
     await attacker.sendControl(c.victim.id, { type: 'roster', json: canonicalize(v3) });
     await until(() => m.roster.version === 3, 'the newer roster');
     clock += 1000;
@@ -1115,11 +1115,11 @@ test('a member removed and admitted again within two minutes still refuses its i
     assert.ok(await offer(p, recorded));
     // Revoked a minute later, and admitted again a minute after that.
     pass(60_000);
-    current = signRoster({ ...p.roster, version: 3, members: p.roster.members.filter((x) => x.id !== p.attacker.id) }, p.primary);
+    current = signRoster({ ...p.roster, version: 3, members: p.roster.members.filter((x) => x.id !== p.attacker.id) }, p.net);
     p.victimMgr.rosterChanged();
     assert.equal(priv(p.victimMgr).peers.get(p.attacker.id).stamp, 0n);
     pass(60_000);
-    current = signRoster({ ...p.roster, version: 4 }, p.primary);
+    current = signRoster({ ...p.roster, version: 4 }, p.net);
     p.victimMgr.rosterChanged();
     assert.equal(priv(p.victimMgr).peers.get(p.attacker.id).stamp, BigInt(T + 5_000), 'restored');
     // The init from before the revocation, replayed: refused (a floor of re-admission - W would
@@ -1150,7 +1150,7 @@ test('a member 9 minutes slow is accepted right after the responder restarts', a
 test('a roster push that fails is tried again until it goes: an idle member learns of a revocation', async () => {
   const c = cast();
   const relay = new ScriptedRelay();
-  const p = new Primary({ identity: c.primary, roster: c.roster, WebSocket: relay.WebSocket, timing: FAST });
+  const p = new Primary({ identity: c.primary, roster: c.roster, networkSeed: c.networkSeed, WebSocket: relay.WebSocket, timing: FAST });
   try {
     await p.waitConnected(2000);
     // The attacker, here an honest member that sends nothing at all, is offline for the push.
@@ -1165,7 +1165,7 @@ test('a roster push that fails is tried again until it goes: an idle member lear
     const got = JSON.parse(rosters()[0]!.json) as Roster;
     assert.equal(got.version, 3);
     assert.ok(!got.members.some((x) => x.id === c.victim.id));
-    assert.equal(priv(p).pushRetries.size, 0);
+    assert.equal(priv(priv(p).prim).pushRetries.size, 0);
   } finally {
     p.close();
   }
@@ -1174,7 +1174,7 @@ test('a roster push that fails is tried again until it goes: an idle member lear
 test('push retries back off, and stop once the member leaves the roster', async () => {
   const c = cast();
   const relay = new ScriptedRelay();
-  const p = new Primary({ identity: c.primary, roster: c.roster, WebSocket: relay.WebSocket, timing: FAST });
+  const p = new Primary({ identity: c.primary, roster: c.roster, networkSeed: c.networkSeed, WebSocket: relay.WebSocket, timing: FAST });
   try {
     await p.waitConnected(2000);
     relay.attach(c.attacker, () => c.roster);
@@ -1187,10 +1187,10 @@ test('push retries back off, and stop once the member leaves the roster', async 
     // Tries at 0, 1 and 3 seconds (1 s, doubling): three in 3.5 s, not one a second's worth more.
     await tick(3_500);
     assert.equal(inits(), 3);
-    assert.equal(priv(p).pushRetries.size, 1);
+    assert.equal(priv(priv(p).prim).pushRetries.size, 1);
     // The member leaves the roster: nothing more is tried for it.
     p.revoke(c.attacker.id);
-    assert.equal(priv(p).pushRetries.size, 0);
+    assert.equal(priv(priv(p).prim).pushRetries.size, 0);
     await tick(4_500);
     assert.equal(inits(), 3);
   } finally {
@@ -1210,10 +1210,10 @@ test('an init recorded but never delivered before a removal is refused once the 
     pass(10_000);
     const held = initStamped(p, p.attacker, BigInt(clock.wall));
     // Removed, and admitted again eleven minutes after that init was made.
-    current = signRoster({ ...p.roster, version: 3, members: p.roster.members.filter((x) => x.id !== p.attacker.id) }, p.primary);
+    current = signRoster({ ...p.roster, version: 3, members: p.roster.members.filter((x) => x.id !== p.attacker.id) }, p.net);
     p.victimMgr.rosterChanged();
     pass(11 * 60_000);
-    current = signRoster({ ...p.roster, version: 4 }, p.primary);
+    current = signRoster({ ...p.roster, version: 4 }, p.net);
     p.victimMgr.rosterChanged();
     // Its stamp is above the retained one, but not after re-admission - W: refused.
     pass(1_000);

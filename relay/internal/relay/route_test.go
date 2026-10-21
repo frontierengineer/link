@@ -121,11 +121,6 @@ func TestRosterPushAndRevocation(t *testing.T) {
 	r1 := roster(t, 1, p, w1, w2)
 	pc, c1, c2 := h.register(p, p, r1), h.register(w1, p, r1), h.register(w2, p, r1)
 
-	// Only the primary pushes.
-	c1.send(map[string]any{"type": "roster", "roster": json.RawMessage(roster(t, 9, p, w1))})
-	if m := c1.json(); m["code"] != "forbidden" {
-		t.Fatalf("got %v", m)
-	}
 	// An invalid roster is refused.
 	var bad map[string]any
 	json.Unmarshal(roster(t, 2, p, w1), &bad)
@@ -154,13 +149,13 @@ func TestRosterPushAndRevocation(t *testing.T) {
 	// w2 cannot come back: whichever roster it presents, the relay's version 2 does not list it.
 	for _, rr := range [][]byte{r1, roster(t, 2, p, w1)} {
 		c := h.dial()
-		c.send(h.registerMsg(c, w2, p.ID.String(), rr))
+		c.send(h.registerMsg(c, w2, netID(p), rr))
 		c.expectClose(4008)
 	}
 	// A newer roster presented at registration is adopted too, and has the same effect.
 	r3 := roster(t, 3, p)
 	c := h.dial()
-	c.send(h.registerMsg(c, p, p.ID.String(), r3))
+	c.send(h.registerMsg(c, p, netID(p), r3))
 	if m := c.json(); m["rosterVersion"] != float64(3) {
 		t.Fatalf("got %v", m)
 	}
@@ -175,7 +170,7 @@ func TestPairing(t *testing.T) {
 	code := b64([]byte{1, 2, 3, 4, 5, 6, 7, 8})
 
 	n := h.dial()
-	n.send(map[string]any{"type": "pair", "network": p.ID.String(), "code": code})
+	n.send(map[string]any{"type": "pair", "network": netID(p), "code": code})
 	pm := pc.json()
 	nm := n.json()
 	if pm["type"] != "pairing" || pm["code"] != code || nm["type"] != "pairing" || nm["channel"] != pm["channel"] {
@@ -223,7 +218,7 @@ func TestPairing(t *testing.T) {
 
 	// The newcomer ending it: the primary hears pairEnd.
 	n2 := h.dial()
-	n2.send(map[string]any{"type": "pair", "network": p.ID.String(), "code": code})
+	n2.send(map[string]any{"type": "pair", "network": netID(p), "code": code})
 	ch2 := pc.json()["channel"]
 	n2.json()
 	n2.send(map[string]any{"type": "pairEnd", "channel": ch2})
@@ -234,7 +229,7 @@ func TestPairing(t *testing.T) {
 
 	// The newcomer disconnecting: the primary hears pairEnd.
 	n3 := h.dial()
-	n3.send(map[string]any{"type": "pair", "network": p.ID.String(), "code": code})
+	n3.send(map[string]any{"type": "pair", "network": netID(p), "code": code})
 	ch3 := pc.json()["channel"]
 	n3.json()
 	n3.ws.Close()
@@ -244,7 +239,7 @@ func TestPairing(t *testing.T) {
 
 	// Anything but pair frames on its channel closes a newcomer 4000.
 	n4 := h.dial()
-	n4.send(map[string]any{"type": "pair", "network": p.ID.String(), "code": code})
+	n4.send(map[string]any{"type": "pair", "network": netID(p), "code": code})
 	pc.json()
 	n4.json()
 	n4.sendBinary(frame(typeData, p.ID, []byte("x")))
@@ -259,7 +254,7 @@ func TestPairingTimeout(t *testing.T) {
 	p := keys(t, 1)
 	pc := h.register(p, p, roster(t, 1, p))
 	n := h.dial()
-	n.send(map[string]any{"type": "pair", "network": p.ID.String(), "code": b64(make([]byte, 8))})
+	n.send(map[string]any{"type": "pair", "network": netID(p), "code": b64(make([]byte, 8))})
 	ch := pc.json()["channel"]
 	n.json()
 	began := time.Now()
@@ -281,23 +276,23 @@ func TestPairingUnreachableAndLimited(t *testing.T) {
 	code := b64(make([]byte, 8))
 	// No primary connected.
 	n := h.dial()
-	n.send(map[string]any{"type": "pair", "network": p.ID.String(), "code": code})
+	n.send(map[string]any{"type": "pair", "network": netID(p), "code": code})
 	if m := n.json(); m["type"] != "error" || m["code"] != "unreachable" {
 		t.Fatalf("got %v", m)
 	}
 	n.expectClose(1000)
 	// A malformed pair.
 	n = h.dial()
-	n.send(map[string]any{"type": "pair", "network": p.ID.String(), "code": "short"})
+	n.send(map[string]any{"type": "pair", "network": netID(p), "code": "short"})
 	n.expectClose(4000)
 	// The third attempt from this address within the minute.
 	n = h.dial()
-	n.send(map[string]any{"type": "pair", "network": p.ID.String(), "code": code})
+	n.send(map[string]any{"type": "pair", "network": netID(p), "code": code})
 	if m := n.json(); m["code"] != "unreachable" {
 		t.Fatalf("got %v", m)
 	}
 	n = h.dial()
-	n.send(map[string]any{"type": "pair", "network": p.ID.String(), "code": code})
+	n.send(map[string]any{"type": "pair", "network": netID(p), "code": code})
 	if m := n.json(); m["code"] != "rate_limited" {
 		t.Fatalf("got %v", m)
 	}
@@ -309,7 +304,7 @@ func TestPrimaryLeavingEndsItsChannels(t *testing.T) {
 	p := keys(t, 1)
 	pc := h.register(p, p, roster(t, 1, p))
 	n := h.dial()
-	n.send(map[string]any{"type": "pair", "network": p.ID.String(), "code": b64(make([]byte, 8))})
+	n.send(map[string]any{"type": "pair", "network": netID(p), "code": b64(make([]byte, 8))})
 	ch := pc.json()["channel"]
 	n.json()
 	pc.ws.Close()

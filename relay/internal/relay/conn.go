@@ -91,9 +91,7 @@ type conn struct {
 	id        link.ID
 	channel   *channel // a newcomer's pairing channel
 
-	// Fixed at registration, under network.mu.
-	primary bool
-	pairs   map[link.ID]*channel // a primary's pairing channels, under Server.chmu
+	pairs map[link.ID]*channel // a primary's pairing channels, under Server.chmu
 
 	paused       atomic.Bool   // reading is held back by shaping or back-pressure
 	awaitingPong atomic.Bool   // a ping went out and no pong has come back

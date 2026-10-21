@@ -51,7 +51,7 @@ enum Out {
 pub(crate) const CLOSE_GRACE: Duration = Duration::from_secs(5);
 
 /// The most a connection may hold queued and not yet written. The largest honest burst is a
-/// primary publishing a full roster (65000 bytes) to every member (about 400): some 26 MB. Past
+/// primary publishing a full roster (65000 bytes) to every member (about 440): some 29 MB. Past
 /// the bound the queue refuses, and the connection is dropped and redialled rather than grown or
 /// waited on: a peer or relay that stops draining cannot make this node hold more.
 pub(crate) const MAX_OUTBOUND_BYTES: usize = 64 * 1024 * 1024;

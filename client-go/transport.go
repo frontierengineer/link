@@ -162,8 +162,8 @@ func (c *channel) signal() {
 
 // send queues a message; false when the channel is closing.
 // maxChannelBytes bounds what one connection may have queued and not yet written: 64 MiB,
-// well above a primary's largest honest burst (a full roster to about 400 members, some
-// 26 MiB). Message
+// well above a primary's largest honest burst (a full roster to about 440 members, some
+// 29 MB). Message
 // data never gets near it (fragments wait while 64 KiB is queued); it is a memory backstop for
 // control, which the per-peer budgets keep small. Past it the connection is given up and
 // redialled: the queue never blocks and never grows beyond it. A variable for tests.

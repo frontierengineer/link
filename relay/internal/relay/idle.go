@@ -9,7 +9,7 @@ import (
 )
 
 // idleRosters bounds what the relay keeps for networks nobody is connected to
-// (LINK_IDLE_ROSTERS_BYTES). The relay's roster is a cache of what the primary signed: the
+// (LINK_IDLE_ROSTERS_BYTES). The relay's roster is a cache of what the network key signed: the
 // next member to register brings it back (section 4.2). While kept, it closes revoked members
 // at registration and hands newer rosters to members that were offline.
 //
@@ -63,10 +63,11 @@ func rosterCost(r *link.Roster) int64 {
 	return 64 + int64(len(r.Raw)) + 88*int64(len(r.Members))
 }
 
-// compactRoster keeps of r what judges membership: its network, version and member ids. A
-// member's id is derived from its key, so the id alone admits only the holder of that key.
+// compactRoster keeps of r what judges membership: its network, version and member ids, and
+// which of them is the primary. A member's id is derived from its key, so the id alone admits
+// only the holder of that key.
 func compactRoster(r *link.Roster) *link.Roster {
-	c := &link.Roster{Network: r.Network, Version: r.Version, Members: make([]link.Member, len(r.Members))}
+	c := &link.Roster{Network: r.Network, Version: r.Version, Primary: r.Primary, Members: make([]link.Member, len(r.Members))}
 	for i, m := range r.Members {
 		c.Members[i] = link.Member{ID: m.ID}
 	}

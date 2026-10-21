@@ -37,19 +37,19 @@ async fn a_primary_pairs_a_worker_and_a_surface_and_sessions_run_every_way() {
     let net = Net::start(&[], fast()).await;
     let primary = &net.primary;
     let mut events = primary.events();
-    let worker = net.add(MemberKind::Worker, &[]).await;
-    assert_eq!(worker.roster().version(), 2);
-    assert_eq!(worker.state(), MemberState::Connected);
+    let alice = net.add(&[]).await;
+    assert_eq!(alice.roster().version(), 2);
+    assert_eq!(alice.state(), MemberState::Connected);
 
     // The second node pairs from the code's parts, typed as a person might: lower case, O for
     // 0 and l for 1.
     let sid = Identity::generate();
-    let code = primary.open_pairing_code(MemberKind::Surface, CodeOptions::default()).unwrap();
+    let code = primary.open_pairing_code(CodeOptions::default()).unwrap();
     assert!(code.code.len() == 9 && code.code.as_bytes()[4] == b'-');
     let typed = code.code.to_lowercase().replace('0', "o").replace('1', "l");
     let r = pair(PairOptions {
         target: PairTarget::Parts {
-            network: primary.id().into(),
+            network: primary.network(),
             code: typed,
             code_id: code.code_id,
             relay: net.relay.url.clone(),
@@ -60,36 +60,37 @@ async fn a_primary_pairs_a_worker_and_a_surface_and_sessions_run_every_way() {
     .await
     .unwrap();
     assert_eq!(r.roster.version(), 3);
-    assert_eq!(r.pinned_primary, primary.roster().primary_ed25519());
-    let surface = Member::connect(opts(sid, r.roster)).await.unwrap();
+    assert_eq!(r.pinned_network_key, primary.roster().network_key_b64u());
+    let bob = Member::connect(opts(sid, r.roster)).await.unwrap();
     let mut paired = Vec::new();
     while let Ok(e) = events.try_recv() {
-        if let Event::Paired { member, .. } = e {
-            paired.push(member.kind());
+        if let Event::Paired { member, code_id, .. } = e {
+            paired.push((member.id().to_owned(), code_id));
         }
     }
-    assert_eq!(paired, [MemberKind::Worker, MemberKind::Surface]);
-    // The primary pushed v3 to the worker over their session.
-    until(|| worker.roster().version() == 3, "the worker to receive v3").await;
-    assert_eq!(worker.roster().member(surface.id()).map(RosterMember::kind), Some(MemberKind::Surface));
+    // Each new member with the code it used.
+    assert_eq!(paired.len(), 2);
+    assert_eq!(paired[1].0, bob.id());
+    assert!(paired.iter().all(|(_, c)| !c.is_empty()) && paired[0].1 != paired[1].1);
+    // The primary pushed v3 to alice over their session.
+    until(|| alice.roster().version() == 3, "alice to receive v3").await;
+    assert!(alice.roster().member(bob.id()).is_some());
 
-    worker.send(surface.id(), &b"worker to surface"[..]).await.unwrap();
-    surface.send(worker.id(), &b"surface to worker"[..]).await.unwrap();
-    primary.send(surface.id(), &b"primary to surface"[..]).await.unwrap();
-    surface.send(primary.id(), &b"surface to primary"[..]).await.unwrap();
-    worker.send(primary.id(), &b"worker to primary"[..]).await.unwrap();
-    primary.send(worker.id(), &b"primary to worker"[..]).await.unwrap();
+    alice.send(bob.id(), &b"alice to bob"[..]).await.unwrap();
+    bob.send(alice.id(), &b"bob to alice"[..]).await.unwrap();
+    primary.send(bob.id(), &b"primary to bob"[..]).await.unwrap();
+    bob.send(primary.id(), &b"bob to primary"[..]).await.unwrap();
+    alice.send(primary.id(), &b"alice to primary"[..]).await.unwrap();
+    primary.send(alice.id(), &b"primary to alice"[..]).await.unwrap();
     let text = |m: InboundMessage| (m.from, String::from_utf8(m.bytes.to_vec()).unwrap());
-    assert_eq!(text(recv_within(&surface, SECS(5)).await), (worker.id().into(), "worker to surface".into()));
-    assert_eq!(text(recv_within(&surface, SECS(5)).await), (primary.id().into(), "primary to surface".into()));
-    assert_eq!(text(recv_within(&worker, SECS(5)).await), (surface.id().into(), "surface to worker".into()));
-    assert_eq!(text(recv_within(&worker, SECS(5)).await), (primary.id().into(), "primary to worker".into()));
+    assert_eq!(text(recv_within(&bob, SECS(5)).await), (alice.id().into(), "alice to bob".into()));
+    assert_eq!(text(recv_within(&bob, SECS(5)).await), (primary.id().into(), "primary to bob".into()));
+    assert_eq!(text(recv_within(&alice, SECS(5)).await), (bob.id().into(), "bob to alice".into()));
+    assert_eq!(text(recv_within(&alice, SECS(5)).await), (primary.id().into(), "primary to alice".into()));
     let mut p = vec![text(recv_within(primary, SECS(5)).await), text(recv_within(primary, SECS(5)).await)];
     p.sort();
-    let mut want = vec![
-        (surface.id().to_string(), "surface to primary".to_string()),
-        (worker.id().into(), "worker to primary".into()),
-    ];
+    let mut want =
+        vec![(bob.id().to_string(), "bob to primary".to_string()), (alice.id().into(), "alice to primary".into())];
     want.sort();
     assert_eq!(p, want);
 }
@@ -97,11 +98,11 @@ async fn a_primary_pairs_a_worker_and_a_surface_and_sessions_run_every_way() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn effective_roster_a_member_offline_during_a_pairing_is_brought_up_to_date_at_registration() {
     let net = Net::start(&[], fast()).await;
-    let worker = net.add(MemberKind::Worker, &[]).await;
-    let (identity, stale) = (worker.identity(), worker.roster());
-    worker.close();
+    let alice = net.add(&[]).await;
+    let (identity, stale) = (alice.identity(), alice.roster());
+    alice.close();
     sleep_ms(100).await;
-    let surface = net.add(MemberKind::Surface, &[]).await;
+    let bob = net.add(&[]).await;
     assert_eq!(net.primary.roster().version(), 3);
     // It presents v2; the relay holds v3 and returns it in `registered`.
     let back = Member::new(opts(identity, stale)).unwrap();
@@ -118,16 +119,16 @@ async fn effective_roster_a_member_offline_during_a_pairing_is_brought_up_to_dat
         }
     }
     assert_eq!(order, ["state connecting", "roster 3", "state connected"]);
-    back.send(surface.id(), &b"caught up"[..]).await.unwrap();
-    assert_eq!(&recv_within(&surface, SECS(5)).await.bytes[..], b"caught up");
+    back.send(bob.id(), &b"caught up"[..]).await.unwrap();
+    assert_eq!(&recv_within(&bob, SECS(5)).await.bytes[..], b"caught up");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_member_revoked_while_offline_is_closed_4008_at_registration_and_stays_revoked() {
     let net = Net::start(&[], fast()).await;
-    let worker = net.add(MemberKind::Worker, &[]).await;
-    let (identity, stale) = (worker.identity(), worker.roster());
-    worker.close();
+    let alice = net.add(&[]).await;
+    let (identity, stale) = (alice.identity(), alice.roster());
+    alice.close();
     sleep_ms(100).await;
     net.primary.revoke(identity.id()).unwrap();
     let back = Member::new(opts(identity, stale)).unwrap();
@@ -147,7 +148,7 @@ async fn a_member_revoked_while_offline_is_closed_4008_at_registration_and_stays
 fn wrong_parts(net: &Net, code: &PairingCode) -> PairTarget {
     let wrong = if code.code == "AAAA-AAAA" { "BBBB-BBBB" } else { "AAAA-AAAA" };
     PairTarget::Parts {
-        network: net.primary.id().into(),
+        network: net.primary.network(),
         code: wrong.into(),
         code_id: code.code_id.clone(),
         relay: net.relay.url.clone(),
@@ -158,44 +159,33 @@ fn wrong_parts(net: &Net, code: &PairingCode) -> PairTarget {
 async fn wrong_codes_burn_after_five_a_used_code_admits_one_node_an_absent_primary_is_unreachable() {
     let net = Net::start(&[], fast()).await;
     let mut events = net.primary.events();
-    let code = net.primary.open_pairing_code(MemberKind::Worker, CodeOptions::default()).unwrap();
+    let code = net.primary.open_pairing_code(CodeOptions::default()).unwrap();
     for _ in 0..5 {
         assert_eq!(pair_with(wrong_parts(&net, &code)).await.unwrap_err().code(), ErrorCode::Pairing);
     }
     assert_eq!(pair_failures(&mut events), vec!["wrong-code"; 5]);
     assert_eq!(pair_with(PairTarget::Link(code.link.clone())).await.unwrap_err().code(), ErrorCode::Pairing);
 
-    let once = net.primary.open_pairing_code(MemberKind::Mcp, CodeOptions::default()).unwrap();
+    let once = net.primary.open_pairing_code(CodeOptions::default()).unwrap();
     assert_eq!(pair_with(PairTarget::Link(once.link.clone())).await.unwrap().roster.version(), 2);
     assert_eq!(pair_with(PairTarget::Link(once.link)).await.unwrap_err().code(), ErrorCode::Pairing);
 
     // A chosen code, and a cancelled one.
-    let chosen = net.primary.open_pairing_code(
-        MemberKind::Surface,
-        CodeOptions { code: Some("hell-o-wor1d".into()), ..Default::default() },
-    );
+    let chosen = net.primary.open_pairing_code(CodeOptions { code: Some("hell-o-wor1d".into()), ..Default::default() });
     assert_eq!(chosen.unwrap_err().code(), ErrorCode::Invalid, "not 8 characters");
-    let chosen = net
-        .primary
-        .open_pairing_code(MemberKind::Surface, CodeOptions { code: Some("w0rd-c0de".into()), ..Default::default() });
+    let chosen = net.primary.open_pairing_code(CodeOptions { code: Some("w0rd-c0de".into()), ..Default::default() });
     let chosen = chosen.unwrap();
     assert_eq!(chosen.code, "W0RD-C0DE");
     assert_eq!(pair_with(PairTarget::Link(chosen.link)).await.unwrap().roster.version(), 3);
-    let cancelled = net.primary.open_pairing_code(MemberKind::Worker, CodeOptions::default()).unwrap();
+    let cancelled = net.primary.open_pairing_code(CodeOptions::default()).unwrap();
     net.primary.cancel_pairing_code(&cancelled.code_id);
     assert_eq!(pair_with(PairTarget::Link(cancelled.link)).await.unwrap_err().code(), ErrorCode::Pairing);
-    let expired = net.primary.open_pairing_code(
-        MemberKind::Worker,
-        CodeOptions { lifetime: Some(Duration::from_millis(1)), ..Default::default() },
-    );
+    let expired =
+        net.primary.open_pairing_code(CodeOptions { lifetime: Some(Duration::from_millis(1)), ..Default::default() });
     sleep_ms(20).await;
     assert_eq!(pair_with(PairTarget::Link(expired.unwrap().link)).await.unwrap_err().code(), ErrorCode::Pairing);
-    assert_eq!(
-        net.primary.open_pairing_code(MemberKind::Primary, CodeOptions::default()).unwrap_err().code(),
-        ErrorCode::Invalid
-    );
 
-    let later = net.primary.open_pairing_code(MemberKind::Worker, CodeOptions::default()).unwrap();
+    let later = net.primary.open_pairing_code(CodeOptions::default()).unwrap();
     net.primary.close();
     sleep_ms(100).await;
     assert_eq!(pair_with(PairTarget::Link(later.link)).await.unwrap_err().code(), ErrorCode::Unreachable);
@@ -238,11 +228,11 @@ async fn stalled_newcomer(url: &str, network: &str, code_id: &str) -> RawWs {
 }
 
 async fn last_slot_held(net: &Net, events: &mut tokio::sync::broadcast::Receiver<Event>) -> (PairingCode, RawWs) {
-    let code = net.primary.open_pairing_code(MemberKind::Worker, CodeOptions::default()).unwrap();
+    let code = net.primary.open_pairing_code(CodeOptions::default()).unwrap();
     for _ in 0..4 {
         assert_eq!(pair_with(wrong_parts(net, &code)).await.unwrap_err().code(), ErrorCode::Pairing);
     }
-    let stalled = stalled_newcomer(&net.relay.url, net.primary.id(), &code.code_id).await;
+    let stalled = stalled_newcomer(&net.relay.url, &net.primary.network(), &code.code_id).await;
     pair_failures(events);
     // The fifth slot is in flight: the right code is turned away for now.
     assert_eq!(pair_with(PairTarget::Link(code.link.clone())).await.unwrap_err().code(), ErrorCode::Pairing);

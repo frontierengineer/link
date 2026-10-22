@@ -27,8 +27,9 @@ const (
 	// PairingChannelTimeout is the relay's lifetime for a pairing channel.
 	PairingChannelTimeout = 60 * time.Second
 	resignSkew            = 5 * time.Minute
-	// UsageBurst asks at once, then one per UsageInterval, per network: the relay's budget.
-	UsageBurst    = 3
+	// UsageBurst asks at once (one: no burst), then one per UsageInterval, per network: the
+	// relay's budget (section 4.3).
+	UsageBurst    = 1
 	UsageInterval = 10 * time.Second
 )
 
@@ -304,9 +305,10 @@ func withoutMember(members []RosterMember, id string) []RosterMember {
 	return out
 }
 
-// Usage asks the relay for this network's usage. The relay allows UsageBurst asks at once
-// and then one per UsageInterval per network; beyond that it refuses, and Usage fails with
-// rate-limited. Ask rarely, and keep the answer.
+// Usage asks the relay for this network's usage. The relay allows one ask per UsageInterval
+// (10 s) per network, with no burst; an ask sooner than that it refuses at once, and Usage
+// fails with rate-limited. Ask rarely, and keep the answer; whether the network is slowed is
+// Shaping, which needs no ask.
 func (m *Member) Usage(ctx context.Context) (UsageReport, error) {
 	m.lock()
 	primary := m.prim != nil

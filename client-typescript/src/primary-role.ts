@@ -83,8 +83,9 @@ export interface UsageReport {
   };
 }
 
-/** The relay's budget for usage asks per network (section 4.3): this many at once... */
-export const USAGE_BURST = 3;
+/** The relay's budget for usage asks per network (section 4.3): this many at once (one: no
+ * burst)... */
+export const USAGE_BURST = 1;
 /** ...then one per this many milliseconds. */
 export const USAGE_INTERVAL_MS = 10_000;
 
@@ -210,9 +211,10 @@ export class PrimaryRole {
   }
 
   /**
-   * Asks the relay for this network's usage. The relay allows USAGE_BURST asks at once and then
-   * one per USAGE_INTERVAL_MS per network; beyond that it refuses, and this rejects with
-   * RateLimitedError. Ask rarely, and keep the answer.
+   * Asks the relay for this network's usage. The relay allows one ask per USAGE_INTERVAL_MS
+   * (10 s) per network, with no burst; an ask sooner than that it refuses at once, and this
+   * rejects with RateLimitedError. Ask rarely, and keep the answer; whether the network is
+   * slowed is `shaping`, which needs no ask.
    */
   usage(): Promise<UsageReport> {
     const id = b64u(randomBytes(9));

@@ -17,10 +17,12 @@ import (
 //
 // Two lanes share the relay socket. Control (handshakes, refused, reset and session messages
 // other than message) is encrypted and handed over at once. Message fragments wait in a gate
-// until the socket is short, the session's un-credited bytes are within its pace, and credit
+// until the socket is short, the session's un-credited bytes are within its window, credit
+// allows, and, while the relay shapes the network (section 11, pacing), the connection's pace
 // allows; only then is a fragment encrypted, in the same step that hands it to the socket.
 // Wire order is therefore nonce order, and control can pass queued data without breaking
-// Noise's implicit counter.
+// Noise's implicit counter. Paced at the rate the relay reads, little lies in the socket in
+// front of control, so control arrives quickly however much data waits.
 //
 // Credit and reassembly belong to one Noise session, and a message is never split across two
 // sessions: a rekey switches at a message boundary, and a retired session lives past its
@@ -51,6 +53,17 @@ const (
 	PaceFloorBytes = 65536
 	// paceMinFragment is the smallest fragment the pace cuts a message into.
 	paceMinFragment = 16384
+	// PaceShareNum/PaceShareDen: while the relay shapes the network at R bytes a second (its
+	// shaping notice), fragments go at most at 7/8 of R, each counted at its frame's size; the
+	// eighth left is for credit, handshakes, the peers' own frames and WebSocket headers
+	// (section 11).
+	PaceShareNum, PaceShareDen = 7, 8
+	// fragmentFrameOverhead is what a frame carrying a fragment adds to its message bytes: the
+	// routed header, the receiver index, the session message's two bytes and the tag.
+	fragmentFrameOverhead = 40
+	// pacedMinFragment: a paced fragment carries at most a quarter of a second of the pace, and
+	// at least this.
+	pacedMinFragment = 1024
 
 	// maxSessionsPerPeer bounds the sessions kept with one peer: the current one and those
 	// retired by rekeys still finishing a message (section 7.3). Beyond it the oldest that is
@@ -146,6 +159,14 @@ type coreStats struct {
 	initsRead        int
 }
 
+// pacedFragment is the largest fragment at rate rateBps (0: unshaped).
+func pacedFragment(rateBps int64) int64 {
+	if rateBps <= 0 {
+		return maxFragment
+	}
+	return max(pacedMinFragment, min(maxFragment, 7*rateBps/32))
+}
+
 type sessionManager struct {
 	m              *Member
 	peers          map[string]*peerState
@@ -156,9 +177,14 @@ type sessionManager struct {
 	pumping        bool
 	repump         bool
 	awaitingSocket bool
-	stats          coreStats
-	rng            io.Reader // ephemeral keys and indices; nil is crypto/rand
-	limits         *peerLimits
+	// The rate in force from the relay's shaping notice (0: none), when the connection's next
+	// fragment may go at its pace, and the timer that pumps then.
+	rateBps   int64
+	paceDue   time.Time
+	paceTimer *mtimer
+	stats     coreStats
+	rng       io.Reader // ephemeral keys and indices; nil is crypto/rand
+	limits    *peerLimits
 	// stamps holds, per member, the greatest stamp of an init accepted from it (section
 	// 7.1); bounded by the roster, and kept across relay connections.
 	stamps map[string]uint64
@@ -402,7 +428,23 @@ func (sm *sessionManager) close() {
 	}
 	sm.closed = true
 	sm.sweepTimer.cancel()
+	sm.paceTimer.cancel()
 	sm.dropAll(closedError(""))
+}
+
+// setRate sets the rate the relay shapes the network at (section 9's shaping; 0: none).
+// Fragments are paced to it from now on; what was handed over already is the relay's grace to
+// read.
+func (sm *sessionManager) setRate(rateBps int64) {
+	if rateBps == sm.rateBps {
+		return
+	}
+	sm.rateBps = rateBps
+	if rateBps == 0 {
+		sm.paceTimer.cancel()
+		sm.paceTimer = nil
+	}
+	sm.pump()
 }
 
 // sessionInfo lists the sessions with peer, or with every peer for "".
@@ -1014,12 +1056,15 @@ func (sm *sessionManager) transmit(s *session, msg sessionMessage) (bool, error)
 	return sm.m.sendFrame(typ, s.peer, dataBody(s.remoteIndex, ct)), nil
 }
 
-// runFragment sends the next fragment of o: never more than the room left under the pace
-// (but not below paceMinFragment), so the socket holds about the pace and no more.
+// runFragment sends the next fragment of o: never more than the room left under the window
+// (but not below the smallest fragment), so the socket holds about the window and no more: on
+// a slow link fragments shrink, and control behind them waits a fraction of a second rather
+// than a whole fragment.
 func (sm *sessionManager) runFragment(o *outMsg) {
 	s := o.s
-	room := max(paceMinFragment, sm.pace(s)-s.inflight)
-	n := min(int64(len(o.bytes)-o.off), maxFragment, max(s.sendCredit, 0), room)
+	largest := pacedFragment(sm.rateBps)
+	room := max(min(paceMinFragment, largest), sm.pace(s)-s.inflight)
+	n := min(int64(len(o.bytes)-o.off), largest, max(s.sendCredit, 0), room)
 	more := int64(o.off)+n < int64(len(o.bytes))
 	ok, err := sm.transmit(s, sessionMessage{typ: sessMessage, more: more, bytes: o.bytes[o.off : o.off+int(n)]})
 	if err == nil && !ok {
@@ -1032,6 +1077,15 @@ func (sm *sessionManager) runFragment(o *outMsg) {
 	if err != nil {
 		sm.finishOut(o, err)
 		return
+	}
+	if sm.rateBps > 0 {
+		pace := sm.rateBps * PaceShareNum / PaceShareDen
+		cost := time.Duration((n + fragmentFrameOverhead) * int64(time.Second) / max(pace, 1))
+		now := sm.now()
+		if sm.paceDue.Before(now) {
+			sm.paceDue = now
+		}
+		sm.paceDue = sm.paceDue.Add(cost)
 	}
 	o.started = true
 	s.sendCredit -= n
@@ -1049,12 +1103,18 @@ func (sm *sessionManager) runFragment(o *outMsg) {
 	}
 }
 
-// pace is the message bytes s may have un-credited: about a second and a half of what its
-// receiver takes. A second's worth of credit is the larger of the last whole second and the
-// one under way (not their sum: credit comes in lumps).
+// pace is the message bytes s may have un-credited, its window: about a second and a half of
+// what its receiver takes; while shaped, about a second of it, and never more than half a
+// second of the rate, so that members sending at once each keep about a second of their share
+// behind their control (section 11). A second's worth of credit is the larger of the last
+// whole second and the one under way (not their sum: credit comes in lumps).
 func (sm *sessionManager) pace(s *session) int64 {
 	sm.rollRate(s, sm.now())
-	return max(PaceFloorBytes, 3*max(s.ratePrev, s.rateCur)/2)
+	credited := max(s.ratePrev, s.rateCur)
+	if sm.rateBps > 0 {
+		return max(pacedFragment(sm.rateBps), min(credited, sm.rateBps/2))
+	}
+	return max(PaceFloorBytes, 3*credited/2)
 }
 
 func (sm *sessionManager) rollRate(s *session, now time.Time) {
@@ -1069,8 +1129,9 @@ func (sm *sessionManager) rollRate(s *session, now time.Time) {
 }
 
 // pump hands waiting fragments to the socket, oldest first, skipping a session that is out
-// of credit or over its pace (its next credit wakes it) so one slow receiver never holds up
-// another. It stops while the socket is backed up, and resumes once it drains.
+// of credit or over its window (its next credit wakes it) so one slow receiver never holds up
+// another. It stops while the socket is backed up, and resumes once it drains; and, while
+// shaped, until the connection's pace allows the next fragment.
 func (sm *sessionManager) pump() {
 	if sm.pumping {
 		sm.repump = true
@@ -1116,6 +1177,17 @@ func (sm *sessionManager) pumpOnce() {
 				})
 			}
 			return
+		}
+		if sm.rateBps > 0 {
+			if wait := sm.paceDue.Sub(sm.now()); wait > 0 {
+				if sm.paceTimer == nil || sm.paceTimer.dead {
+					sm.paceTimer = sm.m.after(wait, func() {
+						sm.paceTimer = nil
+						sm.pump()
+					})
+				}
+				return
+			}
 		}
 		sm.gate = append(sm.gate[:i:i], sm.gate[i+1:]...)
 		sm.runFragment(o)

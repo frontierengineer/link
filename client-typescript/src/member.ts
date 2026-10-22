@@ -128,6 +128,17 @@ export interface TrafficReport {
   peers: Record<string, PeerTraffic>;
 }
 
+/** How the relay shapes this member's network (section 9), from its `shaping` notices. */
+export interface Shaping {
+  /** The rate in force, bytes a second: the network's rate, or its trickle rate once its quota
+   * is spent; 0 for none. Sends are paced to it. */
+  rateBps: number;
+  /** The quota is spent and the trickle rate is in force: send less (drop video, keep audio). */
+  slowed: boolean;
+}
+
+const UNSHAPED: Shaping = { rateBps: 0, slowed: false };
+
 const zeroTraffic = (): Traffic => ({ messages: 0, bytes: 0, frames: 0, frameBytes: 0 });
 const zeroPeer = (): PeerTraffic => ({ sent: zeroTraffic(), received: zeroTraffic() });
 const copyPeer = (p: PeerTraffic): PeerTraffic => ({ sent: { ...p.sent }, received: { ...p.received } });
@@ -142,6 +153,9 @@ export type MemberEvents = {
   moved: { network: string };
   /** A non-fatal `error` control message from the relay. */
   relayError: { code: string; message?: string; id?: string };
+  /** The relay shapes the network differently: slowed (its quota spent), no longer slowed, or
+   * at another rate. `member.shaping` holds the latest. */
+  shaping: Shaping;
   /** A newcomer completed pairing and is on the published roster (the primary only). `codeId`
    * is the code that admitted it: an application that labels its members does so by code. */
   paired: { member: RosterMember; codeId: string; roster: Roster };
@@ -182,6 +196,7 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   private trafficPeers = new Map<string, PeerTraffic>();
   private relayTextBase = { sent: 0, received: 0 };
   private wasRegistered = false;
+  private shapingNow: Shaping = UNSHAPED;
   /** Budget for `relayError` events, so a relay's errors cannot flood the application. */
   private readonly relayErrors = new Bucket(RELAY_ERROR_RATE, RELAY_ERROR_BURST);
   /** Per peer: when a roster last went to it, and an offer due at the interval's end. */
@@ -245,6 +260,8 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     this.relay.on('disconnect', (d) => this.emitAny('disconnect', d));
     this.relay.on('moved', (m) => this.emitAny('moved', m));
     this.relay.on('registered', (msg) => {
+      // A relay without the feature never says: this network is taken as unshaped there.
+      if (!this.relay.features.has('shaping')) this.setShaping(UNSHAPED);
       // Section 4.1: the relay returns its newer roster when this member presented an older one.
       if (msg.roster !== undefined) this.offerRoster(msg.roster);
       // A relay that keeps only a compact record of a newer roster says so without sending it;
@@ -288,6 +305,13 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     return this.relay.relayUrl;
   }
 
+  /** How the relay shapes this network now, from its last `shaping` notice: the rate in force
+   * and whether the network is slowed. Unshaped before any notice. The `shaping` event says when
+   * it changes, so there is no need to poll `usage` for it. */
+  get shaping(): Shaping {
+    return { ...this.shapingNow };
+  }
+
   /** Whether this node is the primary now: it holds the network seed and its roster names it. */
   get isPrimary(): boolean {
     return this.prim !== undefined;
@@ -315,9 +339,10 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   }
 
   /**
-   * Asks the relay for this network's usage. The relay allows USAGE_BURST asks at once and then
-   * one per USAGE_INTERVAL_MS per network; beyond that it refuses, and this rejects with
-   * RateLimitedError. Ask rarely, and keep the answer.
+   * Asks the relay for this network's usage. The relay allows one ask per USAGE_INTERVAL_MS
+   * (10 s) per network, with no burst; an ask sooner than that it refuses at once, and this
+   * rejects with RateLimitedError. Ask rarely, and keep the answer; whether the network is
+   * slowed is `shaping`, which needs no ask.
    */
   usage(): Promise<UsageReport> {
     if (!this.prim) return Promise.reject(new InvalidError('this node is not the primary'));
@@ -601,6 +626,11 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   }
 
   protected onControl(msg: ControlMessage): void {
+    if (msg.type === 'shaping') {
+      const rateBps = integerMember(msg, 'rateBps');
+      if (rateBps !== undefined && typeof msg.slowed === 'boolean') this.setShaping({ rateBps, slowed: msg.slowed });
+      return;
+    }
     if (this.prim?.onControl(msg)) return;
     if (msg.type === 'error') {
       const e: { code: string; message?: string; id?: string } = { code: String(msg.code) };
@@ -608,6 +638,14 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
       if (typeof msg.id === 'string') e.id = msg.id;
       if (this.relayErrors.take(this.mono())) this.emitAny('relayError', e);
     }
+  }
+
+  private setShaping(next: Shaping): void {
+    this.sessions.setRate(next.rateBps);
+    if (next.rateBps === this.shapingNow.rateBps && next.slowed === this.shapingNow.slowed) return;
+    this.shapingNow = { ...next };
+    this.diag?.event({ kind: 'shaping', slowed: next.slowed, rateBps: next.rateBps });
+    this.emitAny('shaping', { ...next });
   }
 
   protected onBinary(bytes: Uint8Array): void {

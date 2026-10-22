@@ -51,6 +51,9 @@ type Server struct {
 	reloadMu sync.Mutex
 	closes   [len(closeCodes)]atomic.Uint64
 
+	slowMu   sync.Mutex // taken after a network's mu, never before
+	slowNets map[*network]struct{}
+
 	closing  atomic.Bool
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -76,6 +79,7 @@ func New(cfg Config) *Server {
 		cfg:        cfg,
 		epoch:      time.Now(),
 		channels:   map[link.ID]*channel{},
+		slowNets:   map[*network]struct{}{},
 		ipRegister: newIPLimiter(cfg.IPRegisterPerMin, time.Minute),
 		ipPair:     newIPLimiter(cfg.IPPairPerMin, time.Minute),
 		ipNetworks: newIPLimiter(cfg.IPNetworksPerHour, time.Hour),
@@ -98,6 +102,7 @@ func New(cfg Config) *Server {
 	}
 	go s.pingLoop()
 	go s.janitorLoop()
+	go s.shapingLoop()
 	return s
 }
 
@@ -232,6 +237,7 @@ func (s *Server) upgrade(w http.ResponseWriter, r *http.Request) {
 		s.ipConns.release(ipc, true)
 		return
 	}
+	limitUnsent(nc)
 	c := &conn{s: s, nc: nc, ip: ip, ipc: ipc, ipPending: true, origin: origin, originRef: s.originNamed(origin), done: make(chan struct{})}
 	c.rc = rawConnOf(nc)
 	if rw != nil && rw.Reader.Buffered() > 0 {

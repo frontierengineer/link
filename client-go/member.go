@@ -144,6 +144,7 @@ type Member struct {
 	offline      []*outMsg // sends waiting for the relay connection
 	rosterOut    map[string]*rosterOut
 	relayErrors  bucket
+	shaping      Shaping       // the relay's last shaping notice
 	askedPrimary time.Time     // the last ask of the primary for its roster (monotonic)
 	hintWait     time.Duration // the wait before the next
 	hintAnswered bool          // a newer roster came since the last ask
@@ -383,6 +384,25 @@ func (m *Member) State() State {
 	m.lock()
 	defer m.unlock()
 	return m.relay.state
+}
+
+// Shaping is how the relay shapes this network (section 9), from its last shaping notice:
+// the rate in force and whether the network is slowed. A ShapingEvent says when it changes,
+// so there is no need to poll Usage for it.
+type Shaping struct {
+	// RateBps is the rate in force, bytes a second: the network's rate, or its trickle rate
+	// once its quota is spent; 0 for none. Sends are paced to it (section 11).
+	RateBps int64 `json:"rateBps"`
+	// Slowed: the quota is spent and the trickle rate is in force. Send less (drop video,
+	// keep audio).
+	Slowed bool `json:"slowed"`
+}
+
+// Shaping is the relay's last shaping notice; unshaped before any.
+func (m *Member) Shaping() Shaping {
+	m.lock()
+	defer m.unlock()
+	return m.shaping
 }
 
 // RelayURL is the relay this member dials.
@@ -1044,6 +1064,10 @@ func (m *Member) onRelayState(s State) {
 }
 
 func (m *Member) onRegistered(msg controlMessage) {
+	// A relay without the feature never says: the network is taken as unshaped there.
+	if !m.relay.features["shaping"] {
+		m.setShaping(Shaping{})
+	}
 	if raw, ok := msg["roster"]; ok {
 		// Section 4.1: the relay returns its newer roster when this member presented an older
 		// one.
@@ -1060,6 +1084,14 @@ func (m *Member) onRegistered(msg controlMessage) {
 }
 
 func (m *Member) onControl(msg controlMessage) {
+	if msg.typ() == "shaping" {
+		rate, ok := safeInteger(msg["rateBps"])
+		slowed, isBool := msg["slowed"].(bool)
+		if ok && isBool {
+			m.setShaping(Shaping{RateBps: rate, Slowed: slowed})
+		}
+		return
+	}
 	if m.prim != nil && m.prim.onControl(msg) {
 		return
 	}
@@ -1080,6 +1112,17 @@ func (m *Member) onControl(msg controlMessage) {
 			m.emitDroppable(e)
 		}
 	}
+}
+
+// setShaping paces sends to the rate in force and raises a ShapingEvent when it changed. The
+// relay can change it at will, so the event is droppable.
+func (m *Member) setShaping(s Shaping) {
+	m.sess.setRate(s.RateBps)
+	if s == m.shaping {
+		return
+	}
+	m.shaping = s
+	m.emitDroppable(ShapingEvent{Shaping: s})
 }
 
 func (m *Member) onBinary(data []byte) {

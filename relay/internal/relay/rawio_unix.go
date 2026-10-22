@@ -64,3 +64,8 @@ func rawIO(rc syscall.RawConn, p []byte, write bool) (int, error) {
 	}
 	return n, err
 }
+
+// setsockoptInt sets an integer socket option, ignoring a system that refuses it.
+func setsockoptInt(fd uintptr, level, opt, v int) {
+	syscall.SetsockoptInt(int(fd), level, opt, v)
+}

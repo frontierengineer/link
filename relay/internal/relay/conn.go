@@ -104,10 +104,11 @@ type conn struct {
 	pingDue    bool
 	pong       []byte // the latest ping's payload, while its pong is due
 	pongDue    bool
-	q          []outFrame
-	queued     int64 // bytes of data frames queued or being written
-	replies    int64 // of which answers to this connection's own requests
-	writing    bool  // a writer (inline or goroutine) owns the socket's write side
+	pq         []outFrame // the relay's own messages, written ahead of q (section 9)
+	q          []outFrame // routed frames
+	queued     int64      // bytes of data frames queued or being written
+	replies    int64      // of which answers to this connection's own requests
+	writing    bool       // a writer (inline or goroutine) owns the socket's write side
 	closing    bool
 	closeFrame []byte
 	closeSent  bool
@@ -159,7 +160,8 @@ func (c *conn) overLocked() bool {
 }
 
 // enqueue queues a data frame (p has headroom in front of its payload) and starts writing.
-func (c *conn) enqueue(op ws.OpCode, p []byte, kind uint8) bool {
+// The relay's own messages (own) go in the lane written ahead of routed frames.
+func (c *conn) enqueue(op ws.OpCode, p []byte, kind uint8, own bool) bool {
 	b := frameWire(op, p)
 	c.wmu.Lock()
 	defer c.wmu.Unlock()
@@ -170,10 +172,13 @@ func (c *conn) enqueue(op ws.OpCode, p []byte, kind uint8) bool {
 	if kind == kindReply {
 		c.replies += int64(len(b))
 	}
-	if !c.writing {
+	switch {
+	case !c.writing:
 		// Nothing ahead of it: it is the frame being written (most often inline, at once).
 		c.cur, c.curKind, c.curSize = b, kind, int64(len(b))
-	} else {
+	case own:
+		c.pq = append(c.pq, outFrame{b: b, kind: kind})
+	default:
 		c.q = append(c.q, outFrame{b: b, kind: kind})
 	}
 	c.kickLocked()
@@ -187,11 +192,18 @@ func (c *conn) enqueue(op ws.OpCode, p []byte, kind uint8) bool {
 
 // sendBinary relays a routed frame (p has headroom in front of it).
 func (c *conn) sendBinary(p []byte) bool {
-	return c.enqueue(ws.OpBinary, p, kindData)
+	return c.enqueue(ws.OpBinary, p, kindData, false)
 }
 
+// sendPair forwards a pair frame on a pairing channel. It goes in the relay's own lane, with
+// pairing and pairEnd, so the three keep their order between them.
+func (c *conn) sendPair(p []byte) bool {
+	return c.enqueue(ws.OpBinary, p, kindData, true)
+}
+
+// sendJSON sends one of the relay's own messages, ahead of the routed frames queued.
 func (c *conn) sendJSON(v any) bool {
-	return c.enqueue(ws.OpText, marshal(v), kindData)
+	return c.enqueue(ws.OpText, marshal(v), kindData, true)
 }
 
 func marshal(v any) []byte {
@@ -203,10 +215,11 @@ func marshal(v any) []byte {
 }
 
 // reply queues an answer to this connection's own request. A registered member's network is
-// charged for it (section 9), so asking cannot draw unmetered traffic out of the relay.
+// charged for it (section 9), so asking cannot draw unmetered traffic out of the relay. A text
+// answer (error, usage) goes ahead of routed frames; unreachable goes with them.
 func (c *conn) reply(op ws.OpCode, p []byte) {
 	c.charge(wireSize(len(p) - headroom))
-	c.enqueue(op, p, kindReply)
+	c.enqueue(op, p, kindReply, op == ws.OpText)
 }
 
 // wireSize is the size on the wire of a frame the relay sends with an n-byte payload.
@@ -274,7 +287,7 @@ func (c *conn) kickLocked() {
 }
 
 // nextLocked picks what to write next: the rest of a frame already started, then the pong,
-// the ping, the data queue, and the close frame last.
+// the ping, the relay's own messages, the routed frames, and the close frame last.
 func (c *conn) nextLocked() bool {
 	if c.cur != nil {
 		return true
@@ -286,13 +299,10 @@ func (c *conn) nextLocked() bool {
 	case c.pingDue:
 		c.cur, c.curKind = frameWire(ws.OpPing, make([]byte, headroom)), kindCtl
 		c.pingDue = false
+	case len(c.pq) > 0:
+		c.cur, c.curKind = popFrame(&c.pq)
 	case len(c.q) > 0:
-		f := c.q[0]
-		c.q[0] = outFrame{}
-		if c.q = c.q[1:]; len(c.q) == 0 {
-			c.q = nil
-		}
-		c.cur, c.curKind = f.b, f.kind
+		c.cur, c.curKind = popFrame(&c.q)
 	case c.closeFrame != nil && !c.closeSent:
 		c.cur, c.curKind = frameWire(ws.OpClose, withHeadroom(c.closeFrame)), kindClose
 		c.closeSent = true
@@ -301,6 +311,16 @@ func (c *conn) nextLocked() bool {
 	}
 	c.curSize = int64(len(c.cur))
 	return true
+}
+
+// popFrame takes the first frame of a lane.
+func popFrame(q *[]outFrame) ([]byte, uint8) {
+	f := (*q)[0]
+	(*q)[0] = outFrame{}
+	if *q = (*q)[1:]; len(*q) == 0 {
+		*q = nil
+	}
+	return f.b, f.kind
 }
 
 var errWouldBlock = errors.New("would block")
@@ -426,7 +446,7 @@ func (c *conn) beginCloseLocked(flush bool) bool {
 	close(c.done)
 	c.pingDue, c.pong, c.pongDue = false, nil, false
 	if !flush {
-		c.q = nil
+		c.pq, c.q = nil, nil
 		c.queued, c.replies = 0, 0
 	}
 	c.releaseLocked()

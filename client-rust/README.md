@@ -90,7 +90,8 @@ it freely; the member closes when the last clone is dropped.
   to its sender when taken, so a slow reader slows its senders.
 - `events()` streams `Event`s: `State` (`Connecting`, `Connected`, `Disconnected`, `Revoked`,
   `Replaced`, `Closed`), `Roster` (persist it), `Disconnect { code, reason }`, `Moved` (4009),
-  `RelayError`, and for the primary `Paired { member, code_id, roster }` (the new member, the
+  `RelayError`, `Shaping(Shaping { rate_bps, slowed })` (below), and for the primary
+  `Paired { member, code_id, roster }` (the new member, the
   code it paired with, the roster that lists it) and `PairingFailed` (with a `PairingFailure`
   reason: `wrong-code`, `malformed`, `unknown-code`, `used`, `no-attempts`, `newcomer-left`,
   `timeout`, `relay-lost`, `already-member`, `roster-full`, and `demoted`, when a newer roster
@@ -114,6 +115,21 @@ it freely; the member closes when the last clone is dropped.
   `reset_traffic()` starts over.
 - `session_info(peer)` and `sessions()` show the live sessions with a peer, or with every peer
   (indices, counters, credit).
+- `shaping()` is how the relay shapes the network now, from its last `shaping` notice (spec
+  section 9): `Shaping { rate_bps, slowed }`, `rate_bps` the rate in force (the network's rate,
+  or its trickle rate once its quota is spent; 0 for none) and `slowed` whether the quota is spent.
+  `Event::Shaping` is raised when it changes, so an application never polls `usage()` to learn
+  its network is slowed. It is `Shaping::default()` (0, not slowed) before any notice, and on a
+  relay whose `hello` does not list `shaping`.
+
+**Pacing.** Message fragments wait in the member's own queue, never in the socket. While the relay
+shapes the network at `rate_bps` R, they are handed over at most at 7/8 of R (each counted at its
+frame's size), in fragments of at most a quarter of a second of that pace
+(`paced_fragment(R)`), with at most about a second of what the receiver takes, and never more
+than half a second of R, un-credited per session. Control (handshakes, credit, rosters,
+`usage`) goes at once, ahead of them, so it reaches the relay within about a second however
+much data waits: behind about one fragment for a member sending alone, about 0.75 s with two to
+four sending at once.
 
 A member reconnects after 500 ms, doubling to 10 s, forever, except after close code 4008 (it is
 revoked) or 4005 (replaced: another copy of the identity connected); both are terminal. A member
@@ -126,8 +142,9 @@ whether it holds the seed. The primary's calls are `Member`'s, and fail with `In
 member that is not the primary now: `open_pairing_code(CodeOptions { lifetime, code })`
 returning `{ code, code_id, link, expires_at }` (`code` chooses the code instead of a random
 one), `cancel_pairing_code(code_id)`, `revoke(node_id)` returning the new roster, `usage()`. The
-relay allows `USAGE_BURST` (3) asks at once, then one per `USAGE_INTERVAL` (10 s); beyond that
-`usage()` fails with `RateLimited`. When no further member fits under the roster limit,
+relay allows one ask per `USAGE_INTERVAL` (10 s) per network, with no burst (`USAGE_BURST` is
+1); an ask sooner fails at once with `RateLimited`. An ask within it is answered at once, however
+busy the network. Whether the network is slowed is `shaping()`, which needs no ask. When no further member fits under the roster limit,
 `open_pairing_code` fails with `RosterFull`. `Primary::connect(opts)` / `Primary::new(opts)` start
 a member that must be the primary (`network_seed` given); `Primary` derefs to `Member`.
 

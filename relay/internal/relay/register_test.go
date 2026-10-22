@@ -38,6 +38,7 @@ func TestRegistered(t *testing.T) {
 	if m["type"] != "registered" || m["node"] != w.ID.String() || m["rosterVersion"] != float64(12) {
 		t.Fatalf("registered: %v", m)
 	}
+	c.shapingNotice()
 }
 
 // Every check of section 4.1, in order, with its close code.
@@ -314,6 +315,7 @@ func TestEffectiveRoster(t *testing.T) {
 	if m["type"] != "registered" || m["rosterVersion"] != float64(2) {
 		t.Fatalf("got %v", m)
 	}
+	c.shapingNotice()
 	got, _ := json.Marshal(m["roster"])
 	var want any
 	json.Unmarshal(r2, &want)
@@ -331,6 +333,7 @@ func TestEffectiveRoster(t *testing.T) {
 	if m := c.json(); m["type"] != "registered" || m["roster"] != nil {
 		t.Fatalf("got %v", m)
 	}
+	c.shapingNotice()
 
 	// A newer presented roster, delivered by a member, replaces the relay's: x is no longer
 	// listed and its connection is closed 4008.
@@ -340,6 +343,7 @@ func TestEffectiveRoster(t *testing.T) {
 	if m := wc.json(); m["type"] != "registered" || m["rosterVersion"] != float64(3) || m["roster"] != nil {
 		t.Fatalf("got %v", m)
 	}
+	wc.shapingNotice()
 	c.expectClose(4008)
 	// The cache now holds version 3: a node presenting version 2 receives it, and x, listed
 	// by version 2 but not by 3, is closed 4008.

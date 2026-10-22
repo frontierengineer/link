@@ -392,7 +392,9 @@ func (d *driver) run(c command) (*link.Member, result, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		return m, result{"state": string(m.State()), "roster": rosterValue(m.Roster()), "primary": m.IsPrimary()}, nil
+		sh := m.Shaping()
+		return m, result{"state": string(m.State()), "roster": rosterValue(m.Roster()), "primary": m.IsPrimary(),
+			"shaping": map[string]any{"rateBps": sh.RateBps, "slowed": sh.Slowed}}, nil
 
 	case "sessions":
 		m, err := d.member()
@@ -633,5 +635,7 @@ func (d *driver) event(e link.Event) {
 		d.write(event("pairingFailed", map[string]any{"codeId": e.CodeID, "reason": e.Code}))
 	case link.RelayErrorEvent:
 		d.write(event("relayError", map[string]any{"code": e.Code, "message": e.Message}))
+	case link.ShapingEvent:
+		d.write(event("shaping", map[string]any{"rateBps": e.Shaping.RateBps, "slowed": e.Shaping.Slowed}))
 	}
 }

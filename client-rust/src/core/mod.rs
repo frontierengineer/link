@@ -27,8 +27,8 @@ use crate::json::Json;
 use crate::roster::{Roster, acceptance_problem};
 use crate::signed::{origin_of, register_signing_bytes};
 use crate::types::{
-    Event, InboundMessage, MAX_CONTROL_BYTES, MemberState, Observed, Observer, PeerTraffic, RelayTraffic, Timing,
-    TrafficReport,
+    Event, InboundMessage, MAX_CONTROL_BYTES, MemberState, Observed, Observer, PeerTraffic, RelayTraffic, Shaping,
+    Timing, TrafficReport,
 };
 
 use self::primary::PrimaryState;
@@ -196,6 +196,10 @@ pub(crate) struct Node {
     url: String,
     backoff: u64,
     control_feature: bool,
+    /// The relay's `hello` listed `shaping`: it tells this member how it shapes the network.
+    shaping_feature: bool,
+    /// The relay's last `shaping` notice (section 9); unshaped before any.
+    shaping: Shaping,
     conn_id: u64,
     conn: Option<Conn>,
     reconnect_at: Option<u64>,
@@ -263,6 +267,8 @@ impl Node {
             url,
             backoff: timing.backoff_initial,
             control_feature: false,
+            shaping_feature: false,
+            shaping: Shaping::default(),
             conn_id: 0,
             conn: None,
             reconnect_at: None,
@@ -323,6 +329,20 @@ impl Node {
 
     pub(crate) fn relay_url(&self) -> &str {
         &self.url
+    }
+
+    /// How the relay shapes this network now, from its last `shaping` notice.
+    pub(crate) fn shaping(&self) -> Shaping {
+        self.shaping
+    }
+
+    /// Takes a new shaping: the sessions pace to its rate, and a change is an event.
+    fn set_shaping(&mut self, next: Shaping) {
+        sessions::set_rate(self, next.rate_bps);
+        if next != self.shaping {
+            self.shaping = next;
+            self.emit(Event::Shaping(next));
+        }
     }
 
     /// Whether this node is the primary now: it holds the network seed, and its roster names it.
@@ -431,6 +451,7 @@ impl Node {
     fn dial(&mut self) {
         self.set_state(RelayState::Connecting);
         self.control_feature = false;
+        self.shaping_feature = false;
         self.conn_id += 1;
         self.conn = Some(Conn { conn_id: self.conn_id, wire: None, challenge: None });
         self.dial_request = Some((self.conn_id, self.url.clone()));
@@ -677,6 +698,10 @@ impl Node {
         }
         if kind == "registered" && has_challenge && self.state == RelayState::Connecting {
             self.backoff = self.timing.backoff_initial;
+            // A relay without the feature never says: this network is taken as unshaped there.
+            if !self.shaping_feature {
+                self.set_shaping(Shaping::default());
+            }
             // Section 4.1: the relay returns its newer roster when this member presented an
             // older one; it is applied before anything is sent under it.
             match msg.get("roster") {
@@ -714,10 +739,9 @@ impl Node {
         }
         let challenge = msg.get("challenge").and_then(Json::as_str).and_then(from_b64u_array::<32>).ok_or(())?;
         // Names this client does not know are ignored; a missing list is empty.
-        self.control_feature = msg
-            .get("features")
-            .and_then(Json::as_array)
-            .is_some_and(|f| f.iter().any(|x| x.as_str() == Some("control")));
+        let features = msg.get("features").and_then(Json::as_array).unwrap_or_default();
+        self.control_feature = features.iter().any(|x| x.as_str() == Some("control"));
+        self.shaping_feature = features.iter().any(|x| x.as_str() == Some("shaping"));
         let register = self.register_message(&challenge).ok_or(())?;
         if let Some(c) = self.conn.as_mut() {
             c.challenge = Some(challenge);
@@ -746,6 +770,15 @@ impl Node {
     }
 
     fn on_control(&mut self, kind: &str, msg: &Json) {
+        if kind == "shaping" {
+            // `rateBps` a non-negative integer literal and `slowed` a boolean, or it is ignored.
+            if let (Some(rate_bps), Some(slowed)) =
+                (msg.get("rateBps").and_then(Json::as_safe_uint), msg.get("slowed").and_then(Json::as_bool))
+            {
+                self.set_shaping(Shaping { rate_bps, slowed });
+            }
+            return;
+        }
         if self.primary.is_some() && primary::on_control(self, kind, msg) {
             return;
         }

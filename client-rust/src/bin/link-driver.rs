@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use link_client::{
     ErrorCode, Event, Identity, InboundMessage, Json, LinkError, Member, MemberOptions, MemberState, Observed,
-    PairOptions, PairTarget, Primary, Roster, Timing, TrafficReport, create_network, pair, unix_ms,
+    PairOptions, PairTarget, Primary, Roster, Shaping, Timing, TrafficReport, create_network, pair, unix_ms,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -261,7 +261,14 @@ fn event_json(e: &Event) -> Json {
         Event::PairingFailed { code_id, reason, .. } => {
             event("pairingFailed", vec![("codeId", Json::str(code_id)), ("reason", Json::str(reason.as_str()))])
         }
+        Event::Shaping(s) => {
+            event("shaping", vec![("rateBps", Json::int(s.rate_bps)), ("slowed", Json::Bool(s.slowed))])
+        }
     }
+}
+
+fn shaping_json(s: Shaping) -> Json {
+    obj(vec![("rateBps", Json::int(s.rate_bps)), ("slowed", Json::Bool(s.slowed))])
 }
 
 fn traffic_json(t: &TrafficReport) -> Json {
@@ -397,6 +404,7 @@ async fn command(driver: &Arc<Driver>, cmd: &str, args: &Json) -> Reply {
                 ("state", Json::str(m.state().as_str())),
                 ("roster", m.roster().json().clone()),
                 ("primary", Json::Bool(m.is_primary())),
+                ("shaping", shaping_json(m.shaping())),
             ]))
         }
         "sessions" => {

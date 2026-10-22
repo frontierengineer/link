@@ -66,6 +66,7 @@ func TestRosterSizeLimitAtTheRelay(t *testing.T) {
 	if m := wc.json(); m["type"] != "registered" || m["rosterVersion"] != float64(1) || m["roster"] != nil {
 		t.Fatalf("got %v", m)
 	}
+	wc.shapingNotice()
 	pc.send(map[string]any{"type": "roster", "roster": json.RawMessage(sizedRoster(t, 2, link.MaxRosterBytes, p, w))})
 	pc.quiet(200 * time.Millisecond)
 }

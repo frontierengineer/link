@@ -169,6 +169,7 @@ async fn usage_the_primary_reads_the_network_totals_and_each_member_counts_its_o
     let alice = net.add(&[]).await;
     let bob = net.add(&[&alice]).await;
     net.pair_only().await; // on the roster, never connected
+    let asked = std::time::Instant::now();
     let before = net.primary.usage().await.unwrap();
     assert_eq!(before.connections, 3.0);
     assert_eq!(before.limits, UsageLimits::default());
@@ -180,6 +181,8 @@ async fn usage_the_primary_reads_the_network_totals_and_each_member_counts_its_o
     let payload = vec![7u8; 300_000];
     alice.send(bob.id(), payload.clone()).await.unwrap();
     recv_within(&bob, SECS(10)).await;
+    // One ask per 10 s per network, with no burst.
+    tokio::time::sleep(USAGE_INTERVAL.saturating_sub(asked.elapsed())).await;
     let after = net.primary.usage().await.unwrap();
     assert!(after.bytes_hour - before.bytes_hour >= payload.len() as f64);
     let sent = alice.traffic().peers[bob.id()].sent;
@@ -194,14 +197,51 @@ async fn usage_the_primary_reads_the_network_totals_and_each_member_counts_its_o
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn usage_asks_three_at_once_then_rate_limited_until_the_budget_refills() {
+async fn usage_one_ask_per_ten_seconds_with_no_burst_the_rest_rate_limited_at_once() {
     let net = Net::start(&[], fast()).await;
+    let started = std::time::Instant::now();
     let results = futures_util::future::join_all((0..4).map(|_| net.primary.usage())).await;
     let ok = results.iter().filter(|r| r.is_ok()).count();
     let limited: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
-    assert_eq!(ok, 3, "{results:?}");
-    assert_eq!(limited.len(), 1);
-    assert_eq!(limited[0].code(), ErrorCode::RateLimited);
+    assert_eq!(ok, 1, "{results:?}");
+    assert_eq!(limited.len(), 3);
+    assert!(limited.iter().all(|e| e.code() == ErrorCode::RateLimited));
+    assert!(started.elapsed() < SECS(2), "refused at once, not queued: {:?}", started.elapsed());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shaping_the_trickle_is_told_within_two_seconds_and_a_sending_primary_has_usage_answered_at_once() {
+    let env = [("LINK_QUOTA_BYTES_HOUR", "300000"), ("LINK_TRICKLE_BPS", "16384")];
+    let net = Net::start(&env, fast()).await;
+    let alice = net.add(&[]).await;
+    assert_eq!(net.primary.shaping(), Shaping::default());
+    let mut events = events_from_now(&alice);
+    // 6 MiB from the primary at a 16 KB/s trickle: the quota is spent within moments.
+    let sending = {
+        let primary = net.primary.clone();
+        let to = alice.id().to_owned();
+        tokio::spawn(async move { primary.send(&to, vec![1u8; 6 << 20]).await })
+    };
+    let started = std::time::Instant::now();
+    until(|| net.primary.shaping().slowed, "the primary to be told it is slowed").await;
+    assert!(started.elapsed() < SECS(2), "told after {:?}", started.elapsed());
+    assert_eq!(net.primary.shaping(), Shaping { rate_bps: 16384, slowed: true });
+    let mut told = None;
+    while told.is_none() && started.elapsed() < SECS(5) {
+        match tokio::time::timeout(SECS(1), events.recv()).await {
+            Ok(Ok(Event::Shaping(s))) => told = Some(s),
+            Ok(Ok(_)) => {}
+            _ => {}
+        }
+    }
+    assert_eq!(told, Some(Shaping { rate_bps: 16384, slowed: true }), "alice's event");
+    // The primary's own usage ask is not stuck behind its paced data.
+    sleep_ms(2000).await;
+    let asked = std::time::Instant::now();
+    let u = net.primary.usage().await.unwrap();
+    assert!(u.slowed);
+    assert!(asked.elapsed() < SECS(2), "usage answered after {:?}", asked.elapsed());
+    sending.abort();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

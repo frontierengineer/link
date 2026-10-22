@@ -19,7 +19,7 @@ import (
 	"github.com/frontierengineer/link/relay/internal/link"
 )
 
-func TestHelloAnnouncesControl(t *testing.T) {
+func TestHelloAnnouncesItsFeatures(t *testing.T) {
 	h := start(t, nil)
 	ws, _, err := websocket.DefaultDialer.Dial("ws://"+h.addr+"/v1", nil)
 	if err != nil {
@@ -30,7 +30,7 @@ func TestHelloAnnouncesControl(t *testing.T) {
 	if err := ws.ReadJSON(&hello); err != nil {
 		t.Fatal(err)
 	}
-	if f, _ := hello["features"].([]any); hello["type"] != "hello" || len(f) != 1 || f[0] != "control" {
+	if f, _ := hello["features"].([]any); hello["type"] != "hello" || len(f) != 2 || f[0] != "control" || f[1] != "shaping" {
 		t.Fatalf("hello %v", hello)
 	}
 }
@@ -148,6 +148,7 @@ func TestControlAheadOfABusyNetwork(t *testing.T) {
 	// data: one TCP stream is read in order.)
 	pc.sendBinary(frame(typeData, w.ID, make([]byte, 40)))
 	for i := range 3 {
+		h.s.refillUsage() // one ask per 10 s is the network's budget
 		pc.send(map[string]any{"type": "usage", "id": strconv.Itoa(i)})
 		if took := awaitText(t, pFrames, `"usage"`, 10*time.Second); took > 300*time.Millisecond {
 			t.Fatalf("usage %d answered after %v", i, took)
@@ -282,6 +283,7 @@ func TestFramesBeforeRegistering(t *testing.T) {
 			break
 		}
 	}
+	ok.shapingNotice()
 	over := h.dial()
 	for range maxEarly + 1 {
 		over.ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second))
@@ -499,6 +501,7 @@ func TestIPPendingLimit(t *testing.T) {
 	if m := a.json(); m["type"] != "registered" {
 		t.Fatalf("got %v", m)
 	}
+	a.shapingNotice()
 	if code, _ := h.dialStatus(); code != http.StatusSwitchingProtocols {
 		t.Fatalf("after one registered: %d", code)
 	}
@@ -544,6 +547,7 @@ func (h *harness) registerFrom(ip string, k, network *link.Keys, rosterJSON []by
 	if m := c.json(); m["type"] != "registered" {
 		h.t.Fatalf("expected registered, got %v", m)
 	}
+	c.shapingNotice()
 	return c
 }
 
@@ -654,6 +658,7 @@ func TestCompactRecordKeepsRevocation(t *testing.T) {
 	if m := c.json(); m["type"] != "registered" || m["rosterVersion"] != float64(2) || m["roster"] != nil {
 		t.Fatalf("got %v", m)
 	}
+	c.shapingNotice()
 	h.register(p, p, r2)
 	if got := h.s.held(netKeys(t, p).ID); got != "full" {
 		t.Fatalf("held %s after the primary came back", got)
@@ -703,6 +708,7 @@ func TestControlMessagesMustBeIJSON(t *testing.T) {
 	if m := c.json(); m["type"] != "registered" {
 		t.Fatalf("registered: %v", m)
 	}
+	c.shapingNotice()
 
 	// After registration: a usage request whose id is named twice.
 	pc := h.register(p, p, r)

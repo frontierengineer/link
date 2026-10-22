@@ -199,6 +199,7 @@ function open(args: Json): Member | Primary {
   n.on('disconnect', (d) => event('disconnect', { code: d.code, reason: d.reason }));
   n.on('moved', (m) => event('moved', { network: m.network }));
   n.on('relayError', (e) => event('relayError', { code: e.code, message: e.message ?? '' }));
+  n.on('shaping', (sh) => event('shaping', { rateBps: sh.rateBps, slowed: sh.slowed }));
   // Any member may become the primary (spec section 3.1).
   n.on('paired', (p) => event('paired', { node: p.member.id, codeId: p.codeId, version: p.roster.version }));
   n.on('pairingFailed', (f) => event('pairingFailed', { codeId: f.codeId, reason: pairingFailedReason(f.reason) }));
@@ -266,7 +267,7 @@ const commands: Record<string, (args: Json) => Promise<Json> | Json> = {
 
   state() {
     const n = needNode();
-    return { state: n.state, roster: n.roster, primary: n.isPrimary };
+    return { state: n.state, roster: n.roster, primary: n.isPrimary, shaping: n.shaping };
   },
 
   async send(args) {

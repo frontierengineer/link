@@ -154,6 +154,10 @@ moves.
   the network: the rate and the quota cannot be stepped around by sending to absent peers or by
   asking. The relay keeps no per-member figures; each client counts its own traffic
   (`member.traffic()` in the client).
-- The primary can ask for its network's usage (`Primary.usage()`): three asks at once, then one
-  every 10 seconds, per network. Nothing is pushed; a primary that wants to know whether the
-  network is slowed asks.
+- The primary can ask for its network's usage (`Primary.usage()`): one ask every 10 seconds per
+  network, with no burst; a sooner ask is refused at once. Whether the network is slowed, and
+  the rate in force, are pushed to every member as `shaping` notices (at registration, when the
+  quota is spent, when the trickle lifts, and when a reload changes the limits), so nobody
+  polls usage for them, and members pace their data to that rate.
+- A reload of `LINK_LIMITS_FILE` that changes a network's rate or lifts its trickle tells its
+  members at once.

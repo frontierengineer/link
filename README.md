@@ -16,7 +16,8 @@ on a port, and the relay never sees content.
 - `client-rust/` — the client library in Rust, crate `link-client`.
 - `test/` — every client driven against the real relay binary and against each other through
   per-implementation drivers (`test/drivers/PROTOCOL.md`): pairing, registration, sessions,
-  rekeying, revocation, usage and the relay's limits, end to end.
+  rekeying, revocation, usage and the relay's limits, and control never slowed behind data
+  while a network is shaped, end to end.
 - `deploy/` — running a self-hosted relay from the binary, npm or Docker, and its settings.
 
 ```sh

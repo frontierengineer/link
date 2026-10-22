@@ -27,6 +27,23 @@ pub const CREDIT_DELAY_MS: u64 = 250;
 pub const PACE_FLOOR_BYTES: u64 = 65536;
 /// The smallest fragment the pace cuts a message into.
 pub const PACE_MIN_FRAGMENT: u64 = 16384;
+/// While the relay shapes the network at R bytes a second (its `shaping` notice), fragments go
+/// at most at 7/8 of R, each counted at its frame's size: the eighth left is for credit,
+/// handshakes, the peers' own frames and WebSocket headers (section 11).
+pub const PACE_SHARE: f64 = 7.0 / 8.0;
+/// What a frame carrying a fragment adds to its message bytes: the routed header, the receiver
+/// index, the session message's two bytes and the tag.
+pub const FRAGMENT_FRAME_OVERHEAD: u64 = 40;
+/// A paced fragment carries at most a quarter of a second of the pace, and at least this.
+pub const PACED_MIN_FRAGMENT: u64 = 1024;
+
+/// The largest fragment at rate `rate_bps` (0: unshaped): a quarter of a second of 7/8 of it.
+pub fn paced_fragment(rate_bps: u64) -> u64 {
+    if rate_bps == 0 {
+        return MAX_FRAGMENT as u64;
+    }
+    (rate_bps.saturating_mul(7) / 32).clamp(PACED_MIN_FRAGMENT, MAX_FRAGMENT as u64)
+}
 /// Control (text) messages are at most 128 KiB (section 4).
 pub const MAX_CONTROL_BYTES: usize = 131_072;
 /// Data is handed to the socket only while at most this much waits in it.
@@ -35,8 +52,9 @@ pub const SOCKET_LOW_WATER: usize = 65536;
 pub const CODE_LIFETIME: Duration = Duration::from_secs(15 * 60);
 /// Five failed confirmations burn a code.
 pub const CODE_ATTEMPTS: u32 = 5;
-/// The relay's budget for usage asks per network (section 4.3): this many at once...
-pub const USAGE_BURST: u32 = 3;
+/// The relay's budget for usage asks per network (section 4.3): this many at once (one: no
+/// burst)...
+pub const USAGE_BURST: u32 = 1;
 /// ...then one per this long.
 pub const USAGE_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -118,6 +136,19 @@ pub enum Event {
         reason: PairingFailure,
         message: String,
     },
+    /// The relay shapes the network differently: slowed (its quota spent), no longer slowed, or
+    /// at another rate. `Member::shaping` holds the latest.
+    Shaping(Shaping),
+}
+
+/// How the relay shapes this member's network (section 9), from its `shaping` notices.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Shaping {
+    /// The rate in force, bytes a second: the network's rate, or its trickle rate once its quota
+    /// is spent; 0 for none. Sends are paced to it.
+    pub rate_bps: u64,
+    /// The quota is spent and the trickle rate is in force: send less (drop video, keep audio).
+    pub slowed: bool,
 }
 
 /// Why a pairing attempt ended without a new member. `as_str` spells it as the driver protocol

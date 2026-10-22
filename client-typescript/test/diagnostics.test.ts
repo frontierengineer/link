@@ -168,11 +168,13 @@ test('R6 backlog: a small message that waited over 2 s is a finding; a large one
   assert.equal(r.findings.backlog.queuedMaxBytes, 10_000_000);
 });
 
-test('R7 usageAsks: the third ask in a burst is near the budget, a refusal is a finding', () => {
+test('R7 usageAsks: an ask within 12.5 s of the last is near the budget, a refusal is a finding', () => {
   const d = fake();
   d.h.event({ kind: 'usageAsk' });
+  d.advance(13_000);
   d.h.event({ kind: 'usageAsk' });
   assert.equal(d.report().counts.usageAsks, 0);
+  d.advance(12_000);
   d.h.event({ kind: 'usageAsk' });
   assert.equal(d.report().findings.usageAsks.nearBudget, 1);
   d.h.event({ kind: 'usageRefused' });
@@ -187,7 +189,7 @@ test('R7 usageAsks: the third ask in a burst is near the budget, a refusal is a 
   assert.equal(q.report().counts.usageAsks, 0);
 });
 
-test('R8 sentWhileSlowed: more than the trickle rate after a slowed answer; nothing once no longer slowed', () => {
+test('R8 sentWhileSlowed: more than the trickle rate once slowed (a usage answer or a shaping notice); nothing once no longer slowed', () => {
   const d = fake();
   d.h.event({ kind: 'usage', slowed: true, trickleBps: 16384 });
   d.h.send('p', new Uint8Array(10_000));
@@ -198,6 +200,14 @@ test('R8 sentWhileSlowed: more than the trickle rate after a slowed answer; noth
   d.h.send('p', new Uint8Array(100_000));
   assert.equal(d.report().counts.sentWhileSlowed, 1);
   assert.equal(d.report().findings.sentWhileSlowed.bytes, 20_000);
+  // Every member hears it from the relay's shaping notice too, with no usage ask.
+  const m = fake();
+  m.h.event({ kind: 'shaping', slowed: true, rateBps: 16384 });
+  m.h.send('p', new Uint8Array(20_000));
+  assert.equal(m.report().counts.sentWhileSlowed, 1);
+  m.h.event({ kind: 'shaping', slowed: false, rateBps: 0 });
+  m.h.send('p', new Uint8Array(100_000));
+  assert.equal(m.report().counts.sentWhileSlowed, 1);
 });
 
 test('R9 unreachableRetries: more than six a minute to one peer', () => {
@@ -356,11 +366,9 @@ test('real members: usage asks, an unreachable peer, and the credit self-check',
     enableDiagnostics(net.primary);
     enableDiagnostics(alice);
     await net.primary.usage();
-    await net.primary.usage();
-    await net.primary.usage();
     await assert.rejects(net.primary.usage(), { code: 'rate-limited' });
     const u = net.primary.diagnostics()!.findings.usageAsks;
-    assert.deepEqual([u.count, u.refused], [4, 1]);
+    assert.deepEqual([u.count, u.refused], [2, 1]);
     assert.ok(u.nearBudget >= 1);
 
     gone.close();

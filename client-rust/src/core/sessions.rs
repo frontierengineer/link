@@ -4,10 +4,12 @@
 //!
 //! Two lanes share the relay socket. Control (handshakes, refused, reset and session messages
 //! other than `message`) is encrypted and handed over at once. Message fragments wait in a gate
-//! until the socket is short, the session's un-credited bytes are within its pace, and credit
+//! until the socket is short, the session's un-credited bytes are within its window, credit
+//! allows, and, while the relay shapes the network (section 11, pacing), the connection's pace
 //! allows; only then is a fragment encrypted, in the same step that hands it to the socket.
 //! Wire order is therefore nonce order, and control can pass queued data without breaking
-//! Noise's implicit counter.
+//! Noise's implicit counter. Paced at the rate the relay reads, little lies in the socket in
+//! front of control, so control arrives quickly however much data waits.
 //!
 //! Credit and reassembly belong to one session, and a message is never split across two
 //! sessions: a rekey switches at a message boundary, and a retired session lives past its grace
@@ -36,8 +38,8 @@ use crate::frames::{
 };
 use crate::noise::{CipherState, HandshakeOptions, HandshakeState, IK, KeyPair, MAX_MESSAGE as MAX_NOISE, Transport};
 use crate::types::{
-    CREDIT_BATCH_BYTES, CREDIT_DELAY_MS, INITIAL_CREDIT, MAX_FRAGMENT, MAX_MESSAGE, MAX_PLAINTEXT, PACE_FLOOR_BYTES,
-    PACE_MIN_FRAGMENT,
+    CREDIT_BATCH_BYTES, CREDIT_DELAY_MS, FRAGMENT_FRAME_OVERHEAD, INITIAL_CREDIT, MAX_MESSAGE, MAX_PLAINTEXT,
+    PACE_FLOOR_BYTES, PACE_MIN_FRAGMENT, paced_fragment,
 };
 
 /// At most this many sessions with one peer live at once.
@@ -289,6 +291,11 @@ pub(crate) struct Sessions {
     pumping: bool,
     repump: bool,
     awaiting_drain: bool,
+    /// The rate in force from the relay's `shaping` notice (0: none), when the connection's next
+    /// fragment may go at its pace (monotonic microseconds), and whether the gate waits for it.
+    rate_bps: u64,
+    pace_due_us: u64,
+    awaiting_pace: bool,
     next_sweep: u64,
     sweep_period: u64,
     closed: bool,
@@ -343,6 +350,9 @@ impl Sessions {
             pumping: false,
             repump: false,
             awaiting_drain: false,
+            rate_bps: 0,
+            pace_due_us: 0,
+            awaiting_pace: false,
             next_sweep: now.saturating_add(sweep_period),
             sweep_period,
             closed: false,
@@ -1469,6 +1479,10 @@ pub(crate) fn poll(node: &mut Node, now: u64) {
     if node.sessions.hint_deferred && !node.sessions.closed && hint_due(node).is_none_or(|(due, _)| now >= due) {
         roster_hint(node, now);
     }
+    if node.sessions.awaiting_pace && now.saturating_mul(1000) >= node.sessions.pace_due_us {
+        node.sessions.awaiting_pace = false;
+        pump(node);
+    }
     on_drain(node);
 }
 
@@ -1494,6 +1508,9 @@ pub(crate) fn next_deadline(node: &Node) -> Option<u64> {
         && let Some((due, _)) = hint_due(node)
     {
         min(due);
+    }
+    if s.awaiting_pace && !s.closed {
+        min(s.pace_due_us.div_ceil(1000));
     }
     d
 }
@@ -1607,11 +1624,36 @@ fn finish_head(node: &mut Node, peer: &str, r: Result<(), LinkError>) {
     reply(m.done.take(), r);
 }
 
-/// Message bytes `s` may have un-credited: about a second and a half of what its receiver takes.
-fn pace(s: &mut Session, now: u64) -> u64 {
+/// Message bytes `s` may have un-credited, its window: about a second and a half of what its
+/// receiver takes; while shaped at `rate` bytes a second, about a second of it, and never more
+/// than half a second of the rate, so that members sending at once each keep about a second of
+/// their share behind their control (section 11).
+fn pace(s: &mut Session, now: u64, rate: u64) -> u64 {
     roll_rate(s, now);
     // A second's worth of credit: the larger of the last whole second and the one under way.
-    PACE_FLOOR_BYTES.max(s.rate_prev.max(s.rate_cur).saturating_mul(3) / 2)
+    let credited = s.rate_prev.max(s.rate_cur);
+    if rate > 0 {
+        return paced_fragment(rate).max(credited.min(rate / 2));
+    }
+    PACE_FLOOR_BYTES.max(credited.saturating_mul(3) / 2)
+}
+
+/// The rate the relay shapes the network at (section 9's `shaping`; 0: none). Fragments are
+/// paced to it from now on; what was handed over already is the relay's grace to read.
+pub(crate) fn set_rate(node: &mut Node, rate_bps: u64) {
+    if node.sessions.rate_bps == rate_bps {
+        return;
+    }
+    node.sessions.rate_bps = rate_bps;
+    if rate_bps == 0 {
+        node.sessions.awaiting_pace = false;
+    }
+    pump(node);
+}
+
+/// Microseconds a frame carrying `n` message bytes takes at 7/8 of `rate`.
+fn pace_cost_us(n: u64, rate: u64) -> u64 {
+    (n + FRAGMENT_FRAME_OVERHEAD).saturating_mul(8_000_000) / (7 * rate)
 }
 
 fn roll_rate(s: &mut Session, now: u64) {
@@ -1627,8 +1669,9 @@ fn roll_rate(s: &mut Session, now: u64) {
 }
 
 /// Hands waiting fragments to the socket, oldest first, skipping a session that is out of
-/// credit or over its pace (its next credit wakes it) so one slow receiver never holds up
-/// another. Stops while the socket is backed up, and resumes once it drains.
+/// credit or over its window (its next credit wakes it) so one slow receiver never holds up
+/// another. Stops while the socket is backed up, and resumes once it drains; and, while shaped,
+/// until the connection's pace allows the next fragment.
 fn pump(node: &mut Node) {
     if node.sessions.pumping {
         node.sessions.repump = true;
@@ -1668,12 +1711,18 @@ fn pump_pass(node: &mut Node) -> bool {
             node.sessions.gate.remove(i);
             continue;
         };
-        if (!empty && s.send_credit == 0) || s.inflight >= pace(s, now) {
+        let rate = node.sessions.rate_bps;
+        if (!empty && s.send_credit == 0) || s.inflight >= pace(s, now, rate) {
             i += 1;
             continue;
         }
         if !node.writable() {
             node.sessions.awaiting_drain = true;
+            stopped = true;
+            break;
+        }
+        if rate > 0 && now.saturating_mul(1000) < node.sessions.pace_due_us {
+            node.sessions.awaiting_pace = true;
             stopped = true;
             break;
         }
@@ -1702,11 +1751,14 @@ fn run_fragment(node: &mut Node, peer: &str, uid: u64, now: u64) -> Result<bool,
     let Some(s) = node.sessions.sessions.get_mut(&uid) else {
         return Err(LinkError::closed("the session ended"));
     };
-    // Never more than the room left under the pace (but not below PACE_MIN_FRAGMENT), so the
-    // socket holds about the pace and no more: on a slow link fragments shrink.
-    let room = PACE_MIN_FRAGMENT.max(pace(s, now).saturating_sub(s.inflight));
+    // Never more than the room left under the window (but not below the smallest fragment), so
+    // the socket holds about the window and no more: on a slow link fragments shrink, and control
+    // behind them waits a fraction of a second rather than a whole fragment.
+    let rate = node.sessions.rate_bps;
+    let largest = paced_fragment(rate);
+    let room = PACE_MIN_FRAGMENT.min(largest).max(pace(s, now, rate).saturating_sub(s.inflight));
     let remaining = (bytes.len() - off) as u64;
-    let n = remaining.min(MAX_FRAGMENT as u64).min(s.send_credit).min(room) as usize;
+    let n = remaining.min(largest).min(s.send_credit).min(room) as usize;
     let end = off + n;
     let more = end < bytes.len();
     let Some(chunk) = bytes.get(off..end) else {
@@ -1714,6 +1766,10 @@ fn run_fragment(node: &mut Node, peer: &str, uid: u64, now: u64) -> Result<bool,
     };
     if !transmit(node, uid, &SessionMessage::Message { more, bytes: chunk })? {
         return Err(LinkError::closed("not connected to the relay"));
+    }
+    if rate > 0 {
+        let due = node.sessions.pace_due_us.max(now.saturating_mul(1000));
+        node.sessions.pace_due_us = due.saturating_add(pace_cost_us(n as u64, rate));
     }
     if let Some(s) = node.sessions.sessions.get_mut(&uid) {
         s.send_credit -= n as u64;

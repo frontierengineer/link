@@ -38,7 +38,7 @@ type helloMsg struct {
 
 // serve runs from the upgrade: hello, then the reader.
 func (c *conn) serve() {
-	c.sendJSON(helloMsg{Type: "hello", Version: 1, Challenge: link.B64u.EncodeToString(c.challenge[:]), Features: []string{"control"}})
+	c.sendJSON(helloMsg{Type: "hello", Version: 1, Challenge: link.B64u.EncodeToString(c.challenge[:]), Features: []string{"control", "shaping"}})
 	c.nc.SetReadDeadline(time.Now().Add(c.s.cfg.HelloTimeout))
 	c.run()
 }

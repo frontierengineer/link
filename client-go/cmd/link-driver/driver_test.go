@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -295,6 +296,10 @@ func TestDriverAgainstTheRelay(t *testing.T) {
 	if u["network"].(map[string]any)["connections"] != float64(2) {
 		t.Fatalf("usage %v", u)
 	}
+	// The relay told each member its network is unshaped; state says so.
+	if sh := pr.ok("state", nil)["shaping"]; !reflect.DeepEqual(sh, map[string]any{"rateBps": float64(0), "slowed": false}) {
+		t.Fatalf("shaping %v", sh)
+	}
 	if r := wk.call("send", map[string]any{"peer": "nobody", "bytes": ""}); r["ok"] != false || r["error"].(map[string]any)["code"] != "invalid" {
 		t.Fatalf("bad send %v", r)
 	}
@@ -349,8 +354,10 @@ func TestDriverAgainstTheRelay(t *testing.T) {
 	})
 	pr.ok("send", map[string]any{"peer": wID, "bytes": base64.StdEncoding.EncodeToString([]byte("back"))})
 	wk.event("message", func(v map[string]any) bool { return v["bytes"] == base64.StdEncoding.EncodeToString([]byte("back")) })
-	if wk.ok("usage", nil)["network"].(map[string]any)["connections"] != float64(2) {
-		t.Fatal("usage of the new primary")
+	// The new primary's ask reaches the relay as the primary's: within 10 s of the last ask on
+	// the network, it is refused over the budget (one per 10 s), not as from a member.
+	if r := wk.call("usage", nil); r["error"].(map[string]any)["code"] != "rate-limited" {
+		t.Fatalf("usage of the new primary %v", r)
 	}
 
 	// Revocation reaches the member as a 4008, then its state: the new primary revokes the

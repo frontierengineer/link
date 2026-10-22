@@ -1,20 +1,31 @@
 // Flow control without a relay: real SessionManagers wired through an in-memory
 // socket whose back-pressure the test controls. Credit batching, the two send
 // lanes (control overtakes queued data and still decrypts in nonce order), the
-// per-session pace, and the WebSocketStream adapter.
+// per-session window, pacing to the rate the relay shapes at, and the
+// WebSocketStream adapter.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createIdentity, createNetwork, memberFromIdentity, networkKeyFromSeed, signRoster, type Identity, type Roster } from '../src/index.js';
 import { FrameType, type SessionMessage } from '../src/frames.js';
-import { CREDIT_BATCH_BYTES, DEFAULT_SESSION_TIMING, INITIAL_CREDIT, PACE_FLOOR_BYTES, PACE_MIN_FRAGMENT, SessionManager } from '../src/sessions.js';
+import {
+  CREDIT_BATCH_BYTES,
+  DEFAULT_SESSION_TIMING,
+  FRAGMENT_FRAME_OVERHEAD,
+  INITIAL_CREDIT,
+  PACE_FLOOR_BYTES,
+  PACE_MIN_FRAGMENT,
+  PACE_SHARE,
+  pacedFragment,
+  SessionManager,
+} from '../src/sessions.js';
 import { Channel, SOCKET_LOW_WATER, streamSocket, type WebSocketStreamLike } from '../src/socket.js';
 
 interface Node {
   id: string;
   mgr: SessionManager;
-  /** Frames handed to the socket, in order, by type. */
-  wire: { type: number; to: string; size: number }[];
+  /** Frames handed to the socket, in order, by type, and when. */
+  wire: { type: number; to: string; size: number; at: number }[];
   /** Messages delivered, with their release; `auto` releases at once. */
   inbox: { from: string; bytes: Uint8Array; release: () => void }[];
   auto: boolean;
@@ -54,7 +65,7 @@ function mesh(count: number): { nodes: Node[]; drain(n: Node): void } {
       creditWindow: INITIAL_CREDIT,
       timing: DEFAULT_SESSION_TIMING,
       sendFrame: (type, peer, body) => {
-        node.wire.push({ type, to: peer, size: 18 + body.length });
+        node.wire.push({ type, to: peer, size: 18 + body.length, at: Date.now() });
         node.buffered += 18 + body.length;
         node.queued += 18 + body.length;
         const to = byId.get(peer)!;
@@ -215,6 +226,59 @@ test('pace: a receiver that takes nothing holds its own session to the pace, and
     }, 5);
     await until(() => slow.inbox.length === 4, 'the slow peer, once it reads', 10_000);
     clearInterval(taker);
+  } finally {
+    clearInterval(keepDrained);
+    for (const n of nodes) n.mgr.close();
+  }
+});
+
+test('pacing: shaped at R, fragments are at most a quarter second of 7R/8 and go no faster, and control passes them at once', async () => {
+  const { nodes, drain } = mesh(2);
+  const [a, b] = nodes as [Node, Node];
+  const keepDrained = setInterval(() => drain(a), 1);
+  try {
+    const rate = 16384;
+    const largest = pacedFragment(rate);
+    assert.equal(largest, 3584);
+    // A first exchange, unpaced, so the session is up and the timing below is the pace alone.
+    await a.mgr.send(b.id, new Uint8Array(10));
+    a.mgr.setRate(rate);
+    const from = a.wire.length;
+    const began = Date.now();
+    void a.mgr.send(b.id, new Uint8Array(200_000)).catch(() => undefined);
+    await tick(1500);
+    const control = a.wire.length;
+    await a.mgr.sendControl(b.id, { type: 'roster-request' });
+    assert.equal(a.wire[control]?.type, FrameType.Control, 'control goes at once, ahead of the fragments waiting');
+    const data = a.wire.slice(from).filter((f) => f.type === FrameType.Data);
+    for (const f of data) assert.ok(f.size <= largest + FRAGMENT_FRAME_OVERHEAD, `a ${f.size}-byte frame`);
+    // The first goes at once, each next one a frame's size at 7R/8 after the last.
+    const elapsed = data.at(-1)!.at - began;
+    const paced = data.slice(0, -1).reduce((n, f) => n + f.size, 0);
+    assert.ok(paced <= PACE_SHARE * rate * (elapsed / 1000) + 1, `${paced} bytes in ${elapsed} ms`);
+    assert.ok(data.length >= 4 && data.length <= 8, `${data.length} fragments in 1.5 s`);
+    // Unshaped again: the rest goes at once.
+    a.mgr.setRate(0);
+    await until(() => b.inbox.length === 2, 'the rest, unpaced');
+  } finally {
+    clearInterval(keepDrained);
+    for (const n of nodes) n.mgr.close();
+  }
+});
+
+test('pacing: shaped, a session whose receiver takes nothing keeps about one fragment un-credited, not the 64 KiB floor', async () => {
+  const { nodes, drain } = mesh(2);
+  const [a, slow] = nodes as [Node, Node];
+  slow.auto = false;
+  const keepDrained = setInterval(() => drain(a), 1);
+  try {
+    const rate = 16384;
+    a.mgr.setRate(rate);
+    for (let i = 0; i < 20; i++) void a.mgr.send(slow.id, new Uint8Array(5_000)).catch(() => undefined);
+    await tick(1500);
+    // Nothing is credited back, so the window is max(F, min(0, R/2)) = F: at most one message past it.
+    const { inflight } = a.mgr.sessionInfo(slow.id)[0]!;
+    assert.ok(inflight >= pacedFragment(rate) && inflight < pacedFragment(rate) + 5_000, `${inflight} un-credited`);
   } finally {
     clearInterval(keepDrained);
     for (const n of nodes) n.mgr.close();

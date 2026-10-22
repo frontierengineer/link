@@ -21,7 +21,8 @@ Playwright's Chromium at the version `package.json` pins (`npx playwright instal
 - `sessions.test.ts` — several-MiB messages, credit flow control, rekeying on a timer and a
   count, reset after a peer loses its state, responder expiry, unreachable peers, 4005.
 - `membership.test.ts` — revocation (4008), resignation, refusal by a member whose roster is
-  behind, the relay forgetting an idle network, usage, the quota and its trickle rate.
+  behind, the relay forgetting an idle network, usage, the quota and its trickle rate, and the
+  shaping notice that tells every member of it.
 - `browser.test.ts` — the client bundled for the browser with esbuild and loaded into headless
   Chromium, where a node pairs with a Node primary, exchanges small and several-MiB
   messages with it and with another Node member, receives a roster push, and is revoked.
@@ -30,6 +31,12 @@ Playwright's Chromium at the version `package.json` pins (`npx playwright instal
   it the test is skipped and says why, except with `LINK_REQUIRE_PORT_443=1`, as in CI.
 - `limits.test.ts` — shaping with `LINK_RATE_BPS`, liveness pings, the 65000-byte roster limit,
   the 1 MiB control message limit, control messages a member may not send.
+- `shaping.test.ts` — control is never slowed, with each implementation as the primary: at a
+  16 KB/s trickle, with the primary sending or receiving 6 MiB (with and without a 4 MiB
+  `LINK_QUEUE_BYTES`) and with two members sending 6 MiB each at once, usage asks and roster
+  syncs are answered within 2 s and a second ask within 10 s is refused `rate_limited` at once;
+  every member is told the trickle within 2 s of the quota being spent, and its lifting within
+  2 s of a limits reload.
 - `interop.test.ts` — the clients against one another, each node a **driver** of its
   implementation (below): pairing by link and by code fields; wrong, burned, expired and
   cancelled codes; small and several-MiB messages both ways (sha256); flow control with a

@@ -57,6 +57,7 @@ func TestTLS(t *testing.T) {
 	if m := c.json(); m["type"] != "registered" {
 		t.Fatalf("got %v", m)
 	}
+	c.shapingNotice()
 	c.send(map[string]any{"type": "usage", "id": "tls"})
 	var u map[string]any
 	_, b, err := c.next(5 * time.Second)

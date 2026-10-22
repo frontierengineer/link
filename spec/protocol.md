@@ -146,11 +146,12 @@ node ignores such a message from the relay. Binary frames carry routed frames (s
 
 ### 4.1 Registration
 
-1. Relay → node: `{"type":"hello","version":1,"challenge":"<b64u 32 bytes>","features":["control"]}`
+1. Relay → node: `{"type":"hello","version":1,"challenge":"<b64u 32 bytes>","features":["control","shaping"]}`
 
    `features` lists optional behaviours the relay supports; a node ignores names it does not
    know, and treats a missing `features` as empty. `control`: the relay accepts routed frames of
-   type `0x08` (section 6).
+   type `0x08` (section 6). `shaping`: the relay tells its members the rate their network is
+   shaped at with `shaping` messages (section 9).
 2. Node → relay:
    ```json
    {"type":"register","network":"<id>","node":"<id>","ed25519":"<b64u>",
@@ -172,7 +173,8 @@ node ignores such a message from the relay. Binary frames carry routed frames (s
       holds for the network. A presented roster newer than the relay's replaces it (it is signed
       with the network key, so any member may deliver it);
    7. `node` is a member of the effective roster (`4008`).
-4. Relay → node: `{"type":"registered","node":"<id>","rosterVersion":12}`. When the relay held a
+4. Relay → node: `{"type":"registered","node":"<id>","rosterVersion":12}`, followed at once by
+   `shaping` (section 9) from a relay that lists that feature. When the relay held a
    newer roster than the node presented, it adds `"roster":{ ... }` with that newer roster, and
    the node applies the acceptance rules of section 3, before it counts itself registered. A
    member that was offline while the roster changed is therefore brought up to date at
@@ -225,7 +227,9 @@ copy wins and nothing is sent back.
 
 ### 4.3 Usage
 
-Usage is request-only: the relay never pushes it.
+Usage is request-only: the relay never pushes these figures. What a member needs to know at
+once, whether its network is slowed and the rate it is shaped at, the relay pushes as `shaping`
+(section 9), so no one polls usage for it.
 
 - The primary may send `{"type":"usage","id":"<request id>"}`. The relay answers:
   ```json
@@ -238,8 +242,11 @@ Usage is request-only: the relay never pushes it.
   steps. `connections` counts its connected members. A `quotaBytesHour` of `0` means no quota,
   and `quotaUsed` is then `0`. Each member counts its own traffic; the relay keeps no
   per-member figures.
-- Asks are limited per network: 3 at once, then one every 10 seconds. An ask beyond that is
-  refused, not queued: `{"type":"error","code":"rate_limited","id":"<request id>"}`.
+- Asks are limited per network: one every 10 seconds, with no burst. An ask within 10 seconds
+  of the last one the relay took is refused at once, not queued:
+  `{"type":"error","code":"rate_limited","id":"<request id>"}`. The limit is what keeps anyone
+  from hammering the relay; an ask within it is answered at once (section 9), however busy the
+  network.
 - A `usage` request from a node that is not the primary (section 4.2) is answered
   `{"type":"error","code":"forbidden","id":"<request id>"}`.
 - Asks, answers and refusals are charged to the network like any other traffic (section 9).
@@ -675,7 +682,23 @@ A self-hosted relay defaults every limit to off; the values below are the public
 - **Shaping.** When a network is over its rate, the relay holds back the connection that
   sends next: it reads the header of its next data frame and does not read that frame's body,
   or anything behind it, until the network's bucket allows (one second of burst). A network
-  over its quota is shaped at `LINK_TRICKLE_BPS`. Frames are never dropped.
+  over its quota is shaped at `LINK_TRICKLE_BPS`. Frames are never dropped. The **rate in
+  force** is `LINK_RATE_BPS` (`0`: none), or `LINK_TRICKLE_BPS` once the quota is spent.
+- **The shaping notice.** `{"type":"shaping","rateBps":16384,"slowed":true}`: `rateBps` is the
+  rate in force, `0` for none; `slowed` is whether the trickle rate is in force (as `usage`
+  says). The relay sends it to a member right after `registered`, and to every connected member
+  of the network as soon as either value changes: the charge that spends the quota, the
+  trickle lifting (the last hour's charges below the quota again, which the relay looks for
+  at least once a second while a network is slowed, with or without traffic), and a reload of
+  the limits (`LINK_LIMITS_FILE`) that changes them. Notices go out in the order the changes
+  happened. A notice is not charged. A member keeps to it (section 11), and a node ignores
+  fields it does not know.
+- **Grace.** When the quota is spent, the trickle is announced at once, but the relay goes on
+  shaping the network at `LINK_RATE_BPS` (or not at all, without one) for one second more:
+  what members had handed their connections before the notice reached them is read then,
+  rather than at the trickle rate in front of their control. A grace begins only when the
+  network becomes slowed, which its hour's window allows at most once per five-minute step,
+  and at a reload; every byte is charged as ever.
 - **Control ahead of shaping.** Text control messages, WebSocket pings and pongs, and routed
   frames of types `0x01`, `0x02`, `0x05`, `0x06`, `0x07` and `0x08`, each sent as one
   unfragmented WebSocket frame, are read at once while the sending member's own control budget
@@ -692,13 +715,26 @@ A self-hosted relay defaults every limit to off; the values below are the public
   the network's rate or quota in `0x08` frames. At half of it, control read ahead moves no more
   than half the rate in force over time, beyond its burst (512 KiB, or a second of the ceiling
   if more): a one-off allowance that then refills at half the rate. No one member's burst
-  empties the ceiling.
-- **Back-pressure.** A sender that hands a frame to a recipient whose queue in the relay then
-  holds more than `LINK_QUEUE_BYTES` (0: anything at all) stops being read until that queue
-  drains. With the default, each sender has at most one frame waiting for a recipient, the
-  relay holds no other buffer, and everything else is TCP's own flow control: the relay stops
-  reading, and the sender's kernel stops sending. A connection's own answers (`error`, `usage`,
-  `unreachable`) pause its reading beyond 65536 bytes queued.
+  empties the ceiling. This lets control past held data only when it is the next frame on its
+  connection: one stream is read in order, so data a member has already sent, in its socket
+  and the relay's, is read at the rate in force before anything behind it. A member therefore
+  keeps its data in its own queue and paces it to the rate in force (section 11).
+- **The relay's own messages first.** What the relay writes to a member goes in two lanes. The
+  relay's own messages (`hello`, `registered`, `shaping`, `error`, `usage` and, on a pairing
+  channel, `pairing`, `pairEnd` and the `pair` frames it forwards) are written ahead of the
+  routed frames queued for that member, and WebSocket pings and pongs ahead of both. Each lane
+  keeps its order, so routed frames stay in order and a channel's `pairing`, `pair` frames and
+  `pairEnd` stay in theirs; `unreachable` goes with routed frames; a frame begun is finished
+  first. The relay also keeps what its kernel holds unsent for a connection small (64 KiB,
+  through `TCP_NOTSENT_LOWAT` where the system has it), so an answer waits behind at most
+  that, the frame being written and what is in flight, never behind the routed frames queued
+  for a member, whatever `LINK_QUEUE_BYTES` lets the relay hold.
+- **Back-pressure.** A sender that hands a frame to a recipient whose queue in the relay (both
+  lanes) then holds more than `LINK_QUEUE_BYTES` (0: anything at all) stops being read until
+  that queue drains. With the default, each sender has at most one frame waiting for a
+  recipient, the relay holds no other buffer, and everything else is TCP's own flow control:
+  the relay stops reading, and the sender's kernel stops sending. A connection's own answers
+  (`error`, `usage`, `unreachable`) pause its reading beyond 65536 bytes queued.
 - **Liveness.** The relay sends a WebSocket ping every 30 seconds and drops a connection that
   has not answered by the next one. A connection the relay is currently pausing is exempt, since
   its answer may be stuck behind frames held back. A node's own pings are answered with one pong
@@ -753,8 +789,37 @@ A self-hosted relay defaults every limit to off; the values below are the public
 - **Relay errors.** `error` messages from the relay reach the application at most 16 a second
   with a burst of 64; the rest are dropped. A relay's messages never raise an event each without
   a bound.
+- **Shaping.** A client holds the last `shaping` its relay sent (section 9), as a property an
+  application can read at any time, and raises an event when it changes, so an application
+  never polls usage to learn its network is slowed. Before any notice, and on a connection to
+  a relay whose `hello` does not list `shaping`, it is `rateBps` 0 and not slowed. A notice
+  whose `rateBps` is not a non-negative integer, or whose `slowed` is not a boolean, is ignored.
+- **Pacing.** A client keeps message fragments in its own queue (section 7.3), and hands each
+  to its connection only when that keeps little in its socket in front of whatever follows, so
+  that control, which it hands over at once, ahead of queued fragments, arrives within about a
+  second however busy the network. With `R` the `rateBps` in force:
+  - `R` = 0: fragments go when the socket holds at most 64 KiB, each of at most 65517 bytes but
+    never more than the room under the session's window, at least 16384 bytes, and a session
+    has at most the larger of 65536 bytes and one and a half times `C` un-credited, `C` the
+    credit returned on it over the last second (the larger of the last whole second and the
+    one under way).
+  - `R` > 0: the socket rule as above, and the connection's fragments, together, go at most at
+    `7R/8` bytes a second, each counted at its frame's size (40 bytes more than its message
+    bytes), with no burst: a fragment goes no sooner than the last one's size after the last
+    one at that pace. A fragment carries at most `F` = max(1024, min(65517, ⌊7R/32⌋)) message
+    bytes, a quarter of a second of the pace, and at least min(16384, `F`), and a session has
+    at most max(`F`, min(`C`, ⌊R/2⌋)) message bytes un-credited. The eighth of `R` left over is
+    for the frames that are not fragments (credit, handshakes, the peer's own) and WebSocket
+    headers.
+  A member sending alone is then read as fast as it sends, and its control waits behind about
+  one fragment. Members sending at once share the rate: each is read at about its share `S`
+  and keeps about a second of `S` un-credited, of which a quarter of a second is the credit
+  on its way back, so control waits about 0.75 s behind its own data with two to four members
+  sending at once; with more, at least one fragment of each is ahead, about `7N/32 − 1/4` s for
+  `N` members. A notice that lowers `R` applies at once to what has not yet been handed over;
+  what was handed over before it is what the relay's grace reads.
 - **Send buffer.** A client holds at most 64 MiB (67108864 bytes) handed to its connection and
-  not yet sent. Message fragments wait in the client's own queue (section 7.3), but control
+  not yet sent. Message fragments wait in the client's own queue (pacing, above), but control
   (handshakes, `credit`, `reset`, rosters, control messages) is handed over at once; a send that
   would pass the bound drops the connection, which reconnects as after any close, rather than
   growing behind a relay that has stopped reading. The bound is set by the largest honest

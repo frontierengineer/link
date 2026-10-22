@@ -1,6 +1,7 @@
 // Flow end to end, the client against the real relay: control is not stuck behind a sender's
-// own data under shaping (the client keeps its socket short), usage asks are budgeted, credit
-// is batched, and library traffic trips none of the diagnostics.
+// own data under shaping (the client paces its data to the rate the relay announces and keeps
+// its socket short), usage asks are budgeted, credit is batched, and library traffic trips
+// none of the diagnostics.
 
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,7 +17,8 @@ before(() => {
 test('a sender that floods a shaped network still has its usage ask answered within seconds', async () => {
   // 64 KiB/s for the whole network. The primary queues 4 MiB of messages; before the client
   // kept its socket short, up to a 1 MiB credit window sat ahead of the ask: 16 s at this rate.
-  // Now about 1.5 s of what the receiver takes (a little more just after the relay's burst).
+  // Paced to the rate the relay announces, the relay reads it as it arrives: the ask waits
+  // behind about one fragment.
   const net = await startNet({ env: { LINK_RATE_BPS: '65536' }, member: { timing: { ...FAST, requestTimeoutMs: 10_000 } } });
   try {
     const alice = await net.add();
@@ -26,7 +28,7 @@ test('a sender that floods a shaped network still has its usage ask answered wit
     const began = Date.now();
     const u = await net.primary.usage();
     const took = Date.now() - began;
-    assert.ok(took < 3500, `usage answered after ${took} ms`);
+    assert.ok(took < 1000, `usage answered after ${took} ms`);
     assert.equal(u.network.limits.rateBps, 65536);
     // The socket stayed short: what was handed over is what the network carried in those
     // seconds plus about two seconds of pace, never the 4 MiB queued or the 1 MiB window.
@@ -39,7 +41,7 @@ test('a sender that floods a shaped network still has its usage ask answered wit
   }
 });
 
-test('usage asks: three at once, then refused with RateLimitedError until the budget refills', async () => {
+test('usage asks: one per 10 s with no burst; a second at once is refused with RateLimitedError', async () => {
   const net = await startNet();
   try {
     for (let i = 0; i < USAGE_BURST; i++) await net.primary.usage();

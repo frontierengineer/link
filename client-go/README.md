@@ -94,9 +94,15 @@ connecting and returns at once):
 - Events (`On(listener)` returns a remove function; listeners run one at a time, in order, on
   a goroutine of the member's; `Settle()` waits until those raised so far are delivered):
   `StateEvent` (`connecting`, `connected`, `disconnected`, `revoked`, `replaced`, `closed`),
-  `RosterEvent`, `DisconnectEvent` (`Code`, `Reason`), `MovedEvent` (4009), `RelayErrorEvent`.
-  Every close is reported before the state it leads to, the member's own (`Close`, a roster
-  without it) included.
+  `RosterEvent`, `DisconnectEvent` (`Code`, `Reason`), `MovedEvent` (4009), `RelayErrorEvent`,
+  `ShapingEvent` (`Shaping`, below). Every close is reported before the state it leads to, the
+  member's own (`Close`, a roster without it) included.
+- `Shaping()` is how the relay shapes the network now, from its last `shaping` notice (section
+  9): `{RateBps, Slowed}` (JSON `rateBps`, `slowed`), the rate in force (0: none; the trickle
+  rate once the quota is spent) and whether the network is slowed. It is `{0, false}` before any
+  notice and on a relay whose `hello` does not list `shaping`. A `ShapingEvent` is raised when it
+  changes (the quota spent, the trickle lifted, the limits reloaded), so an application never
+  polls `Usage` to know it is slowed.
 - `SyncRoster(ctx)` asks the primary for its newest roster. `Resign(ctx)` leaves the network;
   it fails `invalid` on the primary and on any node holding the network seed.
   Rosters also spread member to member: when a handshake shows a peer holds a newer roster,
@@ -124,8 +130,9 @@ fail `invalid` on a member that is not the primary now:
 `{Code, CodeID, Link, ExpiresAt}` (`Code` chooses the code instead of a random one),
 `CancelPairingCode(codeID)`, `Revoke(nodeID)` returning the new roster, and `Usage(ctx)`, which
 asks the relay (request-only) for `{Network: {BytesHour, Connections, Limits, QuotaUsed, Slowed}}`;
-beyond the relay's budget (`UsageBurst` at once, then one per `UsageInterval`) it fails
-`rate-limited`. When no further member fits under the roster limit, `OpenPairingCode` fails
+the relay allows one ask per `UsageInterval` (10 s) per network, with no burst (`UsageBurst`
+is 1), and refuses one sooner at once: it fails `rate-limited`. Whether the network is slowed is
+`Shaping()`, which needs no ask. When no further member fits under the roster limit, `OpenPairingCode` fails
 `roster-full`, and a code opened earlier fails its pairing with a `PairingFailedEvent`. Extra
 events: `PairedEvent` (`Member`, `CodeID`: the code it paired with, `Roster`), `PairingFailedEvent` (its `Code` one of the `Fail*` constants:
 `wrong-code`, `malformed`, `unknown-code`, `used`, `no-attempts`, `newcomer-left`, `timeout`,
@@ -182,8 +189,14 @@ answers (or the directory cannot be fetched) and `invalid` on a directory it can
   messages, relay control) is handed to the socket at once. Message fragments wait in the
   client's own queue and are encrypted only when handed over, which happens while at most
   64 KiB waits in the socket's queue and while the session's un-credited bytes are under its
-  pace (the larger of 64 KiB and one and a half times what the receiver credited back over the
+  window (the larger of 64 KiB and one and a half times what the receiver credited back over the
   last second). Wire order is still nonce order.
+- **Pacing (section 11).** While the relay's `shaping` gives a rate R, fragments go at most at
+  7/8 of R over the whole connection (each counted at its frame's size), carry at most a quarter
+  of a second of that (at least 1 KiB), and a session keeps at most the larger of one fragment
+  and the lesser of what was credited back over the last second and R/2 un-credited. Little then
+  lies in the socket in front of control, so usage asks, roster sync and other control arrive in
+  well under a second even while the network is trickled and the member sends in bulk.
 - To a relay whose `hello` lists `control`, session messages other than application messages go
   as frame type `0x08`.
 - A message is never split across sessions: a rekey switches at a message boundary, and a

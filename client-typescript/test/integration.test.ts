@@ -401,6 +401,56 @@ test('reconnect with backoff after a drop; 4009 members moved and re-resolves th
   }
 });
 
+test("shaping: a member holds the relay's last notice, raises an event on each change, and ignores malformed ones", async () => {
+  const net = await startNetwork({ relay: { features: ['control', 'shaping'] } });
+  try {
+    const alice = await net.add();
+    const seen: { rateBps: number; slowed: boolean }[] = [];
+    alice.on('shaping', (s) => seen.push(s));
+    assert.deepEqual(alice.shaping, { rateBps: 0, slowed: false }, 'unshaped before any notice');
+    net.relay.shape(net.primary.network, { rateBps: 1_048_576, slowed: false });
+    await until(() => seen.length === 1, 'the rate');
+    net.relay.shape(net.primary.network, { rateBps: 16384, slowed: true });
+    await until(() => seen.length === 2, 'the trickle');
+    assert.deepEqual(alice.shaping, { rateBps: 16384, slowed: true });
+    assert.deepEqual(net.primary.shaping, { rateBps: 16384, slowed: true });
+    // The same again changes nothing; malformed notices are ignored.
+    net.relay.shape(net.primary.network, { rateBps: 16384, slowed: true });
+    net.relay.shape(net.primary.network, { rateBps: -1, slowed: false });
+    net.relay.shape(net.primary.network, { rateBps: 1.5, slowed: false });
+    net.relay.shape(net.primary.network, { rateBps: 5, slowed: 'no' });
+    net.relay.shape(net.primary.network, { raw: '{"type":"shaping","rateBps":1e2,"slowed":false}' });
+    net.relay.shape(net.primary.network, { rateBps: 0, slowed: false });
+    await until(() => seen.length === 3, 'the lift');
+    assert.deepEqual(seen, [
+      { rateBps: 1_048_576, slowed: false },
+      { rateBps: 16384, slowed: true },
+      { rateBps: 0, slowed: false },
+    ]);
+    // Messages still flow, paced or not.
+    net.relay.shape(net.primary.network, { rateBps: 1_000_000, slowed: false });
+    const pIn = inbox(net.primary);
+    await alice.send(net.primary.id, new Uint8Array(300_000));
+    assert.equal((await pIn.next())[0]!.bytes.length, 300_000);
+  } finally {
+    await net.close();
+  }
+});
+
+test('shaping: a relay without the feature leaves a member unshaped, whatever it held before', async () => {
+  const net = await startNetwork({ relay: { features: ['control'] } });
+  try {
+    const alice = await net.add();
+    net.relay.shape(net.primary.network, { rateBps: 16384, slowed: true });
+    await until(() => alice.shaping.slowed, 'a notice from a relay that never says it sends them');
+    net.relay.closeNode(net.primary.network, alice.id, 1001);
+    await until(() => alice.state === 'connected' && !alice.shaping.slowed, 'unshaped at the next registration');
+    assert.deepEqual(alice.shaping, { rateBps: 0, slowed: false });
+  } finally {
+    await net.close();
+  }
+});
+
 test('usage: the primary asks, the relay answers network totals, and refuses asks over its budget', async () => {
   const net = await startNetwork();
   try {
@@ -410,9 +460,7 @@ test('usage: the primary asks, the relay answers network totals, and refuses ask
     assert.equal(u.network.connections, 2);
     assert.ok(u.network.bytesHour > 0);
     assert.deepEqual(Object.keys(u), ['network']);
-    // Three at once are within the budget (the first above was one); the fourth is refused.
-    await net.primary.usage();
-    await net.primary.usage();
+    // One per 10 s with no burst: a second ask at once is refused.
     await assert.rejects(net.primary.usage(), (e: unknown) => e instanceof RateLimitedError && e.code === 'rate-limited');
     // A member that is not the primary is forbidden.
     const errors: { code: string; id?: string }[] = [];

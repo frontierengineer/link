@@ -79,6 +79,7 @@ func TestNewPrimaryDemotesTheFormerInPlace(t *testing.T) {
 	}
 	n2.json()
 	n2.expectClose(1000)
+	h.s.refillUsage()
 	pc.send(map[string]any{"type": "usage", "id": "u3"})
 	if m := pc.json(); m["type"] != "usage" {
 		t.Fatalf("p's usage once named again: %v", m)
@@ -97,10 +98,12 @@ func TestNewPrimaryDemotesTheFormerInPlace(t *testing.T) {
 	if m := yc.json(); m["type"] != "registered" || m["rosterVersion"] != float64(4) {
 		t.Fatalf("y got %v", m)
 	}
+	yc.shapingNotice()
 	pc.send(map[string]any{"type": "usage", "id": "u5"})
 	if m := pc.json(); m["code"] != "forbidden" {
 		t.Fatalf("p's usage after the registration's roster: %v", m)
 	}
+	h.s.refillUsage()
 	xc.send(map[string]any{"type": "usage", "id": "u6"})
 	if m := xc.json(); m["type"] != "usage" {
 		t.Fatalf("x's usage: %v", m)

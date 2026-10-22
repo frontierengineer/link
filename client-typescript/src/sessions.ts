@@ -5,10 +5,13 @@
 // Two lanes share the relay socket. Control (handshakes, refused, reset and
 // session messages other than `message`) is encrypted and handed over at once.
 // Message fragments wait in a gate until the socket is short, the session's
-// un-credited bytes are within its pace, and credit allows; only then is a
-// fragment encrypted, in the same synchronous step that hands it to the socket.
-// Wire order is therefore nonce order, and control can pass queued data without
-// breaking Noise's implicit counter.
+// un-credited bytes are within its window, credit allows, and, while the relay
+// shapes the network (section 11, pacing), the connection's pace allows; only
+// then is a fragment encrypted, in the same synchronous step that hands it to the
+// socket. Wire order is therefore nonce order, and control can pass queued data
+// without breaking Noise's implicit counter. Paced at the rate the relay reads,
+// little lies in the socket in front of control, so control arrives quickly
+// however much data waits.
 //
 // Credit and reassembly belong to one Noise session, and a message is never
 // split across two sessions: a rekey switches at a message boundary, and a
@@ -72,6 +75,20 @@ export const CREDIT_DELAY_MS = 250;
 export const PACE_FLOOR_BYTES = 65536;
 /** The smallest fragment the pace cuts a message into. */
 export const PACE_MIN_FRAGMENT = 16384;
+/** While the relay shapes the network at R bytes a second (its `shaping` notice), fragments go
+ * at most at 7/8 of R, each counted at its frame's size: the eighth left is for credit,
+ * handshakes, the peers' own frames and WebSocket headers (section 11). */
+export const PACE_SHARE = 7 / 8;
+/** What a frame carrying a fragment adds to its message bytes: the routed header, the receiver
+ * index, the session message's two bytes and the tag. */
+export const FRAGMENT_FRAME_OVERHEAD = 40;
+/** A paced fragment carries at most a quarter of a second of the pace, and at least this. */
+export const PACED_MIN_FRAGMENT = 1024;
+
+/** The largest fragment at rate `rateBps` (0: unshaped). */
+export function pacedFragment(rateBps: number): number {
+  return rateBps > 0 ? Math.max(PACED_MIN_FRAGMENT, Math.min(MAX_FRAGMENT, Math.floor((7 * rateBps) / 32))) : MAX_FRAGMENT;
+}
 
 // What one peer may leave here (section 7.3). A session that would take its peer beyond
 // either bound ends; the message is lost, as delivery is at most once.
@@ -336,6 +353,11 @@ export class SessionManager {
   private pumping = false;
   private repump = false;
   private awaitingSocket = false;
+  /** The rate in force from the relay's `shaping` notice (0: none), and when the connection's
+   * next fragment may go at its pace. */
+  private rateBps = 0;
+  private paceDue = 0;
+  private paceTimer: ReturnType<typeof setTimeout> | undefined;
   /** Resets sent lately, by peer and index. */
   private recentResets = new Map<string, number>();
   /** Ids off the roster, least recently used first, and the ceiling on all their inits. */
@@ -452,7 +474,20 @@ export class SessionManager {
     this.closed = true;
     clearInterval(this.sweepTimer);
     clearTimeout(this.rosterHintTimer);
+    clearTimeout(this.paceTimer);
     this.dropAll(new ClosedError());
+  }
+
+  /** The rate the relay shapes the network at (section 9's `shaping`; 0: none). Fragments are
+   * paced to it from now on; what was handed over already is the relay's grace to read. */
+  setRate(rateBps: number): void {
+    if (rateBps === this.rateBps) return;
+    this.rateBps = rateBps;
+    if (rateBps === 0) {
+      clearTimeout(this.paceTimer);
+      this.paceTimer = undefined;
+    }
+    this.pump();
   }
 
   /** For tests and diagnostics: live sessions with a peer. */
@@ -1036,14 +1071,20 @@ export class SessionManager {
             empty: bytes.length === 0,
             fail: reject,
             run: () => {
-              // Never more than the room left under the pace (but not below PACE_MIN_FRAGMENT), so
-              // the socket holds about the pace and no more: on a slow link fragments shrink, and
-              // control behind them waits a fraction of a second rather than a whole fragment.
-              const room = Math.max(PACE_MIN_FRAGMENT, this.pace(s) - s.inflight);
-              const n = Math.min(bytes.length - off, MAX_FRAGMENT, Math.max(s.sendCredit, 0), room);
+              // Never more than the room left under the window (but not below the smallest
+              // fragment), so the socket holds about the window and no more: on a slow link
+              // fragments shrink, and control behind them waits a fraction of a second rather
+              // than a whole fragment.
+              const largest = pacedFragment(this.rateBps);
+              const room = Math.max(Math.min(PACE_MIN_FRAGMENT, largest), this.pace(s) - s.inflight);
+              const n = Math.min(bytes.length - off, largest, Math.max(s.sendCredit, 0), room);
               const more = off + n < bytes.length;
               if (!this.transmit(s, { type: 'message', more, bytes: bytes.subarray(off, off + n) })) {
                 throw s.endError ?? new ClosedError('not connected to the relay');
+              }
+              if (this.rateBps > 0) {
+                const now = this.h.now();
+                this.paceDue = Math.max(this.paceDue, now) + ((n + FRAGMENT_FRAME_OVERHEAD) * 1000) / (PACE_SHARE * this.rateBps);
               }
               s.sendCredit -= n;
               s.inflight += n;
@@ -1061,14 +1102,19 @@ export class SessionManager {
     }
   }
 
-  /** Message bytes `s` may have un-credited: about a second and a half of what its receiver takes. */
+  /** Message bytes `s` may have un-credited, its window: about a second and a half of what its
+   * receiver takes; while shaped, about a second of it, and never more than half a second of
+   * the rate, so that members sending at once each keep about a second of their share behind
+   * their control (section 11). */
   private pace(s: Session): number {
     const now = this.h.now();
     this.rollRate(s, now);
     // A second's worth of credit: the larger of the last whole second and the one under way.
     // (Not their interpolated sum: credit comes in lumps, and a lump early in the second under
     // way would count a second twice.)
-    return Math.max(PACE_FLOOR_BYTES, Math.floor(1.5 * Math.max(s.ratePrev, s.rateCur)));
+    const credited = Math.max(s.ratePrev, s.rateCur);
+    if (this.rateBps > 0) return Math.max(pacedFragment(this.rateBps), Math.min(credited, Math.floor(this.rateBps / 2)));
+    return Math.max(PACE_FLOOR_BYTES, Math.floor(1.5 * credited));
   }
 
   private rollRate(s: Session, now: number): void {
@@ -1086,8 +1132,9 @@ export class SessionManager {
 
   /**
    * Hands waiting fragments to the socket, oldest first, skipping a session that is out of
-   * credit or over its pace (it is woken by its next credit) so one slow receiver never holds
-   * up another. Stops while the socket is backed up, and resumes once it drains.
+   * credit or over its window (it is woken by its next credit) so one slow receiver never holds
+   * up another. Stops while the socket is backed up, and resumes once it drains; and, while
+   * shaped, until the connection's pace allows the next fragment.
    */
   private pump(): void {
     if (this.pumping) {
@@ -1127,6 +1174,19 @@ export class SessionManager {
           });
         }
         return;
+      }
+      if (this.rateBps > 0) {
+        const wait = this.paceDue - this.h.now();
+        if (wait > 0) {
+          if (this.paceTimer === undefined) {
+            this.paceTimer = setTimeout(() => {
+              this.paceTimer = undefined;
+              this.pump();
+            }, Math.ceil(wait));
+            (this.paceTimer as { unref?: () => void }).unref?.();
+          }
+          return;
+        }
       }
       this.gate.splice(i, 1);
       try {

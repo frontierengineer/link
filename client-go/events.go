@@ -7,9 +7,9 @@ import (
 )
 
 // Event is something a member raises: StateEvent, RosterEvent, DisconnectEvent, MovedEvent,
-// RelayErrorEvent, and for a primary PairedEvent and PairingFailedEvent. Listeners run one
-// at a time, in the order the events happened, on a goroutine of the member's; a listener
-// may call any method of the member.
+// RelayErrorEvent, ShapingEvent, and for a primary PairedEvent and PairingFailedEvent.
+// Listeners run one at a time, in the order the events happened, on a goroutine of the
+// member's; a listener may call any method of the member.
 type Event interface{ isEvent() }
 
 // StateEvent: the member's state changed.
@@ -33,6 +33,10 @@ type RelayErrorEvent struct {
 	Message string // empty when the relay sent none
 	ID      string // the request it answers, if any
 }
+
+// ShapingEvent: the relay shapes the network differently (section 9): slowed (its quota
+// spent), no longer slowed, or at another rate. Member.Shaping holds the latest.
+type ShapingEvent struct{ Shaping Shaping }
 
 // PairedEvent (primary): a newcomer completed pairing with the code CodeID and is on the
 // published roster.
@@ -70,6 +74,7 @@ func (RosterEvent) isEvent()        {}
 func (DisconnectEvent) isEvent()    {}
 func (MovedEvent) isEvent()         {}
 func (RelayErrorEvent) isEvent()    {}
+func (ShapingEvent) isEvent()       {}
 func (PairedEvent) isEvent()        {}
 func (PairingFailedEvent) isEvent() {}
 

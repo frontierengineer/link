@@ -44,7 +44,11 @@ const (
 	netCtlRate  = 64 * ctlRate
 	netCtlBurst = 64 * ctlBurst
 	usageEvery  = 10 * time.Second
-	usageBurst  = 3
+	usageBurst  = 1
+	// When the quota is spent, the rate before stays in force this long after the trickle is
+	// announced: what members sent before the notice reached them is read rather than left in
+	// front of their control at the trickle rate.
+	shapingGrace = time.Second
 )
 
 // network is what the relay holds for one network: its newest valid roster, its connected
@@ -65,6 +69,11 @@ type network struct {
 	ctlTAT     int64             // the ceiling on control read ahead of shaping, all members together
 	memberCtl  map[link.ID]int64 // each member's control budget, by node id, across its connections
 	usageTAT   int64             // the usage-ask budget
+	// The shaping its members were last told (section 9): the rate in force and whether it is
+	// the trickle's, and when the trickle began.
+	rateNow  int64
+	slowed   bool
+	slowedAt int64
 }
 
 // allowControl spends size bytes of member id's control budget and of the network's ceiling,
@@ -91,11 +100,8 @@ func (s *Server) allowControl(n *network, id link.ID, now int64, size int) bool 
 // controlCeilingLocked is the network's ceiling on control read ahead of shaping: 64 members'
 // budgets, but at most half the rate in force; its burst at least four members'.
 func (s *Server) controlCeilingLocked(n *network, now int64) (rate, burst int64) {
-	lim := s.limitsOf(n)
-	inForce := lim.RateBps
-	if _, slowed := s.quotaLocked(n, now); slowed {
-		inForce = lim.TrickleBps
-	}
+	s.reshapeLocked(n, now)
+	inForce := s.shapeRateLocked(n, now)
 	rate, burst = int64(netCtlRate), int64(netCtlBurst)
 	if inForce > 0 {
 		rate = max(1, min(rate, inForce/2))
@@ -277,8 +283,15 @@ func (c *conn) admit(r *link.Roster, id link.ID, pub ed25519.PublicKey, now time
 		old = n.members[id]
 		n.members[id] = c
 		c.network, c.id, c.state = n, id, stateRegistered
-		// Queued before the connection is visible to senders, so it is the first thing sent.
+		// Queued before the connection is visible to senders, so it is the first thing sent,
+		// and the network's shaping right after it (section 9).
 		c.sendJSON(registeredMsg{Type: "registered", Node: id.String(), RosterVersion: n.roster.Version, Roster: newer})
+		if !s.reshapeLocked(n, s.mono()) {
+			c.sendJSON(shapingMsg{Type: "shaping", RateBps: n.rateNow, Slowed: n.slowed})
+		}
+		if n.slowed {
+			s.watchSlowed(n)
+		}
 		if c.ipPending {
 			s.ipConns.registered(c.ipc)
 			c.ipPending = false
@@ -409,7 +422,7 @@ func (c *conn) handleBinary(p []byte, wire int) bool {
 			c.closeWith(closeBadRequest, "only pair frames on the channel while pairing", false)
 			return false
 		}
-		if dst := c.channel.primary; dst.sendBinary(p) {
+		if dst := c.channel.primary; dst.sendPair(p) {
 			c.waitQueue(dst)
 		}
 		return true
@@ -424,7 +437,7 @@ func (c *conn) handleBinary(p []byte, wire int) bool {
 			c.s.chmu.Lock()
 			ch := c.s.channels[peer]
 			c.s.chmu.Unlock()
-			if ch == nil || ch.primary != c || !ch.newcomer.sendBinary(p) {
+			if ch == nil || ch.primary != c || !ch.newcomer.sendPair(p) {
 				c.reply(ws.OpBinary, unreachable(peer))
 				return true
 			}
@@ -469,15 +482,118 @@ func (c *conn) route(p []byte, peer link.ID, wire int) {
 
 // chargeLocked counts size bytes against the network and returns how long its senders must
 // wait for its bucket: its rate, or its trickle rate once the hourly quota is spent (the
-// environment's, or its origin's from LINK_LIMITS_FILE).
+// environment's, or its origin's from LINK_LIMITS_FILE). The charge that spends the quota
+// tells the network's members.
 func (s *Server) chargeLocked(n *network, size int, now int64) time.Duration {
 	n.hour.add(uint64(size), now)
+	s.reshapeLocked(n, now)
+	return spend(&n.rateTAT, now, size, s.shapeRateLocked(n, now))
+}
+
+type shapingMsg struct {
+	Type    string `json:"type"`
+	RateBps int64  `json:"rateBps"`
+	Slowed  bool   `json:"slowed"`
+}
+
+// shapingLocked is the network's shaping now: the rate in force (0: none), and whether it is
+// the trickle rate, the quota spent.
+func (s *Server) shapingLocked(n *network, now int64) (rate int64, slowed bool) {
 	lim := s.limitsOf(n)
-	rate := lim.RateBps
-	if _, slowed := s.quotaLocked(n, now); slowed {
-		rate = lim.TrickleBps
+	if _, slowed = s.quotaLocked(n, now); slowed {
+		return lim.TrickleBps, true
 	}
-	return spend(&n.rateTAT, now, size, rate)
+	return lim.RateBps, false
+}
+
+// reshapeLocked compares the network's shaping with what its members were last told and,
+// when it changed, tells every connected member (section 9); it reports whether it did. The
+// notice is not charged, so sending it never changes what it says. It is queued under the
+// network's lock, so members hear the changes in the order they happened.
+func (s *Server) reshapeLocked(n *network, now int64) bool {
+	rate, slowed := s.shapingLocked(n, now)
+	if rate == n.rateNow && slowed == n.slowed {
+		return false
+	}
+	if slowed && !n.slowed {
+		n.slowedAt = now
+	}
+	n.rateNow, n.slowed = rate, slowed
+	for _, mc := range n.members {
+		mc.sendJSON(shapingMsg{Type: "shaping", RateBps: rate, Slowed: slowed})
+	}
+	if slowed {
+		s.watchSlowed(n)
+	}
+	return true
+}
+
+// shapeRateLocked is the rate the relay holds the network's senders to: the rate in force,
+// except the rate before for shapingGrace once the trickle begins.
+func (s *Server) shapeRateLocked(n *network, now int64) int64 {
+	if n.slowed && now-n.slowedAt < int64(shapingGrace) {
+		return s.limitsOf(n).RateBps
+	}
+	return n.rateNow
+}
+
+// watchSlowed has the shaping loop look at a slowed network every second, so its members
+// learn when the trickle lifts (its hour's charges age below the quota) without any traffic.
+func (s *Server) watchSlowed(n *network) {
+	s.slowMu.Lock()
+	s.slowNets[n] = struct{}{}
+	s.slowMu.Unlock()
+}
+
+// shapingLoop looks at every slowed network with a member connected once a second, and tells
+// its members when the trickle has lifted. A network nobody is connected to is forgotten here;
+// its next registration looks again.
+func (s *Server) shapingLoop() {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	var nets []*network
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-t.C:
+		}
+		nets = nets[:0]
+		s.slowMu.Lock()
+		for n := range s.slowNets {
+			nets = append(nets, n)
+		}
+		s.slowMu.Unlock()
+		for _, n := range nets {
+			n.mu.Lock()
+			if len(n.members) > 0 {
+				s.reshapeLocked(n, s.mono())
+			}
+			if !n.slowed || len(n.members) == 0 {
+				// Under the network's lock (taken before slowMu, as watchSlowed does), so a
+				// registration that slows it again cannot slip between.
+				s.slowMu.Lock()
+				delete(s.slowNets, n)
+				s.slowMu.Unlock()
+			}
+			n.mu.Unlock()
+		}
+	}
+}
+
+// reshapeAll looks at every network's shaping, after the limits changed.
+func (s *Server) reshapeAll() {
+	now := s.mono()
+	for i := range s.nets {
+		sh := &s.nets[i]
+		sh.mu.Lock()
+		for _, n := range sh.m {
+			n.mu.Lock()
+			s.reshapeLocked(n, now)
+			n.mu.Unlock()
+		}
+		sh.mu.Unlock()
+	}
 }
 
 func (s *Server) quotaLocked(n *network, now int64) (used float64, slowed bool) {

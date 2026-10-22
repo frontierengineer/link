@@ -11,6 +11,7 @@ import { nodeIdFromBytes, nodeIdFromEd25519, nodeIdToBytes } from '../../src/ide
 import { ed25519Verify } from '../../src/crypto.js';
 import { findMember, primaryOf, rosterProblem, type Roster } from '../../src/roster.js';
 import { registerSigningBytes } from '../../src/signed.js';
+import { USAGE_BURST, USAGE_INTERVAL_MS } from '../../src/primary-role.js';
 import { listen, type ServerSocket, type WsServer } from './ws-server.js';
 
 interface Conn {
@@ -170,8 +171,8 @@ export class TestRelay {
         }
         {
           const now = Date.now();
-          const tat = Math.max(this.usageTat.get(conn.network!) ?? 0, now) + 10_000;
-          if (tat - now > 3 * 10_000) {
+          const tat = Math.max(this.usageTat.get(conn.network!) ?? 0, now) + USAGE_INTERVAL_MS;
+          if (tat - now > USAGE_BURST * USAGE_INTERVAL_MS) {
             conn.sock.sendText(JSON.stringify({ type: 'error', code: 'rate_limited', id: msg.id }));
             return;
           }
@@ -258,6 +259,13 @@ export class TestRelay {
     if (before === undefined || before === primaryOf(r).id) return;
     const demoted = this.conns.get(r.network)?.get(before);
     for (const ch of [...this.channels.values()]) if (ch.primary === demoted) this.endChannel(ch, 'timeout');
+  }
+
+  /** Sends a `shaping` notice (section 9) to every connected member of `network`, as the relay
+   * does when its shaping changes; `raw` sends that text instead, for malformed notices. */
+  shape(network: string, notice: { rateBps: unknown; slowed: unknown } | { raw: string }): void {
+    const text = 'raw' in notice ? notice.raw : JSON.stringify({ type: 'shaping', ...notice });
+    for (const c of this.conns.get(network)?.values() ?? []) c.sock.sendText(text);
   }
 
   /** Answers with what `usage` returns, for tests that need a quota or `slowed`. */

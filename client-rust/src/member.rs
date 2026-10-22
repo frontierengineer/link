@@ -26,7 +26,7 @@ use crate::roster::Roster;
 use crate::signed::Resignation;
 use crate::socket::{CLOSE_GRACE, close_info, connect, spawn_writer};
 use crate::types::{
-    DEFAULT_CREDIT_WINDOW, Event, InboundMessage, MemberState, Observer, PairingCode, Timing, TrafficReport,
+    DEFAULT_CREDIT_WINDOW, Event, InboundMessage, MemberState, Observer, PairingCode, Shaping, Timing, TrafficReport,
     UsageReport,
 };
 
@@ -357,6 +357,13 @@ impl Member {
         self.shared().with(Node::observe)
     }
 
+    /// How the relay shapes this network now, from its last `shaping` notice (section 9): the
+    /// rate in force and whether the network is slowed. Unshaped before any notice.
+    /// [`Event::Shaping`] says when it changes, so there is no need to poll `usage` for it.
+    pub fn shaping(&self) -> Shaping {
+        self.shared().lock().shaping()
+    }
+
     /// Whether this member is the primary now: it holds the network seed, and the roster it
     /// holds names it primary (section 3.1).
     pub fn is_primary(&self) -> bool {
@@ -386,9 +393,10 @@ impl Member {
         self.shared().with(|c| primary::revoke(c, node_id))
     }
 
-    /// Asks the relay for this network's usage. The relay allows `USAGE_BURST` asks at once and
-    /// then one per `USAGE_INTERVAL` per network; beyond that it refuses, and this fails with
-    /// `rate-limited`. Ask rarely, and keep the answer. Primary only.
+    /// Asks the relay for this network's usage. The relay allows one ask per `USAGE_INTERVAL`
+    /// (10 s) per network, with no burst; an ask sooner than that it refuses at once, and this
+    /// fails with `rate-limited`. Ask rarely, and keep the answer; whether the network is slowed
+    /// is [`Member::shaping`], which needs no ask. Primary only.
     pub async fn usage(&self) -> Result<UsageReport, LinkError> {
         let id = crate::bytes::b64u(&crate::crypto::random_array::<9>());
         let (tx, rx) = oneshot::channel();

@@ -56,7 +56,7 @@ peer's roster does not list this node).
 | `connect` | `role` (`member` or `primary`), `roster`, `networkSeed?` (base64), `pinnedNetworkKey?`, `relayUrl?`, `creditWindow?`, `timing?`, `autoTake?` (default `true`), `timeoutMs?` | `{}` once registered |
 | `start` | as `connect`, without `timeoutMs` | `{}` at once; the node connects in the background |
 | `waitConnected` | `timeoutMs?` | `{}` once registered |
-| `state` | | `state`, `roster` (the newest held), `primary` (whether this node acts as the primary now) |
+| `state` | | `state`, `roster` (the newest held), `primary` (whether this node acts as the primary now), `shaping` (below) |
 | `sessions` | `peer?` | `sessions`: the sessions held, below |
 | `send` | `peer`, and `bytes` (base64) or `size`+`fill` (see below) | `{}` once every fragment is handed to the relay connection |
 | `take` | `count` (default 1), `timeoutMs?` | `messages`: the taken messages, as `message` event bodies |
@@ -138,7 +138,13 @@ member fits under the roster limit it fails `roster-full`.
 **`usage`** asks the relay (spec section 4.3) and answers its report:
 `{"network": {"bytesHour", "connections", "limits": {"rateBps", "quotaBytesHour", "trickleBps"},
 "quotaUsed", "slowed"}}`, exactly those fields, as the relay sent them. Refused over the relay's
-budget: `rate-limited`. No answer within `requestTimeoutMs`: `timeout`.
+budget (one ask per 10 seconds per network, no burst): `rate-limited`, at once. No answer within
+`requestTimeoutMs`: `timeout`.
+
+**`shaping`** in the `state` result is the node's shaping property (spec section 11):
+`{"rateBps": <integer>, "slowed": <bool>}`, from the relay's last `shaping` notice; `{"rateBps": 0,
+"slowed": false}` before any, and after registering with a relay whose `hello` does not list
+`shaping`. The node paces its sends to `rateBps` (spec section 11) whatever the driver does.
 
 ### Error codes
 
@@ -170,6 +176,7 @@ An event is `{"event": "<name>", ...body}`, written whenever the node raises it:
 | `paired` | `node`, `codeId` (the code that admitted it), `version` (the new roster's) (primary only) |
 | `pairingFailed` | `codeId`, `reason`: a code from the table below (primary only) |
 | `relayError` | `code`, `message` (`""` when the relay sent none): a non-fatal `error` control message the node did not consume itself |
+| `shaping` | `rateBps`, `slowed`: the node's shaping property changed (a `shaping` notice from the relay that differs from the last, or the reset at registration with a relay without the feature); raised only on a change |
 
 **`state`.** A node raises `connecting` as it dials, `connected` once registered, `disconnected`
 when the connection drops and it will retry, and the terminal `revoked`, `replaced` and

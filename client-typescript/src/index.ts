@@ -57,6 +57,7 @@ export {
   type Traffic,
   type PeerTraffic,
   type TrafficReport,
+  type Shaping,
 } from './member.js';
 export {
   Primary,
@@ -68,7 +69,7 @@ export {
   type PrimaryEvents,
   type UsageReport,
 } from './primary.js';
-export { DEFAULT_CREDIT_WINDOW, INITIAL_CREDIT, MAX_MESSAGE, CREDIT_BATCH_BYTES, CREDIT_DELAY_MS, PACE_FLOOR_BYTES } from './sessions.js';
+export { DEFAULT_CREDIT_WINDOW, INITIAL_CREDIT, MAX_MESSAGE, CREDIT_BATCH_BYTES, CREDIT_DELAY_MS, PACE_FLOOR_BYTES, PACE_SHARE, pacedFragment } from './sessions.js';
 export type { DiagnosticsReport, FindingKind, CoreStats } from './diag-hook.js';
 export { CloseCode } from './relay.js';
 export {

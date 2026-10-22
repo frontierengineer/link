@@ -691,7 +691,7 @@ each('replacement: a second copy of an identity, of another implementation, repl
   }),
 );
 
-each('usage: the primary reads the network totals and limits; asks beyond the budget are refused', ({ p, a, b }) => {
+each('usage: the primary reads the network totals and limits; a second ask within 10 s is refused', ({ p, a, b }) => {
   const limits = { rateBps: 50_000_000, quotaBytesHour: 100_000_000, trickleBps: 200_000 };
   const env = {
     LINK_RATE_BPS: String(limits.rateBps),
@@ -703,27 +703,25 @@ each('usage: the primary reads the network totals and limits; asks beyond the bu
     const A = await s.add(a, 'a');
     const B = await s.add(b, 'b');
     await s.pairOnly(a, 'never connected');
-    const before = await P.d.usage();
-    // Totals only: the relay keeps no per-member figures.
-    assert.deepEqual(Object.keys(before), ['network']);
-    assert.deepEqual(Object.keys(before.network).sort(), ['bytesHour', 'connections', 'limits', 'quotaUsed', 'slowed']);
-    assert.equal(before.network.connections, 3);
-    assert.deepEqual(before.network.limits, limits);
-    assert.equal(before.network.slowed, false);
-
     const payload = 300_000;
     await A.d.send(B.id, { size: payload, fill: 1 });
     await B.d.messages(1, { from: A.id });
-    const after = await P.d.usage();
-    assert.ok(after.network.bytesHour - before.network.bytesHour >= payload, `${before.network.bytesHour} then ${after.network.bytesHour}`);
-    assert.ok(after.network.quotaUsed > 0 && after.network.quotaUsed < 1, `quotaUsed ${after.network.quotaUsed}`);
-    assert.equal(after.network.slowed, false);
+    const u = await P.d.usage();
+    // Totals only: the relay keeps no per-member figures.
+    assert.deepEqual(Object.keys(u), ['network']);
+    assert.deepEqual(Object.keys(u.network).sort(), ['bytesHour', 'connections', 'limits', 'quotaUsed', 'slowed']);
+    assert.equal(u.network.connections, 3);
+    assert.deepEqual(u.network.limits, limits);
+    assert.ok(u.network.bytesHour >= payload, `bytesHour ${u.network.bytesHour}`);
+    assert.ok(u.network.quotaUsed > 0 && u.network.quotaUsed < 1, `quotaUsed ${u.network.quotaUsed}`);
+    assert.equal(u.network.slowed, false);
 
-    // Three asks at once, then one per 10 s: of four more at once, at least one is refused.
-    const asks = await Promise.allSettled([1, 2, 3, 4].map(() => P.d.usage()));
-    const refused = asks.filter((r) => r.status === 'rejected');
-    assert.ok(refused.length >= 1, 'over the budget');
-    for (const r of refused) assert.equal((r.reason as { code?: string }).code, 'rate-limited');
+    // One ask per 10 s, with no burst: every ask at once after it is refused.
+    const asks = await Promise.allSettled([1, 2, 3].map(() => P.d.usage()));
+    for (const r of asks) {
+      assert.equal(r.status, 'rejected', 'over the budget');
+      assert.equal((r as PromiseRejectedResult).reason.code, 'rate-limited');
+    }
   });
 });
 

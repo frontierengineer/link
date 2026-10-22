@@ -42,6 +42,8 @@ export interface RelayProcess {
   port: number;
   /** Everything the relay wrote to stderr. */
   log: string[];
+  /** SIGHUP: the relay reads LINK_LIMITS_FILE again. Resolves once it says it has. */
+  reload(): Promise<void>;
   /** SIGTERM, then resolves with the exit code once the process has ended. */
   stop(): Promise<number | null>;
 }
@@ -83,11 +85,21 @@ export async function startRelay(env: Record<string, string> = {}): Promise<Rela
     });
   });
   let stopping: Promise<number | null> | undefined;
+  const reloads = () => log.join('').split('limits reloaded').length - 1;
   return {
     url: `ws://127.0.0.1:${port}/v1`,
     http: `http://127.0.0.1:${port}`,
     port,
     log,
+    async reload() {
+      const before = reloads();
+      child.kill('SIGHUP');
+      const deadline = Date.now() + 10_000;
+      while (reloads() === before) {
+        if (Date.now() > deadline) throw new Error(`the relay did not reload its limits:\n${log.join('')}`);
+        await new Promise((r) => setTimeout(r, 10));
+      }
+    },
     stop() {
       if (!stopping) {
         child.kill('SIGTERM');

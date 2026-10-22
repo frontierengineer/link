@@ -103,8 +103,8 @@ func (s *Server) originNamed(host string) *origin {
 	return o
 }
 
-// ReloadLimits reads LINK_LIMITS_FILE and puts it in force, for networks already live too.
-// On an error nothing changes. Without LINK_LIMITS_FILE it restores the environment's limits.
+// ReloadLimits reads LINK_LIMITS_FILE and puts it in force, for networks already live too,
+// whose members are told when their shaping changes. On an error nothing changes. Without LINK_LIMITS_FILE it restores the environment's limits.
 func (s *Server) ReloadLimits() error {
 	var f limitsFile
 	if s.cfg.LimitsFile != "" {
@@ -139,6 +139,7 @@ func (s *Server) ReloadLimits() error {
 	}
 	s.limits.Store(&def)
 	s.origins.Store(&next)
+	s.reshapeAll() // members hear of a rate or a trickle the new limits change
 	return nil
 }
 

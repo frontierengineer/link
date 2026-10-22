@@ -66,6 +66,7 @@ func (h *harness) registerHost(host string, k, network *link.Keys, rosterJSON []
 	if m := c.json(); m["type"] != "registered" {
 		h.t.Fatalf("expected registered, got %v", m)
 	}
+	c.shapingNotice()
 	return c
 }
 
@@ -143,8 +144,18 @@ func TestOriginLimitsAndReload(t *testing.T) {
 
 	check := func(c *client, id string, want map[string]any) {
 		t.Helper()
+		h.s.refillUsage()
 		if got := usageLimitsOf(t, c, id); !equalJSON(got, want) {
 			t.Fatalf("%s: limits %v, want %v", id, got, want)
+		}
+	}
+	// Each member was told its network's rate at registration...
+	notice := func(rate float64) map[string]any {
+		return map[string]any{"type": "shaping", "rateBps": rate, "slowed": false}
+	}
+	for c, rate := range map[*client]float64{ca: 500000, cb: 1000000, cc: 1000000} {
+		if !equalJSON(c.shaping, notice(rate)) {
+			t.Fatalf("told %v at registration, want %v", c.shaping, notice(rate))
 		}
 	}
 	// The file's defaults over the environment's quota; a.test's own overrides over those.
@@ -156,6 +167,12 @@ func TestOriginLimitsAndReload(t *testing.T) {
 	os.WriteFile(file, []byte(`{"rateBps":2000000,"origins":{"b.test":{"trickleBps":64}}}`), 0o600)
 	if code, body := post(t, admin.URL+"/reload"); code != 200 {
 		t.Fatalf("reload: %d %s", code, body)
+	}
+	// ...and is told again when a reload changes it.
+	for _, c := range []*client{ca, cb, cc} {
+		if m := c.json(); !equalJSON(m, notice(2000000)) {
+			t.Fatalf("told %v after the reload", m)
+		}
 	}
 	check(ca, "a2", limitsWant(2000000, 7000000, 0))
 	check(cb, "b2", limitsWant(2000000, 7000000, 64))

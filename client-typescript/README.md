@@ -83,7 +83,14 @@ connecting and returns at once):
   slow reader slows its senders.
 - Events (`on(name, listener)` returns an unsubscribe function): `state`
   (`connecting`, `connected`, `disconnected`, `revoked`, `replaced`, `closed`), `roster`, `disconnect`
-  (`{ code, reason }`), `moved` (4009), `relayError`.
+  (`{ code, reason }`), `moved` (4009), `relayError`, `shaping` (below).
+- `shaping` is how the relay shapes the network now, `{ rateBps, slowed }` (type `Shaping`):
+  `rateBps` the rate in force in bytes a second (the network's rate, or its trickle rate once its
+  quota is spent; 0 for none), `slowed` whether the quota is spent and the trickle holds. Every
+  member has it, the primary or not, from the relay's `shaping` notices (spec section 9): the
+  relay sends one at registration and whenever it changes, and the `shaping` event fires on each
+  change, so an application never polls `usage()` to learn it is slowed. It is
+  `{ rateBps: 0, slowed: false }` before any notice and with a relay that does not send them.
 - `syncRoster()` asks the primary for its newest roster. `resign()` leaves the network.
   Rosters also spread member to member: when a handshake shows a peer holds a newer roster,
   the member asks that peer for it, and hands its own to a peer that is behind. A roster is
@@ -111,10 +118,11 @@ it must still be 8 Crockford characters, and a word is easier to guess than a ra
 `revoke(nodeId)` returning the new roster, `usage()`; events `paired` (`{ member, codeId, roster }`:
 the new member and the code that admitted it) and `pairingFailed`. `Primary`
 extends `Member` and requires `networkSeed`: `Primary.connect(options)`.
-`usage()` asks the relay (request-only: the relay never pushes) and resolves
-`{ network: { bytesHour, connections, limits: { rateBps, quotaBytesHour, trickleBps }, quotaUsed, slowed } }`.
-The relay allows `USAGE_BURST` (3) asks at once, then one per `USAGE_INTERVAL_MS` (10 s), per
-network; beyond that it refuses and `usage()` rejects with `RateLimitedError` (code `rate-limited`). When no further member fits under the roster limit, `openPairingCode` throws
+`usage()` asks the relay (request-only: the relay never pushes these figures) and resolves
+`{ network: { bytesHour, connections, limits: { rateBps, quotaBytesHour, trickleBps }, quotaUsed, slowed } }`,
+within a second however busy the network. The relay allows one ask per `USAGE_INTERVAL_MS`
+(10 s) per network, with no burst (`USAGE_BURST` is 1); an ask sooner is refused at once and
+`usage()` rejects with `RateLimitedError` (code `rate-limited`). When no further member fits under the roster limit, `openPairingCode` throws
 `RosterFullError` (code `roster-full`), and a code opened earlier fails its pairing with
 `pairingFailed`.
 
@@ -154,11 +162,19 @@ of your own.
   messages, relay control) is handed to the socket at once. Message fragments wait in the
   client's own queue and are encrypted only when handed over, which happens while at most 64 KiB
   waits in the socket (`bufferedAmount`, or a WebSocketStream's writes still in progress) and
-  while the session's un-credited bytes are under its pace: the larger of 64 KiB and one and a
+  while the session's un-credited bytes are under its window: the larger of 64 KiB and one and a
   half times what the receiver credited back over the last second. A fragment is cut to the room
-  left under the pace (16 KiB at least), so on a slow link fragments shrink. So control is never stuck behind megabytes of
-  data, even when the relay is shaping, and one slow receiver never holds up sends to another.
-  Wire order is still nonce order, since each fragment is encrypted at the moment it is sent.
+  left under the window (16 KiB at least), so on a slow link fragments shrink. One slow receiver
+  never holds up sends to another. Wire order is still nonce order, since each fragment is
+  encrypted at the moment it is sent.
+- **Paced to the rate in force.** While the relay shapes the network at `rateBps` R (`shaping`
+  above), fragments go at most at 7/8 of R over the whole connection, counted at their size on
+  the wire, each at most a quarter of a second of that pace (3584 bytes at a 16 KB/s trickle), and
+  a session keeps at most about a second of what its receiver takes un-credited, never more than
+  half a second of R (spec section 11). The relay then reads a member's data as it arrives, so
+  nothing lies in front of its control: a usage ask or a roster sync is answered in milliseconds
+  with one member sending, and within about a second with several sending at once. Throughput
+  while shaped is 7/8 of the rate; the rest is room for control.
 - To a relay whose `hello` lists `control`, session messages other than application messages go
   as frame type `0x08`, which the relay keeps ahead of its shaping (spec section 9).
 - A message is never split across sessions: a rekey switches at a message boundary.
@@ -206,8 +222,9 @@ directions. These rules keep an application lean; the diagnostics below check th
    `deflate`/`inflate` from `@frontierengineer/link-client/compression`.
 5. **Respect back-pressure.** Await `send`; when it lags, shed load (skip to the next keyframe)
    rather than queue.
-6. **Ask for usage rarely, and send less when slowed.** Keep the last answer. When it says
-   `slowed`, drop video and keep audio, and tell your peers over your own messages.
+6. **Ask for usage rarely, and send less when slowed.** Keep the last answer. Watch the `shaping`
+   event (or read `shaping`) rather than asking: when it says `slowed`, drop video and keep audio,
+   and tell your peers over your own messages.
 7. **Don't hammer unreachable peers.** A send to an absent peer fails at once and nothing is
    queued; wait for it to come back instead of retrying in a loop.
 8. **One live member per identity.** A second copy replaces the first (4005), and recreating
@@ -255,8 +272,8 @@ usage ask, churn, a compression that gained nothing) fails the next `send`.
 | `compressibleUncompressed` | 4 | sampled messages over 1 KiB under 7 bits per byte (confirmed with a real deflate at most once a second) add up to over 5% of bytes sent |
 | `compressedNoGain` | 4 | `deflate` saved under 10% |
 | `backlog` | 5 | a message of 64 KiB or less waited over 2 s to be handed over |
-| `usageAsks` | 6 | an ask used 80% of the relay's budget, or was refused |
-| `sentWhileSlowed` | 6 | more bytes sent since a `slowed` answer than the network's whole trickle rate allows |
+| `usageAsks` | 6 | an ask came within 12.5 s of the last (the relay allows one per 10 s), or was refused |
+| `sentWhileSlowed` | 6 | more bytes sent since the network was slowed (a `shaping` notice, or a `slowed` usage answer) than its whole trickle rate allows |
 | `unreachableRetries` | 7 | over 6 sends a minute to one unreachable peer |
 | `sessionChurn` | 8 | over 3 handshakes with one peer within one rekey interval, over 3 reconnects a minute, or any 4005 |
 

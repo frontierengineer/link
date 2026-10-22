@@ -156,6 +156,7 @@ test('usage: the primary reads the network totals, and each member counts its ow
     const bob = await net.add();
     await net.pairOnly(); // on the roster, never connected
     const before = await net.primary.usage();
+    const askedAt = Date.now();
     assert.equal(before.network.connections, 3);
     assert.deepEqual(before.network.limits, { rateBps: 0, quotaBytesHour: 0, trickleBps: 0 });
     assert.equal(before.network.quotaUsed, 0);
@@ -170,6 +171,8 @@ test('usage: the primary reads the network totals, and each member counts its ow
     const payload = new Uint8Array(300_000).fill(7);
     await alice.send(bob.id, payload);
     await sIn.next();
+    // One ask per 10 s per network (section 4.3).
+    await sleep(Math.max(0, askedAt + 10_100 - Date.now()));
     const after = await net.primary.usage();
     assert.ok(after.network.bytesHour - before.network.bytesHour >= payload.length);
     // What the relay no longer counts per member, the members count themselves.
@@ -187,7 +190,7 @@ test('usage: the primary reads the network totals, and each member counts its ow
   }
 });
 
-test('quota: the primary asks and learns the network is slowed; the trickle rate slows traffic; nothing is pushed', async () => {
+test("quota: every member is told the network is slowed, the primary's usage says so, and the trickle rate slows traffic", async () => {
   const quota = 1_000_000;
   const trickle = 200_000;
   const net = await startNet({ env: { LINK_QUOTA_BYTES_HOUR: String(quota), LINK_TRICKLE_BPS: String(trickle) } });
@@ -198,21 +201,33 @@ test('quota: the primary asks and learns the network is slowed; the trickle rate
     (net.primary as unknown as { relay: { on(e: string, f: (m: { type: string }) => void): void } }).relay.on('control', (m) => {
       if (m.type !== 'usage' && m.type !== 'error') pushed.push(m.type);
     });
+    const told: { rateBps: number; slowed: boolean }[] = [];
+    for (const m of [net.primary, alice, bob]) {
+      assert.deepEqual(m.shaping, { rateBps: 0, slowed: false });
+      m.on('shaping', (sh) => told.push(sh));
+    }
     const sIn = inbox(bob);
     await alice.send(bob.id, new Uint8Array(1_100_000));
     await sIn.next(1, 20_000);
+    // The relay pushed the trickle to all three, once each, and nothing else.
+    await until(() => told.length >= 3, 'all three to be told');
+    assert.deepEqual(told, Array(3).fill({ rateBps: trickle, slowed: true }));
+    for (const m of [net.primary, alice, bob]) assert.deepEqual(m.shaping, { rateBps: trickle, slowed: true });
+    assert.deepEqual(pushed, ['shaping']);
     const u = await net.primary.usage();
     assert.equal(u.network.slowed, true);
     assert.ok(u.network.quotaUsed >= 1, `quotaUsed ${u.network.quotaUsed}`);
     assert.deepEqual(u.network.limits, { rateBps: 0, quotaBytesHour: quota, trickleBps: trickle });
 
-    // At the trickle rate (its bucket starts with one second of tokens), 600 kB take over 1.5 s.
+    // At the trickle rate (its bucket starts with one second of tokens), 600 kB take over 1.5 s,
+    // once the relay's grace of a second after the notice is over.
+    await sleep(1000);
     const started = Date.now();
     await alice.send(bob.id, new Uint8Array(600_000));
     await sIn.next(1, 20_000);
     const took = Date.now() - started;
     assert.ok(took >= 1500, `600 kB at ${trickle} B/s arrived in ${took} ms`);
-    assert.deepEqual(pushed, [], 'the relay pushed nothing to the primary');
+    assert.deepEqual(pushed, ['shaping'], 'the relay pushed nothing more: usage itself is never pushed');
   } finally {
     await net.close();
   }

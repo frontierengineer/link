@@ -12,3 +12,5 @@ import (
 func rawConnOf(net.Conn) syscall.RawConn { return nil }
 
 func rawIO(syscall.RawConn, []byte, bool) (int, error) { return 0, syscall.EAGAIN }
+
+func setsockoptInt(uintptr, int, int, int) {}

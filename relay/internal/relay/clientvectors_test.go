@@ -295,6 +295,7 @@ func TestClientVectorsRouted(t *testing.T) {
 		if m := c.json(); m["type"] != "registered" {
 			t.Fatalf("expected registered, got %v", m)
 		}
+		c.shapingNotice()
 		return c
 	}
 	ini, res := register(ik), register(rk)

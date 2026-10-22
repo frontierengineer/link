@@ -127,6 +127,7 @@ type client struct {
 	t         testing.TB
 	ws        *websocket.Conn
 	challenge []byte
+	shaping   map[string]any // the shaping notice that followed registered
 }
 
 type dialOpt func(*net.Dialer)
@@ -188,7 +189,19 @@ func (h *harness) register(k *link.Keys, network *link.Keys, rosterJSON []byte, 
 	if m["type"] != "registered" || m["node"] != k.ID.String() {
 		h.t.Fatalf("expected registered, got %v", m)
 	}
+	c.shapingNotice()
 	return c
+}
+
+// shapingNotice reads the shaping notice that follows registered (section 9), keeps it, and
+// returns it.
+func (c *client) shapingNotice() map[string]any {
+	c.t.Helper()
+	c.shaping = c.json()
+	if c.shaping["type"] != "shaping" {
+		c.t.Fatalf("expected shaping after registered, got %v", c.shaping)
+	}
+	return c.shaping
 }
 
 func (c *client) send(v any) {
@@ -336,6 +349,21 @@ func peerOf(f []byte) link.ID {
 	var id link.ID
 	copy(id[:], f[2:18])
 	return id
+}
+
+// refillUsage gives every network its usage ask again, so a test may ask more than once in
+// 10 seconds.
+func (s *Server) refillUsage() {
+	for i := range s.nets {
+		sh := &s.nets[i]
+		sh.mu.Lock()
+		for _, n := range sh.m {
+			n.mu.Lock()
+			n.usageTAT = 0
+			n.mu.Unlock()
+		}
+		sh.mu.Unlock()
+	}
 }
 
 // queuedFor reads, from the relay's own state, the bytes queued for a connected node.

@@ -15,7 +15,7 @@ use crate::errors::ErrorCode;
 use crate::frames::{MAX_FRAME, SessionMessage, data_body, handshake_init_body, parse_handshake_resp, session_type};
 use crate::noise::{HandshakeOptions, HandshakeState, IK, KeyPair, Transport};
 use crate::roster::{RosterMember, UnsignedRoster, sign_roster};
-use crate::types::{INITIAL_CREDIT, MAX_FRAGMENT, MAX_MESSAGE, SOCKET_LOW_WATER};
+use crate::types::{INITIAL_CREDIT, MAX_FRAGMENT, MAX_MESSAGE, SOCKET_LOW_WATER, paced_fragment};
 
 // ── The fakes ──
 
@@ -193,12 +193,19 @@ impl T {
     }
 
     fn open_and_register(&mut self, registered: Option<Json>) {
+        self.open_and_register_with(r#"["control","later"]"#, registered);
+    }
+
+    /// As `open_and_register`, with the relay's `hello` listing `features` (a JSON array).
+    fn open_and_register_with(&mut self, features: &str, registered: Option<Json>) {
         let (conn, _url) = self.node.take_dial().expect("a dial");
         self.conn = conn;
         self.log = WireLog::default();
         assert!(self.node.on_open(conn, Box::new(FakeWire(self.log.clone()))));
-        let hello = r#"{"type":"hello","version":1,"challenge":"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA","features":["control","later"]}"#;
-        self.node.on_text(conn, hello);
+        let hello = format!(
+            r#"{{"type":"hello","version":1,"challenge":"AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA","features":{features}}}"#
+        );
+        self.node.on_text(conn, &hello);
         let reg = self.texts().into_iter().find(|t| t.get("type").and_then(Json::as_str) == Some("register"));
         let reg = reg.expect("register sent after hello");
         assert_eq!(reg.get("node").and_then(Json::as_str), Some(self.identity.id()));
@@ -2938,4 +2945,149 @@ fn a_seed_that_does_not_derive_the_rosters_key_is_refused_and_primary_needs_one(
     assert_eq!(cfg(r, Some(net_seed(&w.p)), true), Ok(()));
     // Under a roster naming another member primary, the seed is enough: it claims.
     assert_eq!(cfg(&worker_primary_roster(&w, 4), Some(net_seed(&w.p)), true), Ok(()));
+}
+
+// ── Shaping (section 9) and pacing (section 11) ──
+
+fn shaping_events(t: &mut T) -> Vec<Shaping> {
+    t.events()
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::Shaping(s) => Some(s),
+            _ => None,
+        })
+        .collect()
+}
+
+fn shape(t: &mut T, rate_bps: u64, slowed: bool) {
+    let conn = t.conn;
+    t.node.on_text(conn, &format!(r#"{{"type":"shaping","rateBps":{rate_bps},"slowed":{slowed}}}"#));
+}
+
+#[test]
+fn shaping_notices_set_the_property_and_raise_an_event_on_each_change() {
+    let w = world();
+    let mut a = make(&w.a, &w.roster, false, &w.clock, timing(), false);
+    a.node.start();
+    a.open_and_register_with(r#"["control","shaping"]"#, None);
+    a.take();
+    assert_eq!(a.node.shaping(), Shaping::default(), "unshaped before any notice");
+    assert!(shaping_events(&mut a).is_empty());
+    shape(&mut a, 1_048_576, false);
+    shape(&mut a, 16384, true);
+    assert_eq!(a.node.shaping(), Shaping { rate_bps: 16384, slowed: true });
+    // The same again changes nothing; malformed notices are ignored.
+    let conn = a.conn;
+    shape(&mut a, 16384, true);
+    for junk in [
+        r#"{"type":"shaping","rateBps":-1,"slowed":false}"#,
+        r#"{"type":"shaping","rateBps":1.5,"slowed":false}"#,
+        r#"{"type":"shaping","rateBps":1e2,"slowed":false}"#,
+        r#"{"type":"shaping","rateBps":5,"slowed":"no"}"#,
+        r#"{"type":"shaping","slowed":false}"#,
+        r#"{"type":"shaping","rateBps":5}"#,
+    ] {
+        a.node.on_text(conn, junk);
+    }
+    shape(&mut a, 0, false);
+    assert_eq!(
+        shaping_events(&mut a),
+        [
+            Shaping { rate_bps: 1_048_576, slowed: false },
+            Shaping { rate_bps: 16384, slowed: true },
+            Shaping { rate_bps: 0, slowed: false },
+        ]
+    );
+    assert!(!a.events().iter().any(|e| matches!(e, Event::RelayError { .. })));
+}
+
+#[test]
+fn a_relay_without_the_shaping_feature_leaves_a_member_unshaped_whatever_it_held_before() {
+    let w = world();
+    let mut a = connected(&w, &w.a, &w.roster, timing());
+    shape(&mut a, 16384, true);
+    assert!(a.node.shaping().slowed, "a notice is taken, whatever hello said");
+    a.events();
+    let conn = a.conn;
+    a.node.on_close(conn, close_code::GOING_AWAY, "");
+    w.clock.advance(timing().backoff_max.as_millis() as u64);
+    a.node.poll();
+    a.open_and_register(None);
+    assert_eq!(a.state(), MemberState::Connected);
+    assert_eq!(a.node.shaping(), Shaping::default());
+    assert_eq!(shaping_events(&mut a), [Shaping::default()]);
+}
+
+#[test]
+fn pacing_shaped_fragments_are_a_quarter_second_of_the_pace_and_go_no_faster_control_passes_them() {
+    let w = world();
+    let (mut a, mut b) = pair_ab(&w, timing());
+    let rate = 16384;
+    let largest = paced_fragment(rate);
+    assert_eq!(largest, 3584);
+    // A first exchange, unpaced, so the session is up and what follows is the pace alone.
+    let mut rx = a.send(w.b.id(), b"open");
+    route(&mut [&mut a, &mut b]);
+    assert_eq!(done(&mut rx), Some(Ok(())));
+    assert_eq!(b.take_all().len(), 1, "taken, so the next message's fragments are credited");
+    shape(&mut a, rate, true);
+    let before = a.node.traffic().peers[w.b.id()].sent;
+    let mut rx = a.send(w.b.id(), &vec![7u8; 200_000]);
+    let fragments = |a: &T| {
+        let now = a.node.traffic().peers[w.b.id()].sent;
+        (now.frames - before.frames, now.frame_bytes - before.frame_bytes)
+    };
+    assert_eq!(fragments(&a).0, 1, "the first goes at once, with no burst behind it");
+    // Control goes at once, ahead of the fragments waiting for the pace.
+    sessions::send_control(&mut a.node, w.b.id(), Ctl::RosterRequest, None, FailAction::Ignore);
+    let last = |a: &T| match a.log.out.lock().unwrap().last() {
+        Some(Sent::Binary(f)) => Some(f[1]),
+        _ => None,
+    };
+    assert_eq!(last(&a), Some(frame_type::CONTROL));
+    let control = (1, 39); // the roster-request: 18 + 4 + 1 + 16 bytes
+    for _ in 0..30 {
+        w.clock.advance(50);
+        a.node.poll();
+        b.node.poll();
+        route(&mut [&mut a, &mut b]);
+    }
+    // 1.5 s: the first at once, then one a frame's size at 7R/8 (252.8 ms) after the last.
+    let (frames, bytes) = fragments(&a);
+    let (frames, bytes) = (frames - control.0, bytes - control.1);
+    assert!((6..=8).contains(&frames), "{frames} frames in 1.5 s");
+    assert!(bytes <= 7 * rate * 1500 / 8000 + 2 * (largest + 40), "{bytes} bytes in 1.5 s");
+    assert_eq!(done(&mut rx), None);
+    // Unshaped again: the rest goes at once.
+    shape(&mut a, 0, false);
+    for _ in 0..10 {
+        route(&mut [&mut a, &mut b]);
+        w.clock.advance(250);
+        b.node.poll();
+        a.node.poll();
+    }
+    route(&mut [&mut a, &mut b]);
+    assert_eq!(done(&mut rx), Some(Ok(())));
+    assert_eq!(b.take_all()[0].bytes.len(), 200_000);
+}
+
+#[test]
+fn pacing_shaped_a_session_whose_receiver_takes_nothing_keeps_about_one_fragment_uncredited() {
+    let w = world();
+    let (mut a, mut b) = pair_ab(&w, timing());
+    let rate = 16384;
+    shape(&mut a, rate, true);
+    let _rxs: Vec<_> = (0..20).map(|_| a.send(w.b.id(), &[0u8; 5000])).collect();
+    for _ in 0..30 {
+        route(&mut [&mut a, &mut b]);
+        w.clock.advance(50);
+        a.node.poll();
+        b.node.poll();
+    }
+    route(&mut [&mut a, &mut b]);
+    // Nothing is credited back once a message waits, so the window is max(F, min(0, R/2)) = F:
+    // at most one message past it, not the 64 KiB floor.
+    let inflight = a.node.sessions.info(w.b.id())[0].inflight;
+    let f = paced_fragment(rate);
+    assert!(inflight >= f && inflight < f + 5000, "{inflight} un-credited");
 }

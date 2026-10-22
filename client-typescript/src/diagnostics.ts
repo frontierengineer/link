@@ -87,8 +87,8 @@ const MIN_GAIN = 0.1;
 /** R6: a message this small that waited longer than this to be handed over sat in a backlog. */
 const BACKLOG_SMALL = 65536;
 const BACKLOG_WAIT_MS = 2000;
-/** R7: the relay's usage budget (section 4.3), and the share of it that counts as near. */
-const USAGE_BURST = 3;
+/** R7: the relay's usage budget (section 4.3), one ask per interval with no burst; an ask made
+ * before the budget has refilled past this share since the last is near it. */
 const USAGE_INTERVAL_MS = 10_000;
 const USAGE_NEAR = 0.8;
 /** R9: unreachable failures to one peer within a minute. */
@@ -282,7 +282,7 @@ class Diagnostics implements DiagnosticsHook {
   private lastConfirm = -Infinity;
   private savings!: number;
   private queued = 0;
-  private usageTat = 0;
+  private lastUsageAsk: number | undefined;
   private reconnects: number[] = [];
   private slowed: { since: number; bytes: number; trickle: number } | undefined;
 
@@ -427,7 +427,7 @@ class Diagnostics implements DiagnosticsHook {
       f.sentWhileSlowed.bytes += size;
       const allowed = sl.trickle * Math.max(1, (now - sl.since) / 1000);
       if (sl.trickle > 0 && sl.bytes > allowed) {
-        take(this.find('sentWhileSlowed', peer, `${sl.bytes} bytes sent since usage said slowed, over the network's ${sl.trickle} B/s trickle: drop video, keep audio`));
+        take(this.find('sentWhileSlowed', peer, `${sl.bytes} bytes sent since the network was slowed, over its ${sl.trickle} B/s trickle: drop video, keep audio`));
       }
     }
 
@@ -495,11 +495,13 @@ class Diagnostics implements DiagnosticsHook {
       case 'usageAsk': {
         const u = f.usageAsks;
         u.count++;
-        // A mirror of the relay's budget: USAGE_BURST at once, then one per USAGE_INTERVAL_MS.
-        this.usageTat = Math.max(this.usageTat, now) + USAGE_INTERVAL_MS;
-        if ((this.usageTat - now) / (USAGE_BURST * USAGE_INTERVAL_MS) >= USAGE_NEAR) {
+        // A mirror of the relay's budget: one ask per USAGE_INTERVAL_MS, no burst. Near it is an
+        // ask within the interval, over USAGE_NEAR (12.5 s), of the last.
+        const last = this.lastUsageAsk;
+        this.lastUsageAsk = now;
+        if (last !== undefined && now - last < USAGE_INTERVAL_MS / USAGE_NEAR) {
           u.nearBudget++;
-          this.later(this.find('usageAsks', undefined, `usage asked ${u.count} times; this ask used 80% or more of the relay's budget (${USAGE_BURST}, then one per ${USAGE_INTERVAL_MS / 1000} s): ask rarely and keep the answer`));
+          this.later(this.find('usageAsks', undefined, `usage asked ${u.count} times; this ask came ${Math.round(now - last)} ms after the last, and the relay allows one per ${USAGE_INTERVAL_MS / 1000} s: ask rarely and keep the answer, and read \`shaping\` to know the network is slowed`));
         }
         return;
       }
@@ -509,6 +511,11 @@ class Diagnostics implements DiagnosticsHook {
         return;
       case 'usage':
         if (e.slowed) this.slowed ??= { since: now, bytes: 0, trickle: e.trickleBps };
+        else this.slowed = undefined;
+        return;
+      case 'shaping':
+        // Every member is told, the primary's usage asks or not.
+        if (e.slowed) this.slowed ??= { since: now, bytes: 0, trickle: e.rateBps };
         else this.slowed = undefined;
         return;
     }

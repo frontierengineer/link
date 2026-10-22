@@ -150,7 +150,8 @@ export type DriverEvent =
   | { event: 'moved'; network: string }
   | { event: 'paired'; node: string; codeId: string; version: number }
   | { event: 'pairingFailed'; codeId: string; reason: string }
-  | { event: 'relayError'; code: string; message: string };
+  | { event: 'relayError'; code: string; message: string }
+  | { event: 'shaping'; rateBps: number; slowed: boolean };
 
 export type EventName = DriverEvent['event'];
 export type EventOf<K extends EventName> = Extract<DriverEvent, { event: K }>;
@@ -247,6 +248,8 @@ const COMMAND_TIMEOUT_MS = 60_000;
 export class Driver {
   /** Every event so far, in order. */
   readonly events: DriverEvent[] = [];
+  /** When each of `events` arrived (Date.now()), at the same index. */
+  readonly eventTimes: number[] = [];
   /** What the driver wrote to stderr. */
   readonly stderr: string[] = [];
   /** stdout lines outside the protocol; any fails the test at shutdown. */
@@ -317,6 +320,7 @@ export class Driver {
     }
     if (typeof msg.event === 'string') {
       this.events.push(msg as unknown as DriverEvent);
+      this.eventTimes.push(Date.now());
       this.wake();
       return;
     }
@@ -449,7 +453,7 @@ export class Driver {
   async waitConnected(timeoutMs?: number): Promise<void> {
     await this.call('waitConnected', timeoutMs === undefined ? {} : { timeoutMs });
   }
-  state(): Promise<{ state: NodeState; roster: Roster; primary: boolean }> {
+  state(): Promise<{ state: NodeState; roster: Roster; primary: boolean; shaping: { rateBps: number; slowed: boolean } }> {
     return this.call('state');
   }
   async send(peer: string, payload: { bytes: string } | { size: number; fill: number }, timeoutMs?: number): Promise<void> {

@@ -21,7 +21,9 @@ export type DiagnosticsEvent =
   | { kind: 'usageAsk' }
   | { kind: 'usageRefused' }
   /** A usage answer arrived. */
-  | { kind: 'usage'; slowed: boolean; trickleBps: number };
+  | { kind: 'usage'; slowed: boolean; trickleBps: number }
+  /** The relay's shaping notice changed what the member holds (section 9). */
+  | { kind: 'shaping'; slowed: boolean; rateBps: number };
 
 /** Counters the core keeps whether or not diagnostics are installed. */
 export interface CoreStats {
@@ -90,7 +92,8 @@ export interface DiagnosticsReport {
       queuedMaxBytes: number;
       waitMaxMs: number;
     };
-    /** R7: usage asks, refusals, and asks made with 80% or more of the relay's budget spent. */
+    /** R7: usage asks, refusals, and asks made within 12.5 s of the last (the relay allows one
+     * per 10 s). */
     usageAsks: { count: number; refused: number; nearBudget: number };
     /** R8: bytes sent since a usage answer said slowed, and the count of times that beat the trickle rate. */
     sentWhileSlowed: { count: number; bytes: number };

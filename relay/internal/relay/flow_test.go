@@ -58,20 +58,46 @@ func TestQuotaTrickleAndUsage(t *testing.T) {
 	p, w, absent := keys(t, 1), keys(t, 2), keys(t, 3)
 	r := roster(t, 1, p, w, absent)
 	pc, wc := h.register(p, p, r), h.register(w, p, r)
+	unslowed := map[string]any{"type": "shaping", "rateBps": float64(0), "slowed": false}
+	if !reflect.DeepEqual(pc.shaping, unslowed) || !reflect.DeepEqual(wc.shaping, unslowed) {
+		t.Fatalf("at registration: %v and %v", pc.shaping, wc.shaping)
+	}
 
-	// The quota: 100 kB goes at full speed.
+	// The quota: 100 kB goes at full speed. The frame that spends it has every member told at
+	// once, the primary ahead of that frame.
 	const size = 10_000
+	slowed := map[string]any{"type": "shaping", "rateBps": float64(50_000), "slowed": true}
 	began := time.Now()
 	for range 10 {
 		wc.sendBinary(frame(typeData, p.ID, make([]byte, size-18)))
 	}
-	for range 10 {
+	for range 9 {
 		pc.frame()
+	}
+	if m := pc.json(); !reflect.DeepEqual(m, slowed) {
+		t.Fatalf("primary told %v", m)
+	}
+	pc.frame()
+	if m := wc.json(); !reflect.DeepEqual(m, slowed) {
+		t.Fatalf("sender told %v", m)
 	}
 	if el := time.Since(began); el > 700*time.Millisecond {
 		t.Fatalf("within quota took %v", el)
 	}
+	// For a second after the notice the rate before (none) is kept, so what members sent
+	// before they heard is read at once rather than at the trickle.
+	began = time.Now()
+	for range 5 {
+		wc.sendBinary(frame(typeData, p.ID, make([]byte, size-18)))
+	}
+	for range 5 {
+		pc.frame()
+	}
+	if el := time.Since(began); el > 700*time.Millisecond {
+		t.Fatalf("within the grace took %v", el)
+	}
 	// Then the trickle: 100 kB at 50 kB/s with one second of burst, at least a second.
+	time.Sleep(shapingGrace)
 	began = time.Now()
 	for range 10 {
 		wc.sendBinary(frame(typeData, p.ID, make([]byte, size-18)))
@@ -86,8 +112,9 @@ func TestQuotaTrickleAndUsage(t *testing.T) {
 	ask := `{"type":"usage","id":"u1"}`
 	pc.ws.WriteMessage(websocket.TextMessage, []byte(ask))
 	u := pc.json()
-	// Exactly what crossed: every frame at its size on the wire, and the ask itself.
-	charged := 20*wire(size) + wire(len(ask))
+	// Exactly what crossed: every frame at its size on the wire, and the ask itself. The
+	// shaping notices are not charged.
+	charged := 25*wire(size) + wire(len(ask))
 	want := map[string]any{"type": "usage", "id": "u1", "network": map[string]any{
 		"bytesHour": float64(charged), "connections": float64(2), "quotaUsed": float64(charged) / 100_000, "slowed": true,
 		"limits": map[string]any{"rateBps": float64(0), "quotaBytesHour": float64(100_000), "trickleBps": float64(50_000)},
@@ -95,7 +122,7 @@ func TestQuotaTrickleAndUsage(t *testing.T) {
 	if !reflect.DeepEqual(u, want) {
 		t.Fatalf("usage:\n got %v\nwant %v", u, want)
 	}
-	// Nothing is pushed: no alert came, and none comes.
+	// Usage itself is never pushed, and the shaping has not changed: nothing more comes.
 	pc.quiet(300 * time.Millisecond)
 
 	// Usage is the primary's only.
@@ -148,6 +175,7 @@ func TestUsageCountsEverything(t *testing.T) {
 		t.Fatalf("bytesHour %v, want %d", got, want)
 	}
 	// The answer to that ask counts too.
+	h.s.refillUsage()
 	pc.ws.WriteMessage(websocket.TextMessage, []byte(ask))
 	want += wireSize(len(answered)) + wire(len(ask))
 	if got := pc.json()["network"].(map[string]any)["bytesHour"]; got != float64(want) {
@@ -155,7 +183,8 @@ func TestUsageCountsEverything(t *testing.T) {
 	}
 }
 
-// Asks are limited per network: three at once, then refused with the request's id, not queued.
+// Asks are limited per network: one per 10 seconds with no burst, a second refused with the
+// request's id, not queued.
 func TestUsageAskBudget(t *testing.T) {
 	h := start(t, nil)
 	p := keys(t, 1)
@@ -290,6 +319,7 @@ func TestNetworkForgottenAfterTTL(t *testing.T) {
 	if m := c.json(); m["type"] != "registered" || m["rosterVersion"] != float64(3) || m["roster"] != nil {
 		t.Fatalf("got %v", m)
 	}
+	c.shapingNotice()
 }
 
 func TestNetworkKeptWhileAMemberIsConnected(t *testing.T) {

@@ -77,13 +77,27 @@ The relay is meant to be thin: bandwidth should be the only thing that limits it
   (text, pings, handshakes, `refused`, `reset`, `control`) in one unfragmented frame goes ahead
   within the sender's own control budget (and the network's backstop ceiling), so one member
   cannot hold back another's handshakes. Frames are never dropped.
+- **The shaping notice** (section 9): every member is sent `{"type":"shaping","rateBps","slowed"}`
+  right after `registered`, and again whenever the rate in force or the trickle changes: the
+  charge that spends the quota, a loop that looks at every slowed network once a second for its
+  hour's charges ageing below the quota, and a limits reload. Members pace their data to it, so
+  their own control never waits behind data the relay holds back. When the quota is spent the
+  rate before stays in force for one second, so what members sent before they heard is read
+  rather than left in front of their control at the trickle. Notices are not charged.
+- **The relay's own messages first:** a connection's queue has two lanes. `hello`, `registered`,
+  `shaping`, `error` and `usage`, and a pairing channel's `pairing`, `pair` frames and `pairEnd`,
+  are written ahead of the routed frames queued for it (pings and pongs ahead of both); each lane
+  keeps its order. Each socket has `TCP_NOTSENT_LOWAT` at 64 KiB (Linux, macOS), so the kernel
+  holds little unsent either, and an answer never waits behind the megabytes `LINK_QUEUE_BYTES`
+  may let the relay queue for a member.
 - **Back-pressure** is TCP's: a sender whose frame a recipient's socket did not take is not read
   again until that frame is written (`LINK_QUEUE_BYTES`, default 0). A connection's own answers
   pause it beyond 64 KiB. Pongs are coalesced to the latest ping.
 - **Liveness:** each interval the relay pings every connection, one shard of the table at a
   time, so a large relay's pings are spread out, and drops one that has not answered the
   previous ping. A connection the relay is holding back is not judged.
-- **Usage** is request-only (section 4.3): a few asks per network, every answer charged.
+- **Usage** is request-only (section 4.3): one ask per network every 10 seconds, no burst, every
+  answer charged.
 - **Rosters** are verified with an in-tree RFC 8785 canonicaliser (`internal/link`), checked
   against the RFC's examples.
 

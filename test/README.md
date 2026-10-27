@@ -38,7 +38,9 @@ Playwright's Chromium at the version `package.json` pins (`npx playwright instal
   every member is told the trickle within 2 s of the quota being spent, and its lifting within
   2 s of a limits reload.
 - `interop.test.ts` — the clients against one another, each node a **driver** of its
-  implementation (below): pairing by link and by code fields; wrong, burned, expired and
+  implementation (below): a network made with no relay (refused a connection without a relay
+  URL), placed alike by every implementation, then registered and paired; pairing by link and by
+  code fields; wrong, burned, expired and
   cancelled codes; small and several-MiB messages both ways (sha256); flow control with a
   receiver that does not take; rekeying on a timer and on a message count, seen through
   `sessions` and counted from the traffic report; reset after a peer restarts from its seed; unreachable peers; refusal by a
@@ -47,7 +49,9 @@ Playwright's Chromium at the version `package.json` pins (`npx playwright instal
   seed, the former primary demoted in place and still connected; replacement (4005) by a copy
   of another implementation;
   usage and its budget; traffic counters agreeing between sender and receiver; a network of
-  every implementation at once; and, per implementation, the driver's lifecycle and error codes.
+  every implementation at once; and, per implementation, the driver's lifecycle and error codes,
+  and a node with its relay unreachable (refused, a name that does not resolve) retrying without
+  crashing, one on a roster with no relay refused at once.
 
 ## Drivers
 

@@ -10,8 +10,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use link_client::{
-    ErrorCode, Event, Identity, InboundMessage, Json, LinkError, Member, MemberOptions, MemberState, Observed,
-    PairOptions, PairTarget, Primary, Roster, Shaping, Timing, TrafficReport, create_network, pair, unix_ms,
+    ErrorCode, Event, Identity, InboundMessage, Json, LinkError, Member, MemberOptions, MemberState, NetworkOptions,
+    Observed, PairOptions, PairTarget, Primary, Roster, RosterMember, Shaping, Timing, TrafficReport,
+    create_network_with_options, pair, place_network,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -165,6 +166,21 @@ fn from_b64(s: &str) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// A roster member entry, as a roster writes it; its id must be the one its key derives.
+fn member_arg(m: &Json) -> Result<RosterMember, Failure> {
+    let key = |k: &str| -> Result<[u8; 32], Failure> {
+        let s = m.get(k).and_then(Json::as_str).ok_or_else(|| invalid(format!("member {k} must be a string")))?;
+        link_client::wire::from_b64u(s)
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            .ok_or_else(|| invalid(format!("member {k}: expected 32 bytes")))
+    };
+    let entry = RosterMember::new(key("ed25519")?, key("x25519")?);
+    if m.get("id").and_then(Json::as_str) != Some(entry.id()) {
+        return Err(invalid("member id is not derived from its ed25519"));
+    }
+    Ok(entry)
 }
 
 fn b64_arg(args: &Json, key: &str) -> Result<Vec<u8>, Failure> {
@@ -358,14 +374,37 @@ async fn command(driver: &Arc<Driver>, cmd: &str, args: &Json) -> Reply {
                 ("seed", Json::str(b64(identity.seed()))),
                 ("node", Json::str(identity.id())),
                 ("ed25519", Json::str(link_client::wire::b64u(&identity.ed25519_public()))),
+                ("x25519", Json::str(link_client::wire::b64u(&identity.x25519_public()))),
             ]);
             driver.lock().identity = Some(identity);
             Ok(reply)
         }
         "createNetwork" => {
-            let (roster, key) =
-                create_network(&driver.identity()?, str_arg(args, "relay")?, unix_ms()).map_err(invalid)?;
-            Ok(obj(vec![("roster", roster.json().clone()), ("networkSeed", Json::str(b64(key.seed())))]))
+            let mut members = Vec::new();
+            if let Some(list) = args.get("members") {
+                let list = list.as_array().ok_or_else(|| invalid("members must be an array"))?;
+                for m in list {
+                    members.push(member_arg(m)?);
+                }
+            }
+            let relay = opt_str(args, "relay")?.unwrap_or("").to_owned();
+            let opts = NetworkOptions { relay, members, ..Default::default() };
+            let (roster, key) = create_network_with_options(&driver.identity()?, opts)?;
+            Ok(obj(vec![
+                ("roster", roster.json().clone()),
+                ("networkSeed", Json::str(b64(key.seed()))),
+                ("placed", Json::Bool(roster.is_placed())),
+            ]))
+        }
+        "placeNetwork" => {
+            let roster = args.get("roster").ok_or_else(|| invalid("roster must be an object"))?;
+            let roster =
+                Roster::from_json(roster.clone()).map_err(|e| invalid(format!("the roster is not valid: {e}")))?;
+            let seed: [u8; 32] =
+                b64_arg(args, "networkSeed")?.try_into().map_err(|_| invalid("networkSeed must be 32 bytes"))?;
+            let now = opt_int(args, "now")?;
+            let placed = place_network(&roster, &seed, str_arg(args, "relay")?, now)?;
+            Ok(obj(vec![("roster", placed.json().clone()), ("placed", Json::Bool(placed.is_placed()))]))
         }
         "pair" => {
             let identity = driver.identity()?;

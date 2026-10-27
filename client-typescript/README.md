@@ -48,8 +48,11 @@ primary, it claims the primary once registered, publishing the next roster with 
 primary in place: its codes close and its pairing channels end, and its connection and sessions
 stay.
 
-**Rosters.** `createNetwork({ identity, relay, networkSeed? })` returns `{ roster, networkSeed }`:
-version 1 with the primary alone, signed by the network key. A roster is `{ network, version,
+**Rosters.** `createNetwork({ identity, relay?, members?, now?, networkSeed? })` returns
+`{ roster, networkSeed }`: version 1 with `identity` as the primary and `members` (roster entries,
+none by default) listed beside it, issued at `now` (Unix milliseconds), signed by the network key.
+It throws `InvalidError` for an entry that is not one or is listed twice, and `RosterFullError`
+over 65000 bytes. A roster is `{ network, version,
 issuedAt, relay, networkKey, primary, members, signature }`: `primary` is a member's node id, and
 each member is `{ id, ed25519, x25519 }`; `primaryOf(r)` is that member's entry. Members carry no
 categories: an application that has some keeps them in its own data, by node id.
@@ -58,13 +61,38 @@ applies the acceptance rule; `canonicalize(value)` is RFC 8785 JCS. A roster's J
 signature included, is at most `MAX_ROSTER_BYTES` (65000 bytes, about 440 members; `rosterSize(r)`
 measures it), so it always fits one session message; a larger one is invalid.
 
+**A network with no relay yet** (section 3.2). Without `relay` (or with `''`), `createNetwork` makes
+a network that is not placed: valid, but no member dials it, so it can be made offline, and placed the
+first time the primary can reach the directory. `isPlaced(roster)` says whether a roster names a relay. A `Member` or
+`Primary` on an unplaced roster without a `relayUrl` throws `InvalidError` ("the network has no
+relay yet") at once; with one, it dials that, and its pairing links name it.
+`placeNetwork({ roster, networkSeed, relay, now? })` returns the next version with `relay` set and
+nothing else changed, signed by the network key; start the primary on it and it publishes it at
+registration. It throws `InvalidError` when the roster is placed already, when `relay` is not a
+`ws://` or `wss://` URL (`isRelayUrl`), or when the seed does not derive the roster's network
+key. A placed network is not placed again.
+
+**Offline.** A member never stops or crashes for want of a network (section 11): with its relay
+unreachable (refused, a name that does not resolve, no route) or gone mid-session, it says so
+through its states (`disconnected`, then `connecting` again), retries with backoff, and a call
+that needs the relay fails with its own error; a lookup after 4009 that answers something that is
+not a URL is ignored.
+
+```ts
+const { roster, networkSeed } = createNetwork({ identity: me, members: [memberFromIdentity(laptop)] }); // no relay
+// ...later, the first time the directory answers:
+const { url } = await pickRelay({ network: roster.network, directory });
+const placed = placeNetwork({ roster, networkSeed, relay: url });   // version 2: persist it
+const primary = await Primary.connect({ identity: me, roster: placed, networkSeed });
+```
+
 **`Member`** (`Member.connect(options)` resolves once registered; `new Member(options)` starts
 connecting and returns at once):
 
 | Option | |
 |---|---|
 | `identity`, `roster` | required; the newest roster held |
-| `relayUrl` | defaults to `roster.relay` |
+| `relayUrl` | defaults to `roster.relay`; required on a roster not placed yet |
 | `pinnedNetworkKey` | defaults to `roster.networkKey` |
 | `networkSeed` | the network seed, for the node to be the primary; it must derive `roster.networkKey` |
 | `WebSocket` | a WHATWG WebSocket constructor, used as given |
@@ -129,7 +157,12 @@ within a second however busy the network. The relay allows one ask per `USAGE_IN
 **Pairing.** `pair({ link, identity, WebSocket?, timeoutMs? })` returns
 `{ roster, pinnedNetworkKey }`, or rejects with `PairingError`, `UnreachableError` (the primary is
 not connected) or `TimeoutError`. Codes: `generateCode`, `normalizeCode`, `formatCode`;
-links: `buildPairingLink`, `parsePairingLink`.
+pairing parameters (section 5.1): `buildPairingParams(parts)` writes
+`v=1&n=…&c=…&i=…&r=…` alone, and `parsePairingParams(string)` reads it back, throwing
+`InvalidError` on a missing parameter, an unknown version or a bad value. Link defines the
+parameters, not a scheme: carry them as you like, in an https URL's fragment say
+(`https://example.com/#${buildPairingParams(parts)}`). `buildPairingLink` and `parsePairingLink`
+are one wrapping of them, `frontier://pair?<parameters>`.
 
 ## Choosing a relay
 
@@ -147,7 +180,7 @@ region (the fastest of three requests each, within `timeoutMs`, default 3 s), ta
 and puts the network's shard into that region's template. The shard is `shardOf(network,
 shards)` with that region's `shards`: the first four bytes of SHA-256 of the network id, big-endian, modulo `shards`, in
 lowercase hex padded to the width of `shards - 1` (`00` to `ff` for 256). Pass the URL it returns
-to `createNetwork({ relay })`; the roster carries it from then on, so the directory is consulted
+to `createNetwork({ relay })`, or to `placeNetwork` for a network made before it had one; the roster carries it from then on, so the directory is consulted
 once, at creation, and never on reconnect. It throws when no region answers; fall back to a relay
 of your own.
 

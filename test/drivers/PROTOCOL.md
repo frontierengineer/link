@@ -30,7 +30,8 @@ protocol, cited below as "spec section N"), with no need to read another impleme
 
 A driver holds at most one identity and at most one node at a time.
 
-1. `identity` sets the identity that `createNetwork`, `pair`, `connect` and `start` use. It may be
+1. `identity` sets the identity that `createNetwork`, `pair`, `connect` and `start` use
+   (`placeNetwork` uses none). It may be
    called again at any time; a running node keeps the identity it started with.
 2. `createNetwork` (a primary) or `pair` (a newcomer) yields a roster, and `createNetwork` a
    network seed too. Neither starts a node.
@@ -50,8 +51,9 @@ peer's roster does not list this node).
 
 | Command | Arguments | Result |
 |---|---|---|
-| `identity` | `seed?` (base64, 32 bytes; random when absent) | `seed`, `node` (the node id), `ed25519` |
-| `createNetwork` | `relay` (URL) | `roster`: version 1, this identity alone as primary, signed with a network key minted for it; `networkSeed` (base64, 32 bytes) |
+| `identity` | `seed?` (base64, 32 bytes; random when absent) | `seed`, `node` (the node id), `ed25519`, `x25519` |
+| `createNetwork` | `relay?` (URL; default `""`, a network not placed yet), `members?` (roster member entries `{id, ed25519, x25519}`) | `roster`: version 1, this identity as primary and `members` beside it, signed with a network key minted for it; `networkSeed` (base64, 32 bytes); `placed` (whether `roster.relay` names a relay) |
+| `placeNetwork` | `roster`, `networkSeed` (base64), `relay` (URL), `now?` (Unix milliseconds; default now) | `roster`: the next version with `relay` set, nothing else changed (spec section 3.2); `placed` |
 | `pair` | `link`, or `network`+`code`+`codeId`+`relay`; `timeoutMs?` (default 60000, the whole exchange) | `roster`, `pinnedNetworkKey` (`roster.networkKey`) |
 | `connect` | `role` (`member` or `primary`), `roster`, `networkSeed?` (base64), `pinnedNetworkKey?`, `relayUrl?`, `creditWindow?`, `timing?`, `autoTake?` (default `true`), `timeoutMs?` | `{}` once registered |
 | `start` | as `connect`, without `timeoutMs` | `{}` at once; the node connects in the background |
@@ -89,7 +91,10 @@ naming it primary stops acting as the primary in place, and stays connected.
 **`connect`/`start` arguments.** `roster` must be valid and list this identity, and
 `pinnedNetworkKey` (default `roster.networkKey`) must equal `roster.networkKey`; otherwise
 `invalid`. `networkSeed`, when given, must derive `roster.networkKey` (`invalid` otherwise).
-`relayUrl` defaults to `roster.relay`. `role: "primary"` requires `networkSeed` (`invalid`
+`relayUrl` defaults to `roster.relay`; a roster not placed yet (`relay` `""`) with no `relayUrl`
+fails `invalid` at once, and the node is not created (spec section 3.2), as does a `relayUrl` that is
+not a URL. A relay that cannot be reached is never an error of `connect` or `start` but a
+connection that failed: the node retries (spec section 11), and `connect` waits or times out. `role: "primary"` requires `networkSeed` (`invalid`
 otherwise); the node is then the primary, claiming it when the roster names another (above).
 `creditWindow` is the receive window granted per session, an integer from 1048576 (the initial credit, the default) to 2^32 − 1; more than the
 initial credit is granted as extra credit when a session comes up (spec section 7.3).
@@ -134,6 +139,13 @@ listed. So for a session both sides hold, one side's `localIndex` is the other's
 member fits under the roster limit it fails `roster-full`.
 
 **`revoke`** fails `invalid` for the primary itself or a node not on the roster.
+
+**`createNetwork` and `placeNetwork`** (spec sections 3.1 and 3.2). `createNetwork` fails
+`invalid` for a member entry that is not one (an id its `ed25519` does not derive, a key not of
+32 bytes) or that is listed twice, this identity included. `placeNetwork` fails `invalid` when
+`roster` is not valid or is placed already, when `relay` is not a relay URL (spec section 3.2),
+or when `networkSeed` does not derive `roster.networkKey`. With the same arguments, `now`
+included, every implementation answers the same roster.
 
 **`usage`** asks the relay (spec section 4.3) and answers its report:
 `{"network": {"bytesHour", "connections", "limits": {"rateBps", "quotaBytesHour", "trickleBps"},

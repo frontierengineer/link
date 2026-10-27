@@ -286,8 +286,8 @@ func TestClientVectorsRosters(t *testing.T) {
 		}
 		accepts = append(accepts, c.Accept)
 	}
-	if len(accepts) != 5 {
-		t.Error("expected five acceptance cases")
+	if len(accepts) != 6 {
+		t.Error("expected six acceptance cases")
 	}
 }
 

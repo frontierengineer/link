@@ -226,9 +226,13 @@ export class RelayConnection extends Emitter<RelayEvents> {
       const network = this.o.roster().network;
       this.emit('moved', { network });
       if (this.o.resolveRelay) {
-        this.o.resolveRelay(network).then(
+        const resolve = this.o.resolveRelay;
+        // Called inside a promise, so a resolver that throws is a failed lookup, not an exception
+        // out of a socket's close callback.
+        new Promise<string | undefined>((r) => r(resolve(network))).then(
           (url) => {
-            if (url) this.url = url;
+            // What is not a URL is no relay to dial: the current URL stays, as no answer keeps it.
+            if (url && isUrl(url)) this.url = url;
             this.schedule();
           },
           () => this.schedule(),
@@ -247,5 +251,14 @@ export class RelayConnection extends Emitter<RelayEvents> {
     this.timer = setTimeout(() => {
       if (this._state === 'disconnected') this.dial();
     }, delay);
+  }
+}
+
+function isUrl(s: string): boolean {
+  try {
+    new URL(s);
+    return true;
+  } catch {
+    return false;
   }
 }

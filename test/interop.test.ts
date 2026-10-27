@@ -6,7 +6,8 @@
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import type { PeerTraffic, Roster } from '@frontierengineer/link-client';
+import { createServer } from 'node:net';
+import { canonicalize, type PeerTraffic, type Roster } from '@frontierengineer/link-client';
 import { relayBinary } from './support/relay.js';
 import {
   b64,
@@ -770,7 +771,103 @@ each('traffic: what the sender counts sent, the receiver counts received', ({ p,
   }),
 );
 
+// Offline, once per implementation: a node whose relay is unreachable keeps running and retries,
+// one on a roster with no relay is refused at once, and the driver exits 0 at the end, so neither
+// crashed it (spec section 11).
+for (const impl of available) {
+  test(`offline: an unreachable relay is a connection that failed, retried; nothing crashes [${impl}]`, { timeout: TIMEOUT }, () =>
+    scene({}, async (s) => {
+      const port = await new Promise<number>((resolve) => {
+        const srv = createServer().listen(0, '127.0.0.1', () => {
+          const p = (srv.address() as { port: number }).port;
+          srv.close(() => resolve(p));
+        });
+      });
+      for (const relay of [`ws://127.0.0.1:${port}/v1`, 'ws://link-relay.invalid/v1']) {
+        const d = await s.spawn(impl, `offline ${relay}`);
+        const { roster, networkSeed } = await d.createNetwork(relay);
+        await d.start({ role: 'primary', roster, networkSeed, timing: FAST });
+        await refusedWith(d.waitConnected(1000), 'timeout');
+        await until(async () => d.events.filter((e) => e.event === 'state' && e.state === 'connecting').length >= 2, 'a second dial');
+        assert.ok(['connecting', 'disconnected'].includes((await d.state()).state));
+        // Not connected: the clients answer `closed` at once or `timeout` after waiting to connect.
+        await assert.rejects(d.usage(), (e: { code?: string }) => ['closed', 'timeout'].includes(e.code ?? ''));
+        await d.close();
+      }
+      const d = await s.spawn(impl, 'unplaced');
+      const made = await d.createNetwork();
+      await refusedWith(d.start({ role: 'primary', roster: made.roster, networkSeed: made.networkSeed, timing: FAST }), 'invalid');
+      await refusedWith(d.start({ role: 'primary', roster: made.roster, networkSeed: made.networkSeed, relayUrl: 'not a url', timing: FAST }), 'invalid');
+    }),
+  );
+}
+
 // The lifecycle and the error codes PROTOCOL.md gives every driver, once per implementation.
+each('an unplaced network: made with no relay, refused a connection, placed alike by every implementation, then registered and paired', ({ p, a, b }) =>
+  scene({}, async (s) => {
+    const pd = await s.spawn(p, 'primary');
+    const ad = await s.spawn(a, 'a');
+    const bd = await s.spawn(b, 'b');
+    // Version 1 names no relay and lists a beside the primary (spec section 3.2).
+    const made = await pd.createNetwork(undefined, [ad.member]);
+    assert.equal(made.placed, false);
+    assert.equal(made.roster.relay, '');
+    assert.equal(made.roster.version, 1);
+    assert.equal(made.roster.primary, pd.id);
+    assert.deepEqual(made.roster.members, [pd.member, ad.member].sort((x, y) => (x.id < y.id ? -1 : 1)));
+    const { networkSeed } = made;
+
+    // No member dials it without a relay URL of its own: refused, and nothing crashes.
+    await refusedWith(pd.connect({ role: 'primary', roster: made.roster, networkSeed, timing: FAST, timeoutMs: 5000 }), 'invalid');
+    await refusedWith(ad.start({ role: 'member', roster: made.roster, timing: FAST }), 'invalid');
+    // Given one, the primary registers it as it is: the relay takes a roster that names none.
+    await pd.connect({ role: 'primary', roster: made.roster, networkSeed, relayUrl: s.relay.url, timing: FAST });
+    assert.equal((await pd.state()).roster.version, 1);
+    await pd.close();
+
+    // Placing: each implementation signs the same version 2 from the same inputs.
+    const now = Date.now();
+    const placings = await Promise.all([pd, ad, bd].map((d) => d.placeNetwork({ roster: made.roster, networkSeed, relay: s.relay.url, now })));
+    for (const r of placings) {
+      assert.equal(r.placed, true);
+      assert.equal(canonicalize(r.roster), canonicalize(placings[0]!.roster));
+    }
+    const placed = placings[0]!.roster;
+    assert.equal(placed.version, 2);
+    assert.equal(placed.relay, s.relay.url);
+    assert.equal(placed.issuedAt, Math.max(now, made.roster.issuedAt));
+    const { relay: _r, version: _v, issuedAt: _i, signature: _s, ...rest } = placed;
+    const { relay: _r1, version: _v1, issuedAt: _i1, signature: _s1, ...before } = made.roster;
+    assert.deepEqual(rest, before, 'nothing else changed');
+    // Placed once only, at a ws(s) URL, by the network's own seed.
+    await refusedWith(bd.placeNetwork({ roster: placed, networkSeed, relay: 'wss://elsewhere.example/v1' }), 'invalid');
+    await refusedWith(bd.placeNetwork({ roster: made.roster, networkSeed, relay: 'https://elsewhere.example/v1' }), 'invalid');
+    await refusedWith(bd.placeNetwork({ roster: made.roster, networkSeed: b64(randomBytes(32)), relay: s.relay.url }), 'invalid');
+
+    // Registered: the primary presents version 2 over the relay's version 1, and a joins with it,
+    // listed since creation, without pairing.
+    await pd.connect({ role: 'primary', roster: placed, networkSeed, timing: FAST });
+    await ad.connect({ role: 'member', roster: placed, timing: FAST });
+    assert.equal((await ad.state()).roster.version, 2);
+
+    // Paired: b, through a code whose link names the relay.
+    const code = await pd.openPairingCode();
+    assert.ok(code.link.endsWith(`&r=${encodeURIComponent(s.relay.url)}`), code.link);
+    const paired = await bd.pair({ link: code.link });
+    assert.equal(paired.roster.version, 3);
+    assert.equal(paired.roster.relay, s.relay.url);
+    await bd.connect({ role: 'member', roster: paired.roster, timing: FAST });
+    await rosterAtLeast(ad, 3);
+
+    await ad.send(bd.id, { bytes: textB64('a to b') });
+    assert.deepEqual(await texts(bd, ad.id, 1), ['a to b']);
+    await bd.send(pd.id, { bytes: textB64('b to p') });
+    assert.deepEqual(await texts(pd, bd.id, 1), ['b to p']);
+    await pd.send(ad.id, { bytes: textB64('p to a') });
+    assert.deepEqual(await texts(ad, pd.id, 1), ['p to a']);
+  }),
+);
+
 for (const impl of available) {
   test(`the driver lifecycle and its error codes [${impl}]`, { timeout: TIMEOUT }, () =>
     scene({}, async (s) => {

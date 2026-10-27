@@ -42,7 +42,8 @@ pub struct MemberOptions {
     pub identity: Identity,
     /// The newest roster this member holds (persist it from every `Event::Roster`).
     pub roster: Roster,
-    /// Defaults to the roster's `relay`.
+    /// Defaults to the roster's `relay`. A roster whose network is not placed yet has none (`""`):
+    /// a member of it needs this, or it is not started (`Invalid`).
     pub relay_url: Option<String>,
     /// The network key pinned at pairing (b64u); defaults to the roster's `networkKey`.
     pub pinned_network_key: Option<String>,

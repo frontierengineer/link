@@ -111,6 +111,15 @@ type command struct {
 	Count            *int            `json:"count"`
 	LifetimeMs       int64           `json:"lifetimeMs"`
 	Node             string          `json:"node"`
+	Members          *[]rosterMember `json:"members"`
+	Now              *int64          `json:"now"`
+}
+
+// rosterMember is a roster member entry as a roster writes it.
+type rosterMember struct {
+	ID      string `json:"id"`
+	Ed25519 string `json:"ed25519"`
+	X25519  string `json:"x25519"`
 }
 
 type timing struct {
@@ -330,6 +339,7 @@ func (d *driver) run(c command) (*link.Member, result, error) {
 			"seed":    base64.StdEncoding.EncodeToString(id.Seed()),
 			"node":    id.ID(),
 			"ed25519": base64.RawURLEncoding.EncodeToString(id.Ed25519Public()),
+			"x25519":  base64.RawURLEncoding.EncodeToString(id.X25519Public()),
 		}, nil
 
 	case "createNetwork":
@@ -337,11 +347,42 @@ func (d *driver) run(c command) (*link.Member, result, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		r, seed, err := link.CreateNetwork(id, c.Relay, time.Now(), nil)
-		if err != nil {
-			return nil, nil, invalid("%v", err)
+		opts := link.NetworkOptions{Primary: id, Relay: c.Relay}
+		if c.Members != nil {
+			for _, m := range *c.Members {
+				opts.Members = append(opts.Members, link.RosterMember{ID: m.ID, Ed25519: m.Ed25519, X25519: m.X25519})
+			}
 		}
-		return nil, result{"roster": rosterValue(r), "networkSeed": base64.StdEncoding.EncodeToString(seed)}, nil
+		r, seed, err := link.CreateNetworkWith(opts)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, result{"roster": rosterValue(r), "networkSeed": base64.StdEncoding.EncodeToString(seed), "placed": r.IsPlaced()}, nil
+
+	case "placeNetwork":
+		roster, err := link.DecodeRoster(c.Roster)
+		if err != nil {
+			return nil, nil, invalid("roster: %v", err)
+		}
+		if c.NetworkSeed == nil {
+			return nil, nil, invalid("networkSeed must be a string")
+		}
+		seed, err := base64.StdEncoding.DecodeString(*c.NetworkSeed)
+		if err != nil {
+			return nil, nil, invalid("networkSeed: %v", err)
+		}
+		var now int64
+		if c.Now != nil {
+			if *c.Now < 0 {
+				return nil, nil, invalid("now must be a non-negative integer")
+			}
+			now = *c.Now
+		}
+		placed, err := link.PlaceNetwork(roster, seed, c.Relay, now)
+		if err != nil {
+			return nil, nil, err
+		}
+		return nil, result{"roster": rosterValue(placed), "placed": placed.IsPlaced()}, nil
 
 	case "pair":
 		id, err := d.ident()

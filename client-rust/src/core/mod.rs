@@ -250,6 +250,16 @@ impl Node {
         }
         let claim_at_start = network_key.is_some() && cfg.identity.id() != roster.primary_id();
         let url = cfg.relay_url.unwrap_or_else(|| roster.relay().to_owned());
+        if url.is_empty() {
+            // An unplaced network (section 3.2) has no relay to dial: a member of one is not
+            // started unless it is given a relay URL itself.
+            return Err(LinkError::invalid(
+                "the network has no relay yet: place it (place_network), or give relay_url",
+            ));
+        }
+        if url::Url::parse(&url).is_err() {
+            return Err(LinkError::invalid(format!("the relay URL {url:?} is not a URL")));
+        }
         let timing = TimingMs::from(cfg.timing);
         let now = cfg.clock.now_ms();
         let unix = cfg.clock.unix_ms();
@@ -414,7 +424,8 @@ impl Node {
 
     /// The application's answer to a 4009 lookup.
     pub(crate) fn on_resolved(&mut self, url: Option<String>) {
-        if let Some(u) = url {
+        // What is not a URL is no relay to dial: the current URL stays, as no answer keeps it.
+        if let Some(u) = url.filter(|u| url::Url::parse(u).is_ok()) {
             self.url = u;
         }
         self.schedule();

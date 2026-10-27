@@ -192,7 +192,8 @@ export class PrimaryRole {
       code: formatCode(code),
       codeId,
       expiresAt,
-      link: buildPairingLink({ network: this.m.roster().network, code, codeId, relay: this.m.roster().relay }),
+      // A network not placed yet names no relay: the link names the one this primary dials.
+      link: buildPairingLink({ network: this.m.roster().network, code, codeId, relay: this.m.roster().relay || this.m.relay.relayUrl }),
     };
   }
 

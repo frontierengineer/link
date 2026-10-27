@@ -180,6 +180,22 @@ export interface ChannelHandlers {
 
 const OPEN = 1;
 
+/** A socket that never opened: what a Channel holds when its WebSocket could not be made. */
+const DEAD_SOCKET = (): WebSocketLike =>
+  ({
+    readyState: 3,
+    bufferedAmount: 0,
+    binaryType: 'arraybuffer',
+    onopen: null,
+    onmessage: null,
+    onclose: null,
+    onerror: null,
+    send() {
+      throw new Error('the socket never opened');
+    },
+    close() {},
+  }) as unknown as WebSocketLike;
+
 /** One WebSocket connection, framed as the protocol uses it. */
 export class Channel {
   private readonly ws: WebSocketLike;
@@ -190,7 +206,17 @@ export class Channel {
   queued = 0;
 
   constructor(url: string, WS: WebSocketConstructor, private readonly h: ChannelHandlers) {
-    this.ws = new WS(url);
+    try {
+      this.ws = new WS(url);
+    } catch (e) {
+      // A URL the WebSocket refuses (not a URL, a scheme it does not take) is a connection that
+      // failed, reported as any other: closed 1006, a moment later, never thrown at whoever dialled
+      // (a timer or a callback, where it would end the process).
+      this.ws = DEAD_SOCKET();
+      const reason = e instanceof Error ? e.message : String(e);
+      setTimeout(() => this.finish(1006, reason), 0);
+      return;
+    }
     this.ws.binaryType = 'arraybuffer';
     this.ws.onopen = () => this.h.onOpen?.();
     this.ws.onmessage = (ev) => this.receive(ev.data);

@@ -10,15 +10,18 @@ import {
   createIdentity,
   createNetwork,
   identityFromSeed,
+  isPlaced,
   LinkError,
   Member,
   RefusedError,
   pair,
+  placeNetwork,
   Primary,
   type Identity,
   type InboundMessage,
   type MemberOptions,
   type Roster,
+  type RosterMember,
   type Timing,
 } from '@frontierengineer/link-client';
 
@@ -230,12 +233,31 @@ function open(args: Json): Member | Primary {
 const commands: Record<string, (args: Json) => Promise<Json> | Json> = {
   identity(args) {
     identity = args.seed === undefined ? createIdentity() : identityFromSeed(base64(args, 'seed'));
-    return { seed: b64(identity.seed), node: identity.id, ed25519: Buffer.from(identity.ed25519.pub).toString('base64url') };
+    return {
+      seed: b64(identity.seed),
+      node: identity.id,
+      ed25519: Buffer.from(identity.ed25519.pub).toString('base64url'),
+      x25519: Buffer.from(identity.x25519.pub).toString('base64url'),
+    };
   },
 
   createNetwork(args) {
-    const { roster, networkSeed } = createNetwork({ identity: needIdentity(), relay: str(args, 'relay') });
-    return { roster, networkSeed: b64(networkSeed) };
+    const members = args.members;
+    if (members !== undefined && !Array.isArray(members)) throw invalid('members must be an array');
+    const { roster, networkSeed } = createNetwork({
+      identity: needIdentity(),
+      relay: optStr(args, 'relay') ?? '',
+      ...(members !== undefined ? { members: members as RosterMember[] } : {}),
+    });
+    return { roster, networkSeed: b64(networkSeed), placed: isPlaced(roster) };
+  },
+
+  placeNetwork(args) {
+    const roster = args.roster as Roster;
+    if (typeof roster !== 'object' || roster === null) throw invalid('roster must be an object');
+    const now = optInt(args, 'now');
+    const placed = placeNetwork({ roster, networkSeed: base64(args, 'networkSeed'), relay: str(args, 'relay'), ...(now !== undefined ? { now } : {}) });
+    return { roster: placed, placed: isPlaced(placed) };
   },
 
   async pair(args) {

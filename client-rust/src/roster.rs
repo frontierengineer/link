@@ -7,6 +7,7 @@
 
 use crate::bytes::{b64u, from_b64u_array};
 use crate::crypto::ed25519_verify;
+use crate::errors::LinkError;
 use crate::identity::{Identity, NetworkKey, node_id_from_ed25519, node_id_to_bytes};
 use crate::json::Json;
 
@@ -123,6 +124,12 @@ impl Roster {
 
     pub fn relay(&self) -> &str {
         &self.relay
+    }
+
+    /// Whether the network is placed: the roster names a relay (section 3.2). A roster whose
+    /// `relay` is `""` is valid, but no member dials it until it is placed.
+    pub fn is_placed(&self) -> bool {
+        !self.relay.is_empty()
     }
 
     /// `networkKey`, raw.
@@ -328,6 +335,125 @@ pub fn create_network_with(identity: &Identity, key: &NetworkKey, relay: &str, n
         },
         key,
     )
+}
+
+/// What [`create_network_with_options`] takes besides the primary's identity.
+#[derive(Clone, Debug, Default)]
+pub struct NetworkOptions {
+    /// The relay URL the network's members dial, or `""` (the default) for a network not placed
+    /// yet (section 3.2): no member dials it until [`place_network`] gives it one.
+    pub relay: String,
+    /// Listed in version 1 alongside the primary.
+    pub members: Vec<RosterMember>,
+    /// The roster's `issuedAt`, Unix milliseconds; `None` for the current time.
+    pub now_ms: Option<u64>,
+    /// The network's seed; `None` mints one.
+    pub network_seed: Option<[u8; 32]>,
+}
+
+/// A new network (section 3.1), as [`create_network`] makes one, with the relay optional and other
+/// members listed in version 1 beside `identity`, the primary. Persist the network key's seed as
+/// secretly as the node's, and hand it to the primary as `MemberOptions::network_seed`. Fails
+/// `Invalid` for a member listed twice (the primary included) or a timestamp over 2^53 - 1, and
+/// `RosterFull` over 65000 bytes.
+pub fn create_network_with_options(
+    identity: &Identity,
+    opts: NetworkOptions,
+) -> Result<(Roster, NetworkKey), LinkError> {
+    let now_ms = opts.now_ms.unwrap_or_else(crate::unix_ms);
+    if now_ms > MAX_SAFE_INTEGER {
+        return Err(LinkError::invalid("createNetwork: now must be a non-negative integer of Unix milliseconds"));
+    }
+    let mut members = vec![RosterMember::from_identity(identity)];
+    for m in opts.members {
+        if members.iter().any(|x| x.id == m.id) {
+            return Err(LinkError::invalid(format!("createNetwork: member {} is listed twice", m.id)));
+        }
+        members.push(m);
+    }
+    let key = match opts.network_seed {
+        Some(seed) => NetworkKey::from_seed(&seed),
+        None => NetworkKey::generate(),
+    };
+    let unsigned = UnsignedRoster {
+        network: key.id().to_owned(),
+        version: 1,
+        issued_at: now_ms,
+        relay: opts.relay,
+        network_key: key.ed25519_public(),
+        primary: identity.id().to_owned(),
+        members,
+    };
+    let size = signed_size(&unsigned);
+    if size > MAX_ROSTER_BYTES {
+        return Err(LinkError::roster_full(size));
+    }
+    let roster = sign_roster(&unsigned, &key).map_err(LinkError::invalid)?;
+    Ok((roster, key))
+}
+
+const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
+
+/// Whether `s` is a relay URL as placing a network takes it (section 3.2): it begins `ws://` or
+/// `wss://`, in lower case, followed at once by a host (the text before the next `/`, `?` or `#`
+/// is not empty), and it parses as a URL.
+pub fn is_relay_url(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("ws://").or_else(|| s.strip_prefix("wss://")) else {
+        return false;
+    };
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    host_end > 0 && url::Url::parse(s).is_ok()
+}
+
+/// Places a network (section 3.2): the roster after `roster`, an unplaced one, with `relay` set
+/// and nothing else changed (version + 1, `issuedAt` the later of `now_ms`, or the current time,
+/// and the roster's), signed with the network key `network_seed` derives. Publish it as any new
+/// roster: a primary started on it presents it at registration. Fails `Invalid` when the network
+/// is placed already, when `relay` is not a ws:// or wss:// URL ([`is_relay_url`]), or when
+/// `network_seed` does not derive the roster's network key.
+pub fn place_network(
+    roster: &Roster,
+    network_seed: &[u8; 32],
+    relay: &str,
+    now_ms: Option<u64>,
+) -> Result<Roster, LinkError> {
+    if roster.is_placed() {
+        return Err(LinkError::invalid("placeNetwork: the network is placed already"));
+    }
+    if !is_relay_url(relay) {
+        return Err(LinkError::invalid("placeNetwork: relay must be a ws:// or wss:// URL"));
+    }
+    let key = NetworkKey::from_seed(network_seed);
+    if &key.ed25519_public() != roster.network_key() {
+        return Err(LinkError::invalid("placeNetwork: the network seed does not derive the roster's network key"));
+    }
+    let now_ms = now_ms.unwrap_or_else(crate::unix_ms);
+    if now_ms > MAX_SAFE_INTEGER {
+        return Err(LinkError::invalid("placeNetwork: now must be a non-negative integer of Unix milliseconds"));
+    }
+    // Everything else as signed, fields the protocol does not define included.
+    let Json::Object(fields) = roster.json() else {
+        return Err(LinkError::invalid("placeNetwork: the roster is not an object"));
+    };
+    let mut fields: Vec<(String, Json)> = fields.iter().filter(|(k, _)| k != "signature").cloned().collect();
+    for (k, v) in &mut fields {
+        match k.as_str() {
+            "version" => *v = Json::int(roster.version() + 1),
+            "issuedAt" => *v = Json::int(now_ms.max(roster.issued_at())),
+            "relay" => *v = Json::str(relay),
+            _ => {}
+        }
+    }
+    let mut probe = fields.clone();
+    probe.push(("signature".into(), Json::str("A".repeat(86))));
+    let size = Json::Object(probe).canonicalize().map_err(|e| LinkError::invalid(e.to_string()))?.len();
+    if size > MAX_ROSTER_BYTES {
+        return Err(LinkError::roster_full(size));
+    }
+    let unsigned = Json::Object(fields.clone());
+    let signature = key.sign(&roster_signing_bytes(&unsigned).map_err(LinkError::invalid)?);
+    fields.push(("signature".into(), Json::str(b64u(&signature))));
+    Roster::from_json(Json::Object(fields)).map_err(|e| LinkError::invalid(format!("placeNetwork: {e}")))
 }
 
 #[cfg(test)]

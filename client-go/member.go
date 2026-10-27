@@ -73,7 +73,8 @@ func (t Timing) withDefaults() Timing {
 type MemberOptions struct {
 	Identity *Identity // required
 	Roster   *Roster   // required: the newest roster held
-	// RelayURL defaults to the roster's relay.
+	// RelayURL defaults to the roster's relay. A roster whose network is not placed yet has none
+	// (""): a member of it needs this, or it is not started (invalid).
 	RelayURL string
 	// PinnedNetworkKey is the network key pinned at pairing; it defaults to the roster's.
 	PinnedNetworkKey string
@@ -216,6 +217,11 @@ func newMember(opts MemberOptions) (*Member, error) {
 	url := opts.RelayURL
 	if url == "" {
 		url = opts.Roster.Relay
+	}
+	if url == "" {
+		// An unplaced network (section 3.2) has no relay to dial: a member of one is not started
+		// unless it is given a relay URL itself.
+		return nil, invalidError("the network has no relay yet: place it (PlaceNetwork), or give RelayURL")
 	}
 	if _, err := normalizeRelayURL(url); err != nil {
 		return nil, invalidError(err.Error())

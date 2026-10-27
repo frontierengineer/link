@@ -46,7 +46,8 @@ export interface MemberOptions {
   identity: Identity;
   /** The newest roster this member holds (persist it from the `roster` event). */
   roster: Roster;
-  /** Defaults to `roster.relay`. */
+  /** Defaults to `roster.relay`. A roster whose network is not placed yet has none (`''`): a
+   * member of it needs this, or it is not started (InvalidError). */
   relayUrl?: string;
   /** The network key pinned at pairing; defaults to `roster.networkKey`. */
   pinnedNetworkKey?: string;
@@ -227,8 +228,17 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     if (!Number.isInteger(creditWindow) || creditWindow < INITIAL_CREDIT || creditWindow > 0xffffffff) {
       throw new InvalidError('creditWindow must be an integer from 1 MiB to 2^32 - 1');
     }
+    // An unplaced network (section 3.2) has no relay to dial: a member of one is not started
+    // unless it is given a relay URL itself.
+    const url = opts.relayUrl ?? opts.roster.relay;
+    if (url === '') throw new InvalidError('the network has no relay yet: place it (placeNetwork), or give relayUrl');
+    try {
+      new URL(url);
+    } catch {
+      throw new InvalidError(`the relay URL ${JSON.stringify(url)} is not a URL`);
+    }
     this.relay = new RelayConnection({
-      url: opts.relayUrl ?? opts.roster.relay,
+      url,
       identity: opts.identity,
       roster: () => this.currentRoster,
       WebSocket: chooseSocket({ WebSocket: opts.WebSocket, WebSocketStream: opts.WebSocketStream }),

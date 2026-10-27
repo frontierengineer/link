@@ -250,7 +250,12 @@ func (m *Member) OpenPairingCode(opts PairingCodeOptions) (PairingCode, error) {
 		lifetime = CodeLifetime
 	}
 	expires := m.clock.Now().Add(lifetime) // shown; the code expires on the monotonic clock
-	link, err := BuildPairingLink(PairingLink{Network: m.roster.Network, Code: code, CodeID: codeID, Relay: m.roster.Relay})
+	relay := m.roster.Relay
+	if relay == "" {
+		// A network not placed yet names no relay: the link names the one this primary dials.
+		relay = m.relay.url
+	}
+	link, err := BuildPairingLink(PairingLink{Network: m.roster.Network, Code: code, CodeID: codeID, Relay: relay})
 	if err != nil {
 		return PairingCode{}, err
 	}

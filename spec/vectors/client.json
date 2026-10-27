@@ -262,6 +262,54 @@
           ],
           "signature": "9ol1eashdFj8m2A6k5-k9-07grK26znrv0q2stzi2dMyeidDrxu-gH6XV-0JLxKZjcZEfoVbwO0sHQsbAkLKAA"
         }
+      },
+      {
+        "name": "unplaced: version 1 with no relay yet",
+        "roster": {
+          "network": "326jkitmrebtxmtl33rtlpr2nq",
+          "version": 1,
+          "issuedAt": 1790000000000,
+          "relay": "",
+          "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+          "primary": "ixldtk3yi32p4qs53iko7652ae",
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+            }
+          ],
+          "signature": "qS6OBDlE13N_kc8_us_TT7WemqCu6ReQIdy1Mf91TUQdSaifYFfNo0N_3cwIkHFnCQ1D2bl3MppIiPixbVVKCw"
+        }
+      },
+      {
+        "name": "placed: version 2 with the relay set",
+        "roster": {
+          "network": "326jkitmrebtxmtl33rtlpr2nq",
+          "version": 2,
+          "issuedAt": 1790000060000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+          "primary": "ixldtk3yi32p4qs53iko7652ae",
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+            }
+          ],
+          "signature": "LmqywS0jWpRyF_JVKTrCODVqgQgpn1caO6cP86uKilvm3-P_b8gV2KHiFrPgtgACiaMeD2kZt3DdD0bWSIp5Ag"
+        }
       }
     ],
     "invalid": [
@@ -786,8 +834,379 @@
         "pinnedNetworkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
         "heldVersion": 1,
         "accept": false
+      },
+      {
+        "name": "placed, over the unplaced version 1",
+        "roster": {
+          "network": "326jkitmrebtxmtl33rtlpr2nq",
+          "version": 2,
+          "issuedAt": 1790000060000,
+          "relay": "wss://eu.frontierengineer.link/v1",
+          "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+          "primary": "ixldtk3yi32p4qs53iko7652ae",
+          "members": [
+            {
+              "id": "3pby7sw7zs7anfsf37reujd3qi",
+              "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+              "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+            },
+            {
+              "id": "ixldtk3yi32p4qs53iko7652ae",
+              "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+              "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+            }
+          ],
+          "signature": "LmqywS0jWpRyF_JVKTrCODVqgQgpn1caO6cP86uKilvm3-P_b8gV2KHiFrPgtgACiaMeD2kZt3DdD0bWSIp5Ag"
+        },
+        "pinnedNetworkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+        "heldVersion": 1,
+        "accept": true
       }
-    ]
+    ],
+    "placing": {
+      "primarySeed": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "networkSeed": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "members": [
+        {
+          "id": "3pby7sw7zs7anfsf37reujd3qi",
+          "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+          "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+        }
+      ],
+      "createdAt": 1790000000000,
+      "unplaced": {
+        "network": "326jkitmrebtxmtl33rtlpr2nq",
+        "version": 1,
+        "issuedAt": 1790000000000,
+        "relay": "",
+        "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+        "primary": "ixldtk3yi32p4qs53iko7652ae",
+        "members": [
+          {
+            "id": "3pby7sw7zs7anfsf37reujd3qi",
+            "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+            "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+          },
+          {
+            "id": "ixldtk3yi32p4qs53iko7652ae",
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+            "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+          }
+        ],
+        "signature": "qS6OBDlE13N_kc8_us_TT7WemqCu6ReQIdy1Mf91TUQdSaifYFfNo0N_3cwIkHFnCQ1D2bl3MppIiPixbVVKCw"
+      },
+      "relay": "wss://eu.frontierengineer.link/v1",
+      "placedAt": 1790000060000,
+      "placed": {
+        "network": "326jkitmrebtxmtl33rtlpr2nq",
+        "version": 2,
+        "issuedAt": 1790000060000,
+        "relay": "wss://eu.frontierengineer.link/v1",
+        "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+        "primary": "ixldtk3yi32p4qs53iko7652ae",
+        "members": [
+          {
+            "id": "3pby7sw7zs7anfsf37reujd3qi",
+            "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+            "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+          },
+          {
+            "id": "ixldtk3yi32p4qs53iko7652ae",
+            "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+            "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+          }
+        ],
+        "signature": "LmqywS0jWpRyF_JVKTrCODVqgQgpn1caO6cP86uKilvm3-P_b8gV2KHiFrPgtgACiaMeD2kZt3DdD0bWSIp5Ag"
+      },
+      "placedAccepted": [
+        {
+          "name": "any relay URL of the rule",
+          "relay": "ws://127.0.0.1:8080/v1",
+          "roster": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "version": 2,
+            "issuedAt": 1790000060000,
+            "relay": "ws://127.0.0.1:8080/v1",
+            "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+            "primary": "ixldtk3yi32p4qs53iko7652ae",
+            "members": [
+              {
+                "id": "3pby7sw7zs7anfsf37reujd3qi",
+                "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+                "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+              },
+              {
+                "id": "ixldtk3yi32p4qs53iko7652ae",
+                "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+                "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+              }
+            ],
+            "signature": "i0qG165xRcYhfAFHDCi6ZQtjBUY0w5-1LJrCpegp28_Y6XPH4fHJO7gd0_AdtgjdVRfpJ8RB6iuijWmWaLVhAg"
+          }
+        },
+        {
+          "name": "a non-ASCII host, a port and a query",
+          "relay": "wss://relé.example:8443/v1?q=ü",
+          "roster": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "version": 2,
+            "issuedAt": 1790000060000,
+            "relay": "wss://relé.example:8443/v1?q=ü",
+            "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+            "primary": "ixldtk3yi32p4qs53iko7652ae",
+            "members": [
+              {
+                "id": "3pby7sw7zs7anfsf37reujd3qi",
+                "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+                "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+              },
+              {
+                "id": "ixldtk3yi32p4qs53iko7652ae",
+                "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+                "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+              }
+            ],
+            "signature": "QC-sMpHAqhhVUuIZXvkRdT7U07zmjgGzgeMNld0g4weu8JvWndf4vx3PO0KTnxqXAOg7I2iAlFxZZX64UqhfBQ"
+          }
+        }
+      ],
+      "refused": [
+        {
+          "name": "already placed",
+          "roster": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "version": 2,
+            "issuedAt": 1790000060000,
+            "relay": "wss://eu.frontierengineer.link/v1",
+            "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+            "primary": "ixldtk3yi32p4qs53iko7652ae",
+            "members": [
+              {
+                "id": "3pby7sw7zs7anfsf37reujd3qi",
+                "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+                "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+              },
+              {
+                "id": "ixldtk3yi32p4qs53iko7652ae",
+                "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+                "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+              }
+            ],
+            "signature": "LmqywS0jWpRyF_JVKTrCODVqgQgpn1caO6cP86uKilvm3-P_b8gV2KHiFrPgtgACiaMeD2kZt3DdD0bWSIp5Ag"
+          },
+          "networkSeed": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+          "relay": "wss://elsewhere.example/v1"
+        },
+        {
+          "name": "the seed of another network",
+          "roster": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "version": 1,
+            "issuedAt": 1790000000000,
+            "relay": "",
+            "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+            "primary": "ixldtk3yi32p4qs53iko7652ae",
+            "members": [
+              {
+                "id": "3pby7sw7zs7anfsf37reujd3qi",
+                "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+                "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+              },
+              {
+                "id": "ixldtk3yi32p4qs53iko7652ae",
+                "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+                "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+              }
+            ],
+            "signature": "qS6OBDlE13N_kc8_us_TT7WemqCu6ReQIdy1Mf91TUQdSaifYFfNo0N_3cwIkHFnCQ1D2bl3MppIiPixbVVKCw"
+          },
+          "networkSeed": "7777777777777777777777777777777777777777777777777777777777777777",
+          "relay": "wss://eu.frontierengineer.link/v1"
+        },
+        {
+          "name": "relay: no relay",
+          "roster": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "version": 1,
+            "issuedAt": 1790000000000,
+            "relay": "",
+            "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+            "primary": "ixldtk3yi32p4qs53iko7652ae",
+            "members": [
+              {
+                "id": "3pby7sw7zs7anfsf37reujd3qi",
+                "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+                "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+              },
+              {
+                "id": "ixldtk3yi32p4qs53iko7652ae",
+                "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+                "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+              }
+            ],
+            "signature": "qS6OBDlE13N_kc8_us_TT7WemqCu6ReQIdy1Mf91TUQdSaifYFfNo0N_3cwIkHFnCQ1D2bl3MppIiPixbVVKCw"
+          },
+          "networkSeed": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+          "relay": ""
+        },
+        {
+          "name": "relay: an https URL",
+          "roster": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "version": 1,
+            "issuedAt": 1790000000000,
+            "relay": "",
+            "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+            "primary": "ixldtk3yi32p4qs53iko7652ae",
+            "members": [
+              {
+                "id": "3pby7sw7zs7anfsf37reujd3qi",
+                "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+                "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+              },
+              {
+                "id": "ixldtk3yi32p4qs53iko7652ae",
+                "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+                "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+              }
+            ],
+            "signature": "qS6OBDlE13N_kc8_us_TT7WemqCu6ReQIdy1Mf91TUQdSaifYFfNo0N_3cwIkHFnCQ1D2bl3MppIiPixbVVKCw"
+          },
+          "networkSeed": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+          "relay": "https://eu.frontierengineer.link/v1"
+        },
+        {
+          "name": "relay: no scheme",
+          "roster": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "version": 1,
+            "issuedAt": 1790000000000,
+            "relay": "",
+            "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+            "primary": "ixldtk3yi32p4qs53iko7652ae",
+            "members": [
+              {
+                "id": "3pby7sw7zs7anfsf37reujd3qi",
+                "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+                "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+              },
+              {
+                "id": "ixldtk3yi32p4qs53iko7652ae",
+                "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+                "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+              }
+            ],
+            "signature": "qS6OBDlE13N_kc8_us_TT7WemqCu6ReQIdy1Mf91TUQdSaifYFfNo0N_3cwIkHFnCQ1D2bl3MppIiPixbVVKCw"
+          },
+          "networkSeed": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+          "relay": "eu.frontierengineer.link/v1"
+        },
+        {
+          "name": "relay: no host",
+          "roster": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "version": 1,
+            "issuedAt": 1790000000000,
+            "relay": "",
+            "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+            "primary": "ixldtk3yi32p4qs53iko7652ae",
+            "members": [
+              {
+                "id": "3pby7sw7zs7anfsf37reujd3qi",
+                "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+                "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+              },
+              {
+                "id": "ixldtk3yi32p4qs53iko7652ae",
+                "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+                "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+              }
+            ],
+            "signature": "qS6OBDlE13N_kc8_us_TT7WemqCu6ReQIdy1Mf91TUQdSaifYFfNo0N_3cwIkHFnCQ1D2bl3MppIiPixbVVKCw"
+          },
+          "networkSeed": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+          "relay": "wss:///v1"
+        },
+        {
+          "name": "relay: one slash",
+          "roster": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "version": 1,
+            "issuedAt": 1790000000000,
+            "relay": "",
+            "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+            "primary": "ixldtk3yi32p4qs53iko7652ae",
+            "members": [
+              {
+                "id": "3pby7sw7zs7anfsf37reujd3qi",
+                "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+                "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+              },
+              {
+                "id": "ixldtk3yi32p4qs53iko7652ae",
+                "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+                "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+              }
+            ],
+            "signature": "qS6OBDlE13N_kc8_us_TT7WemqCu6ReQIdy1Mf91TUQdSaifYFfNo0N_3cwIkHFnCQ1D2bl3MppIiPixbVVKCw"
+          },
+          "networkSeed": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+          "relay": "ws:/eu.frontierengineer.link/v1"
+        },
+        {
+          "name": "relay: an upper-case scheme",
+          "roster": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "version": 1,
+            "issuedAt": 1790000000000,
+            "relay": "",
+            "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+            "primary": "ixldtk3yi32p4qs53iko7652ae",
+            "members": [
+              {
+                "id": "3pby7sw7zs7anfsf37reujd3qi",
+                "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+                "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+              },
+              {
+                "id": "ixldtk3yi32p4qs53iko7652ae",
+                "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+                "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+              }
+            ],
+            "signature": "qS6OBDlE13N_kc8_us_TT7WemqCu6ReQIdy1Mf91TUQdSaifYFfNo0N_3cwIkHFnCQ1D2bl3MppIiPixbVVKCw"
+          },
+          "networkSeed": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+          "relay": "WSS://eu.frontierengineer.link/v1"
+        },
+        {
+          "name": "relay: a host that is not one",
+          "roster": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "version": 1,
+            "issuedAt": 1790000000000,
+            "relay": "",
+            "networkKey": "zSJXmiVyDrmGTrgqghcMMZk_Gh0xUwEclYYkDyDT04k",
+            "primary": "ixldtk3yi32p4qs53iko7652ae",
+            "members": [
+              {
+                "id": "3pby7sw7zs7anfsf37reujd3qi",
+                "ed25519": "PME_L2yAYbQg2wN2Jap328FLFyktzOEtVOEZpWUd_aQ",
+                "x25519": "Unervbga2T2zUPizHPJRghFtmtKi6HppuSzWFoIJJU4"
+              },
+              {
+                "id": "ixldtk3yi32p4qs53iko7652ae",
+                "ed25519": "xm-MHKl7MUYkDXPGAx3pZo-Tq19UXMIVmR71k8dWoZ8",
+                "x25519": "1EiVh7Auy8dOO2OCsFSItN-U6bMag597_TtELrr7rz8"
+              }
+            ],
+            "signature": "qS6OBDlE13N_kc8_us_TT7WemqCu6ReQIdy1Mf91TUQdSaifYFfNo0N_3cwIkHFnCQ1D2bl3MppIiPixbVVKCw"
+          },
+          "networkSeed": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+          "relay": "wss://eu frontierengineer.link/v1"
+        }
+      ]
+    }
   },
   "register": [
     {
@@ -839,6 +1258,132 @@
       "codeIdB64u": "AQIDBAUGBwg",
       "relay": "wss://eu.frontierengineer.link/v1",
       "link": "frontier://pair?v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1"
+    },
+    "params": {
+      "network": "326jkitmrebtxmtl33rtlpr2nq",
+      "code": "7K2M9QXZ",
+      "codeIdB64u": "AQIDBAUGBwg",
+      "relay": "wss://eu.frontierengineer.link/v1",
+      "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+      "link": "frontier://pair?v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+      "fragment": "https://frontier.link/#v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+      "unicode": {
+        "network": "326jkitmrebtxmtl33rtlpr2nq",
+        "code": "7K2M9QXZ",
+        "codeId": "AQIDBAUGBwg",
+        "relay": "wss://relé.example:8443/v1?q=ü&x=1",
+        "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Frel%C3%A9.example%3A8443%2Fv1%3Fq%3D%C3%BC%26x%3D1"
+      },
+      "parse": [
+        {
+          "name": "as built",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+          "valid": true,
+          "parsed": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "code": "7K2M9QXZ",
+            "codeId": "AQIDBAUGBwg",
+            "relay": "wss://eu.frontierengineer.link/v1"
+          }
+        },
+        {
+          "name": "a non-ASCII relay with a port and a query, percent-encoded as UTF-8",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Frel%C3%A9.example%3A8443%2Fv1%3Fq%3D%C3%BC%26x%3D1",
+          "valid": true,
+          "parsed": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "code": "7K2M9QXZ",
+            "codeId": "AQIDBAUGBwg",
+            "relay": "wss://relé.example:8443/v1?q=ü&x=1"
+          }
+        },
+        {
+          "name": "any order, a displayed lower-case code, a parameter it does not know, an empty part",
+          "params": "r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1&&x=9&i=AQIDBAUGBwg&c=7k2m-9qxz&n=326jkitmrebtxmtl33rtlpr2nq&v=1",
+          "valid": true,
+          "parsed": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "code": "7K2M9QXZ",
+            "codeId": "AQIDBAUGBwg",
+            "relay": "wss://eu.frontierengineer.link/v1"
+          }
+        },
+        {
+          "name": "v missing",
+          "params": "n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+          "valid": false
+        },
+        {
+          "name": "an unknown version",
+          "params": "v=2&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+          "valid": false
+        },
+        {
+          "name": "n missing",
+          "params": "v=1&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+          "valid": false
+        },
+        {
+          "name": "c missing",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+          "valid": false
+        },
+        {
+          "name": "i missing",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+          "valid": false
+        },
+        {
+          "name": "r missing",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg",
+          "valid": false
+        },
+        {
+          "name": "r empty",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=",
+          "valid": false
+        },
+        {
+          "name": "n repeated",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1&n=326jkitmrebtxmtl33rtlpr2nq",
+          "valid": false
+        },
+        {
+          "name": "a part without =",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1&x",
+          "valid": false
+        },
+        {
+          "name": "n not a node id",
+          "params": "v=1&n=nope&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+          "valid": false
+        },
+        {
+          "name": "c not a code",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXU&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+          "valid": false
+        },
+        {
+          "name": "i not 8 bytes",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQID&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+          "valid": false
+        },
+        {
+          "name": "r an https URL",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=https%3A%2F%2Feu.frontierengineer.link%2Fv1",
+          "valid": false
+        },
+        {
+          "name": "r malformed percent-encoding",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Fa%2",
+          "valid": false
+        },
+        {
+          "name": "r percent-encoding that is not UTF-8",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Frel%FF.example%2Fv1",
+          "valid": false
+        }
+      ]
     },
     "codeNormalisation": [
       {

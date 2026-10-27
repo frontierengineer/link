@@ -147,7 +147,7 @@ fn client_roster_validity_and_acceptance() {
     }
     let acceptance = arr(rosters, "acceptance");
     let expected: Vec<bool> = acceptance.iter().map(|c| c.get("accept").and_then(Json::as_bool).unwrap()).collect();
-    assert_eq!(expected, [true, false, false, true, false]);
+    assert_eq!(expected, [true, false, false, true, false, true]);
     for c in acceptance {
         let got =
             acceptance_problem(c.get("roster").unwrap(), s(c, "pinnedNetworkKey"), uint(c, "heldVersion")).is_none();
@@ -192,6 +192,81 @@ fn client_pairing_link_and_codes() {
     assert_eq!(parse_pairing_link(s(l, "link")).unwrap(), parts);
     for c in arr(p, "codeNormalisation") {
         assert_eq!(normalize_code(s(c, "input")).unwrap(), s(c, "code"));
+    }
+}
+
+#[test]
+fn client_placing() {
+    let v = load("spec/vectors/client.json");
+    let p = v.get("roster").and_then(|r| r.get("placing")).unwrap();
+    let seed = h32(&hex(p, "networkSeed"));
+    let members: Vec<RosterMember> = arr(p, "members")
+        .iter()
+        .map(|m| {
+            let ed = from_b64u(s(m, "ed25519")).unwrap();
+            let x = from_b64u(s(m, "x25519")).unwrap();
+            let rm = RosterMember::new(h32(&ed), h32(&x));
+            assert_eq!(rm.id(), s(m, "id"));
+            rm
+        })
+        .collect();
+    let (created, key) = create_network_with_options(
+        &Identity::from_seed(&h32(&hex(p, "primarySeed"))),
+        NetworkOptions { members, now_ms: Some(uint(p, "createdAt")), network_seed: Some(seed), ..Default::default() },
+    )
+    .unwrap();
+    assert_eq!(key.seed(), &seed);
+    let unplaced = Roster::from_json(p.get("unplaced").unwrap().clone()).unwrap();
+    assert_eq!(created.to_jcs(), unplaced.to_jcs());
+    assert!(!unplaced.is_placed());
+    let placed = place_network(&unplaced, &seed, s(p, "relay"), Some(uint(p, "placedAt"))).unwrap();
+    assert_eq!(placed.to_jcs(), Roster::from_json(p.get("placed").unwrap().clone()).unwrap().to_jcs());
+    assert!(placed.is_placed());
+    for c in arr(p, "placedAccepted") {
+        let got = place_network(&unplaced, &seed, s(c, "relay"), Some(uint(p, "placedAt"))).unwrap();
+        assert_eq!(
+            got.to_jcs(),
+            Roster::from_json(c.get("roster").unwrap().clone()).unwrap().to_jcs(),
+            "{}",
+            s(c, "name")
+        );
+    }
+    let refused = arr(p, "refused");
+    assert!(refused.len() >= 5);
+    for c in refused {
+        let r = Roster::from_json(c.get("roster").unwrap().clone()).unwrap();
+        let e = place_network(&r, &h32(&hex(c, "networkSeed")), s(c, "relay"), Some(uint(p, "placedAt"))).unwrap_err();
+        assert_eq!(e.code(), ErrorCode::Invalid, "{}", s(c, "name"));
+    }
+}
+
+#[test]
+fn client_pairing_params() {
+    let v = load("spec/vectors/client.json");
+    let q = v.get("pairing").and_then(|p| p.get("params")).unwrap();
+    let parts_of = |o: &Json, id: &str| PairingLink {
+        network: s(o, "network").into(),
+        code: s(o, "code").into(),
+        code_id: s(o, id).into(),
+        relay: s(o, "relay").into(),
+    };
+    let parts = parts_of(q, "codeIdB64u");
+    assert_eq!(build_pairing_params(&parts).unwrap(), s(q, "params"));
+    assert_eq!(build_pairing_link(&parts).unwrap(), s(q, "link"));
+    assert_eq!(parse_pairing_link(s(q, "link")).unwrap(), parts);
+    let fragment = s(q, "fragment").split_once('#').unwrap().1;
+    assert_eq!(parse_pairing_params(fragment).unwrap(), parts);
+    let unicode = q.get("unicode").unwrap();
+    assert_eq!(build_pairing_params(&parts_of(unicode, "codeId")).unwrap(), s(unicode, "params"));
+    let cases = arr(q, "parse");
+    assert!(cases.len() >= 10);
+    for c in cases {
+        let got = parse_pairing_params(s(c, "params"));
+        if c.get("valid").and_then(Json::as_bool).unwrap() {
+            assert_eq!(got.unwrap(), parts_of(c.get("parsed").unwrap(), "codeId"), "{}", s(c, "name"));
+        } else {
+            assert_eq!(got.unwrap_err().code(), ErrorCode::Invalid, "{}", s(c, "name"));
+        }
     }
 }
 

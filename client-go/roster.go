@@ -4,7 +4,9 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"net/url"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -458,6 +460,187 @@ func CreateNetwork(primary *Identity, relay string, now time.Time, networkSeed [
 		return nil, nil, err
 	}
 	return r, key.Seed(), nil
+}
+
+// NetworkOptions are CreateNetworkWith's.
+type NetworkOptions struct {
+	// Primary is the node that creates the network and is its primary. Required.
+	Primary *Identity
+	// Relay is the relay URL the network's members dial, or "" (the default) for a network not
+	// placed yet (section 3.2): no member dials it until PlaceNetwork gives it one.
+	Relay string
+	// Members are listed in version 1 alongside the primary; only their ID, Ed25519 and X25519
+	// are taken.
+	Members []RosterMember
+	// NowMs is the roster's issuedAt, Unix milliseconds; 0 means the current time.
+	NowMs int64
+	// NetworkSeed is the network's seed; nil mints one.
+	NetworkSeed []byte
+}
+
+// CreateNetworkWith makes a new network (section 3.1) as CreateNetwork does, with the relay
+// optional and other members listed in version 1 beside the primary. It returns the roster and
+// the network seed: persist the seed as secretly as the node's own, and hand it to the primary as
+// MemberOptions.NetworkSeed. It fails invalid (errors.Is(err, ErrInvalid)) for a missing primary,
+// a network seed not of 32 bytes, a negative NowMs, or a member entry that is not one or is
+// listed twice (the primary included), and roster-full over 65000 bytes.
+func CreateNetworkWith(opts NetworkOptions) (*Roster, []byte, error) {
+	if opts.Primary == nil {
+		return nil, nil, invalidError("createNetwork: a primary identity is required")
+	}
+	if opts.NetworkSeed != nil && len(opts.NetworkSeed) != 32 {
+		return nil, nil, invalidError("createNetwork: the network seed must be 32 bytes")
+	}
+	now := opts.NowMs
+	if now == 0 {
+		now = time.Now().UnixMilli()
+	}
+	if now < 0 || now > 1<<53-1 {
+		return nil, nil, invalidError("createNetwork: now must be a non-negative integer of Unix milliseconds")
+	}
+	members := []RosterMember{MemberFromIdentity(opts.Primary)}
+	for _, m := range opts.Members {
+		if err := memberProblem(m); err != nil {
+			return nil, nil, invalidError("createNetwork: " + err.Error())
+		}
+		for _, x := range members {
+			if x.ID == m.ID {
+				return nil, nil, invalidError(fmt.Sprintf("createNetwork: member %s is listed twice", m.ID))
+			}
+		}
+		members = append(members, RosterMember{ID: m.ID, Ed25519: m.Ed25519, X25519: m.X25519})
+	}
+	seed := opts.NetworkSeed
+	if seed == nil {
+		var err error
+		if seed, err = NewNetworkSeed(); err != nil {
+			return nil, nil, err
+		}
+	}
+	key, err := NetworkKeyFromSeed(seed)
+	if err != nil {
+		return nil, nil, invalidError(err.Error())
+	}
+	u := UnsignedRoster{
+		Network:    key.ID(),
+		Version:    1,
+		IssuedAt:   now,
+		Relay:      opts.Relay,
+		NetworkKey: b64u(key.edPub),
+		Primary:    opts.Primary.ID(),
+		Members:    members,
+	}
+	slices.SortFunc(u.Members, func(a, b RosterMember) int { return cmp.Compare(a.ID, b.ID) })
+	size, err := (&Roster{UnsignedRoster: u, Signature: strings.Repeat("A", 86)}).Size()
+	if err != nil {
+		return nil, nil, invalidError(err.Error())
+	}
+	if size > MaxRosterBytes {
+		return nil, nil, rosterFullError(size)
+	}
+	r, err := SignRoster(u, key)
+	if err != nil {
+		return nil, nil, invalidError(err.Error())
+	}
+	return r, key.Seed(), nil
+}
+
+// memberProblem says why m is not a roster member entry, or returns nil.
+func memberProblem(m RosterMember) error {
+	if !IsNodeID(m.ID) {
+		return errors.New("member id is not a node id")
+	}
+	ed, err := fromB64uLen(m.Ed25519, 32, "member ed25519")
+	if err != nil {
+		return err
+	}
+	if _, err := fromB64uLen(m.X25519, 32, "member x25519"); err != nil {
+		return err
+	}
+	if NodeIDFromEd25519(ed) != m.ID {
+		return fmt.Errorf("member %s: id is not derived from its ed25519", m.ID)
+	}
+	return nil
+}
+
+// IsPlaced reports whether the network is placed: the roster names a relay (section 3.2). A
+// roster whose Relay is "" is valid, but no member dials it until it is placed.
+func (r *Roster) IsPlaced() bool { return r.Relay != "" }
+
+// IsRelayURL reports whether s is a relay URL as placing a network takes it (section 3.2): it
+// begins "ws://" or "wss://", in lower case, followed at once by a host (the text before the
+// next '/', '?' or '#' is not empty), and it parses as a URL.
+func IsRelayURL(s string) bool {
+	rest, ok := strings.CutPrefix(s, "ws://")
+	if !ok {
+		if rest, ok = strings.CutPrefix(s, "wss://"); !ok {
+			return false
+		}
+	}
+	if i := strings.IndexAny(rest, "/?#"); i == 0 || rest == "" {
+		return false
+	}
+	_, err := url.Parse(s)
+	return err == nil
+}
+
+// PlaceNetwork places a network (section 3.2): the roster after r, an unplaced one, with relay
+// set and nothing else changed (version + 1, issuedAt the later of nowMs and r's; nowMs 0 means
+// the current time), signed with the network key networkSeed derives. Publish it as any new
+// roster: a primary started on it presents it at registration. It fails invalid
+// (errors.Is(err, ErrInvalid)) when r is not valid or is placed already, when relay is not a
+// ws:// or wss:// URL (IsRelayURL), or when networkSeed does not derive r's network key.
+func PlaceNetwork(r *Roster, networkSeed []byte, relay string, nowMs int64) (*Roster, error) {
+	if r == nil {
+		return nil, invalidError("placeNetwork: no roster")
+	}
+	if err := r.Problem(); err != nil {
+		return nil, invalidError("placeNetwork: the roster is not valid: " + err.Error())
+	}
+	if r.IsPlaced() {
+		return nil, invalidError("placeNetwork: the network is placed already")
+	}
+	if !IsRelayURL(relay) {
+		return nil, invalidError("placeNetwork: relay must be a ws:// or wss:// URL")
+	}
+	if len(networkSeed) != 32 {
+		return nil, invalidError("placeNetwork: the network seed must be 32 bytes")
+	}
+	key, err := NetworkKeyFromSeed(networkSeed)
+	if err != nil {
+		return nil, invalidError("placeNetwork: " + err.Error())
+	}
+	if b64u(key.edPub) != r.NetworkKey {
+		return nil, invalidError("placeNetwork: the network seed does not derive the roster's network key")
+	}
+	if nowMs == 0 {
+		nowMs = time.Now().UnixMilli()
+	}
+	if nowMs < 0 || nowMs > 1<<53-1 {
+		return nil, invalidError("placeNetwork: now must be a non-negative integer of Unix milliseconds")
+	}
+	// Everything else as signed, members the protocol does not define included.
+	next := r.Clone()
+	next.Version = r.Version + 1
+	next.IssuedAt = max(nowMs, r.IssuedAt)
+	next.Relay = relay
+	next.Signature = strings.Repeat("A", 86)
+	size, err := next.Size()
+	if err != nil {
+		return nil, invalidError(err.Error())
+	}
+	if size > MaxRosterBytes {
+		return nil, rosterFullError(size)
+	}
+	signed, err := next.SigningBytes()
+	if err != nil {
+		return nil, invalidError(err.Error())
+	}
+	next.Signature = b64u(key.Sign(signed))
+	if err := next.Problem(); err != nil {
+		return nil, invalidError("placeNetwork: " + err.Error())
+	}
+	return next, nil
 }
 
 // x25519Of decodes a member's X25519 key.

@@ -56,6 +56,10 @@ key, and the network seed. The network id derives from the network key, never fr
 The roster's `Primary` (also `(*Roster).PrimaryID()`) is the node id of the primary, and must
 be a member's id. A member is `{ID, Ed25519, X25519}`; any field this version does not define is
 signed and otherwise ignored. `MemberFromIdentity(identity)` is an identity's entry.
+`CreateNetworkWith(NetworkOptions{Primary, Relay, Members, NowMs, NetworkSeed})` does the same with
+the relay optional, `Members` listed in version 1 beside the primary, and the time in Unix
+milliseconds (0: now); it fails `invalid` for an entry that is not one or is listed twice, and
+`roster-full` over 65000 bytes.
 `*Roster` marshals and unmarshals as JSON (strictly: no duplicate keys, no lone surrogates),
 keeping any members this protocol version does not define, since the signature covers them.
 `DecodeRoster(json)` checks the shape, `ValidateRoster(json)` and `(*Roster).Problem()` every
@@ -64,13 +68,38 @@ rule of section 3; `AcceptanceProblem(r, pinnedNetworkKey, heldVersion)` applies
 `Clone`; `Canonicalize(json)` is RFC 8785 JCS. A roster's JCS encoding, signature included, is
 at most `MaxRosterBytes` (65000 bytes, about 440 members), so it always fits one session message.
 
+**A network with no relay yet** (section 3.2). With `Relay` empty, `CreateNetworkWith` makes a
+network that is not placed: valid, but no member dials it, so it can be made offline, and placed the
+first time the primary can reach the directory. `(*Roster).IsPlaced()` says whether a roster names a relay. A member or
+primary on an unplaced roster without `RelayURL` fails `invalid` ("the network has no relay yet")
+at once; with one, it dials that, and its pairing links name it.
+`PlaceNetwork(roster, networkSeed, relay, nowMs)` returns the next version with `relay` set and
+nothing else changed (`nowMs` 0: now), signed by the network key; start the primary on it and it
+publishes it at registration. It fails `invalid` (`errors.Is(err, link.ErrInvalid)`) when the
+roster is placed already, when `relay` is not a `ws://` or `wss://` URL (`IsRelayURL`), or when
+the seed does not derive the roster's network key. A placed network is not placed again.
+
+**Offline.** A member never stops or crashes for want of a network (section 11): with its relay
+unreachable (refused, a name that does not resolve, no route) or gone mid-session, it says so
+through its states (`disconnected`, then `connecting` again), retries with backoff, and a call
+that needs the relay fails with its own error; a lookup after 4009 that answers something that is
+not a URL is ignored.
+
+```go
+roster, seed, _ := link.CreateNetworkWith(link.NetworkOptions{Primary: me, Members: []link.RosterMember{link.MemberFromIdentity(laptop)}})
+// ...later, the first time the directory answers:
+picked, _ := link.PickRelay(ctx, link.PickRelayOptions{Network: roster.Network, DirectoryURL: dir})
+placed, _ := link.PlaceNetwork(roster, seed, picked.URL, 0) // version 2: persist it
+primary, _ := link.ConnectPrimary(ctx, link.MemberOptions{Identity: me, Roster: placed, NetworkSeed: seed})
+```
+
 **`Member`** (`ConnectMember(ctx, options)` returns once registered; `NewMember(options)` starts
 connecting and returns at once):
 
 | `MemberOptions` | |
 |---|---|
 | `Identity`, `Roster` | required; the newest roster held |
-| `RelayURL` | defaults to the roster's relay |
+| `RelayURL` | defaults to the roster's relay; required on a roster not placed yet |
 | `PinnedNetworkKey` | defaults to the roster's `networkKey` |
 | `NetworkSeed` | for the node meant to be the primary; must derive the roster's `networkKey`. The seed is the caller's: this package never stores, sends or deletes it |
 | `CreditWindow` | the receive window granted per session: 1 MiB (every session's initial credit) to 2^32 - 1, the excess granted as extra credit |
@@ -151,7 +180,11 @@ it, so nobody disconnects.
 **Pairing.** `Pair(ctx, PairOptions{Link | Target, Identity, Timeout})` returns
 `{Roster, PinnedNetworkKey}`, or fails with `pairing`, `unreachable` (the primary is not
 connected) or `timeout`. Codes: `GenerateCode`, `NormalizeCode`, `FormatCode`; links:
-`BuildPairingLink`, `ParsePairingLink`.
+`BuildPairingLink`, `ParsePairingLink`. Pairing parameters (section 5.1):
+`BuildPairingParams(PairingLink)` writes `v=1&n=…&c=…&i=…&r=…` alone, and
+`ParsePairingParams(string)` reads it back, failing `invalid` on a missing parameter, an unknown
+version or a bad value. Link defines the parameters, not a scheme: carry them as you like, in an
+https URL's fragment say. A `frontier://pair?` link is one wrapping of them.
 
 ## Choosing a relay
 
@@ -172,8 +205,8 @@ network's shard into that region's template; `Client` replaces `http.DefaultClie
 network id, big-endian, modulo `shards`, in lowercase hex padded to the width of `shards - 1`
 (`00` to `ff` for 256). The network id derives from the network seed, so mint the seed first
 (`NewNetworkSeed`, then `NetworkKeyFromSeed(seed).ID()` is the network), and pass the `URL` of
-the `PickedRelay` it returns and that seed to `CreateNetwork(identity, relay, now, seed)`; the
-roster carries it from then on, so the directory is
+the `PickedRelay` it returns and that seed to `CreateNetwork(identity, relay, now, seed)`, or to
+`PlaceNetwork` for a network made before it had one; the roster carries it from then on, so the directory is
 consulted once, at creation, and never on reconnect. It fails `unreachable` when no region
 answers (or the directory cannot be fetched) and `invalid` on a directory it cannot use
 (`ParseDirectory` checks one); fall back to a relay of your own.

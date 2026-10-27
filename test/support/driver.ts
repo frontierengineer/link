@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import type { Roster, Timing, TrafficReport, UsageReport } from '@frontierengineer/link-client';
+import type { Roster, RosterMember, Timing, TrafficReport, UsageReport } from '@frontierengineer/link-client';
 import { startRelay, type RelayProcess } from './relay.js';
 
 const testDir = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -258,6 +258,7 @@ export class Driver {
   id = '';
   seed = '';
   ed25519 = '';
+  x25519 = '';
   private readonly child: ChildProcess;
   private nextId = 1;
   private readonly pending = new Map<number, { cmd: string; resolve: (v: Record<string, unknown>) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
@@ -428,18 +429,28 @@ export class Driver {
    * Sets the node's identity. The node id the driver reports is checked against the one its
    * `ed25519` key derives, so a driver cannot get either wrong unnoticed.
    */
-  async identity(seed?: string): Promise<{ seed: string; node: string; ed25519: string }> {
-    const r = await this.call<{ seed: string; node: string; ed25519: string }>('identity', seed === undefined ? {} : { seed });
+  async identity(seed?: string): Promise<{ seed: string; node: string; ed25519: string; x25519: string }> {
+    const r = await this.call<{ seed: string; node: string; ed25519: string; x25519: string }>('identity', seed === undefined ? {} : { seed });
     const derived = nodeIdOf(r.ed25519);
     if (r.node !== derived) throw new Error(`${this.label}: identity gave node ${r.node}, but its ed25519 key ${r.ed25519} is node ${derived}`);
     if (/[+/=]/.test(r.ed25519)) throw new Error(`${this.label}: ed25519 ${r.ed25519} is not unpadded base64url`);
     this.id = r.node;
     this.seed = r.seed;
     this.ed25519 = r.ed25519;
+    if (!/^[A-Za-z0-9_-]{43}$/.test(r.x25519)) throw new Error(`${this.label}: x25519 ${r.x25519} is not 32 bytes of unpadded base64url`);
+    this.x25519 = r.x25519;
     return r;
   }
-  createNetwork(relay: string): Promise<{ roster: Roster; networkSeed: string }> {
-    return this.call('createNetwork', { relay });
+  /** This node's roster member entry. */
+  get member(): RosterMember {
+    return { id: this.id, ed25519: this.ed25519, x25519: this.x25519 };
+  }
+  /** `relay` absent: a network not placed yet (spec section 3.2). `members` are listed beside this node. */
+  createNetwork(relay?: string, members?: RosterMember[]): Promise<{ roster: Roster; networkSeed: string; placed: boolean }> {
+    return this.call('createNetwork', { ...(relay !== undefined ? { relay } : {}), ...(members !== undefined ? { members } : {}) });
+  }
+  placeNetwork(args: { roster: Roster; networkSeed: string; relay: string; now?: number }): Promise<{ roster: Roster; placed: boolean }> {
+    return this.call('placeNetwork', { ...args });
   }
   pair(args: PairArgs): Promise<{ roster: Roster; pinnedNetworkKey: string }> {
     return this.call('pair', { ...args });

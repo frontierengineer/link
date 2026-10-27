@@ -6,7 +6,7 @@ import { b64u, concat, equalBytes, fromB64uLen, utf8 } from './bytes.js';
 import { ed25519Verify } from './crypto.js';
 import { createNetworkSeed, isNodeId, networkKeyFromSeed, nodeIdFromEd25519, type Identity, type NetworkKey } from './identity.js';
 import { canonicalize } from './jcs.js';
-import { RosterFullError } from './errors.js';
+import { InvalidError, RosterFullError } from './errors.js';
 import { integerMember } from './json.js';
 
 export interface RosterMember {
@@ -101,29 +101,121 @@ export function signNextRoster(prev: Roster, members: RosterMember[], key: Netwo
 }
 
 /**
- * A new network (section 3.1): a network seed minted for it, apart from the node's own, and
- * its first roster, version 1, with `identity` alone as the primary. Persist the network seed
- * as secretly as the node's seed, and hand it to the primary as `networkSeed`.
+ * A new network (section 3.1): a network seed minted for it, apart from the node's own (or
+ * `networkSeed`), and its first roster, version 1, with `identity` as the primary and `members`
+ * listed alongside it. `relay` is the relay URL its members dial, or `''` (the default) for a
+ * network not placed yet (section 3.2): its members dial nothing until `placeNetwork` gives it
+ * one. `now` is Unix milliseconds (default `Date.now()`). Persist the network seed as secretly as
+ * the node's seed, and hand it to the primary as `networkSeed`.
+ *
+ * Throws InvalidError for a member entry that is not one (an id its `ed25519` does not derive,
+ * a key not of 32 bytes) or that is listed twice (the primary included), and RosterFullError
+ * when the roster would be over 65000 bytes.
  */
-export function createNetwork(opts: { identity: Identity; relay: string; now?: number; networkSeed?: Uint8Array }): {
+export function createNetwork(opts: {
+  identity: Identity;
+  relay?: string;
+  now?: number;
+  networkSeed?: Uint8Array;
+  members?: readonly RosterMember[];
+}): {
   roster: Roster;
   networkSeed: Uint8Array;
 } {
+  const relay = opts.relay ?? '';
+  if (typeof relay !== 'string') throw new InvalidError('relay must be a string');
+  const now = opts.now ?? Date.now();
+  if (!Number.isSafeInteger(now) || now < 0) throw new InvalidError('now must be a non-negative integer of Unix milliseconds');
+  if (opts.networkSeed !== undefined && (!(opts.networkSeed instanceof Uint8Array) || opts.networkSeed.length !== 32)) {
+    throw new InvalidError('networkSeed must be 32 bytes');
+  }
+  const members = [memberFromIdentity(opts.identity)];
+  for (const m of opts.members ?? []) {
+    const problem = memberProblem(m);
+    if (problem) throw new InvalidError(`createNetwork: ${problem}`);
+    if (members.some((x) => x.id === m.id)) throw new InvalidError(`createNetwork: member ${m.id} is listed twice`);
+    members.push({ id: m.id, ed25519: m.ed25519, x25519: m.x25519 });
+  }
   const networkSeed = opts.networkSeed?.slice() ?? createNetworkSeed();
   const key = networkKeyFromSeed(networkSeed);
-  const roster = signRoster(
-    {
-      network: key.id,
-      version: 1,
-      issuedAt: opts.now ?? Date.now(),
-      relay: opts.relay,
-      networkKey: b64u(key.ed25519.pub),
-      primary: opts.identity.id,
-      members: [memberFromIdentity(opts.identity)],
-    },
-    key,
-  );
-  return { roster, networkSeed };
+  const unsigned: UnsignedRoster = {
+    network: key.id,
+    version: 1,
+    issuedAt: now,
+    relay,
+    networkKey: b64u(key.ed25519.pub),
+    primary: opts.identity.id,
+    members: members.sort((a, b) => compareIds(a.id, b.id)),
+  };
+  const size = rosterSize({ ...unsigned, signature: PLACEHOLDER_SIGNATURE });
+  if (size > MAX_ROSTER_BYTES) throw new RosterFullError(size);
+  return { roster: signRoster(unsigned, key), networkSeed };
+}
+
+/** Whether the network is placed: its roster names a relay (section 3.2). A roster whose
+ * `relay` is `''` is valid, but no member dials it until it is placed. */
+export function isPlaced(roster: Roster | UnsignedRoster): boolean {
+  return roster.relay !== '';
+}
+
+/**
+ * Whether `s` is a relay URL as placing a network takes it (section 3.2): it begins `ws://` or
+ * `wss://`, in lower case, followed at once by a host (the text before the next `/`, `?` or `#`
+ * is not empty), and it parses as a URL.
+ */
+export function isRelayUrl(s: unknown): s is string {
+  if (typeof s !== 'string') return false;
+  const m = /^wss?:\/\/([^/?#]*)/.exec(s);
+  if (!m || m[1] === '') return false;
+  try {
+    new URL(s);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Places a network (section 3.2): the roster after `roster`, an unplaced one, with `relay` set
+ * and nothing else changed (version + 1, `issuedAt` the later of `now` and the roster's), signed
+ * with the network key `networkSeed` derives. Publish it as any new roster: a primary started on
+ * it pushes it at registration, since the relay holds none newer.
+ *
+ * Throws InvalidError when `roster` is not valid or is already placed, when `relay` is not a
+ * ws:// or wss:// URL, or when `networkSeed` does not derive the roster's network key.
+ */
+export function placeNetwork(opts: { roster: Roster; networkSeed: Uint8Array; relay: string; now?: number }): Roster {
+  const problem = rosterProblem(opts.roster);
+  if (problem) throw new InvalidError(`placeNetwork: the roster is not valid: ${problem}`);
+  const prev = opts.roster;
+  if (isPlaced(prev)) throw new InvalidError('placeNetwork: the network is placed already');
+  if (!isRelayUrl(opts.relay)) throw new InvalidError('placeNetwork: relay must be a ws:// or wss:// URL');
+  if (!(opts.networkSeed instanceof Uint8Array) || opts.networkSeed.length !== 32) throw new InvalidError('placeNetwork: networkSeed must be 32 bytes');
+  const key = networkKeyFromSeed(opts.networkSeed);
+  if (b64u(key.ed25519.pub) !== prev.networkKey) throw new InvalidError("placeNetwork: networkSeed does not derive the roster's networkKey");
+  const now = opts.now ?? Date.now();
+  if (!Number.isSafeInteger(now) || now < 0) throw new InvalidError('placeNetwork: now must be a non-negative integer of Unix milliseconds');
+  // Everything else as signed, fields the protocol does not define included.
+  const { signature: _omit, ...rest } = cloneRoster(prev);
+  const unsigned = { ...rest, version: prev.version + 1, issuedAt: Math.max(now, prev.issuedAt), relay: opts.relay };
+  const size = rosterSize({ ...unsigned, signature: PLACEHOLDER_SIGNATURE });
+  if (size > MAX_ROSTER_BYTES) throw new RosterFullError(size);
+  return signRoster(unsigned, key);
+}
+
+/** Why `m` is not a roster member entry, or `null` when it is. */
+function memberProblem(m: unknown): string | null {
+  if (!isPlainObject(m)) return 'member is not an object';
+  if (!isNodeId(m.id)) return 'member id is not a node id';
+  let ed: Uint8Array;
+  try {
+    ed = fromB64uLen(m.ed25519, 32, 'member ed25519');
+    fromB64uLen(m.x25519, 32, 'member x25519');
+  } catch (e) {
+    return (e as Error).message;
+  }
+  if (nodeIdFromEd25519(ed) !== m.id) return `member ${m.id}: id is not derived from its ed25519`;
+  return null;
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Pairing codes, code ids and pairing links (section 5.1).
@@ -63,7 +64,8 @@ func FormatCode(code string) (string, error) {
 	return c[:4] + "-" + c[4:], nil
 }
 
-// PairingLink is what a frontier://pair link carries.
+// PairingLink is what a pairing code gives a newcomer (section 5.1): the pairing parameters,
+// whatever wraps them (a frontier://pair link, an https URL's fragment).
 type PairingLink struct {
 	Network string
 	Code    string // canonical, no hyphen
@@ -71,8 +73,9 @@ type PairingLink struct {
 	Relay   string
 }
 
-// BuildPairingLink writes frontier://pair?v=1&n=<network>&c=<code>&i=<code id>&r=<relay>.
-func BuildPairingLink(p PairingLink) (string, error) {
+// pairingParams writes the pairing parameters, v=1&n=<network>&c=<code>&i=<code id>&r=<relay>,
+// each value percent-encoded as ECMAScript's encodeURIComponent does.
+func pairingParams(p PairingLink) (string, error) {
 	if !IsNodeID(p.Network) {
 		return "", errors.New("network is not a node id")
 	}
@@ -83,58 +86,65 @@ func BuildPairingLink(p PairingLink) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return "frontier://pair?v=1&n=" + p.Network + "&c=" + code + "&i=" + p.CodeID + "&r=" + encodeURIComponent(p.Relay), nil
+	return "v=1&n=" + encodeURIComponent(p.Network) + "&c=" + encodeURIComponent(code) + "&i=" + encodeURIComponent(p.CodeID) + "&r=" + encodeURIComponent(p.Relay), nil
 }
 
-// ParsePairingLink reads a pairing link. The code may be in its displayed form.
-func ParsePairingLink(link string) (PairingLink, error) {
-	const prefix = "frontier://pair?"
-	if !strings.HasPrefix(link, prefix) {
-		return PairingLink{}, errors.New("not a frontier://pair link")
-	}
+// readPairingParams reads pairing parameters; what names them in errors, and badVersion, when
+// not empty, is the error for a missing or unknown version.
+func readPairingParams(s, what, badVersion string) (PairingLink, error) {
 	params := map[string]string{}
-	for _, part := range strings.Split(link[len(prefix):], "&") {
+	for _, part := range strings.Split(s, "&") {
 		if part == "" {
 			continue
 		}
 		key, value, ok := strings.Cut(part, "=")
 		if !ok {
-			return PairingLink{}, fmt.Errorf("pairing link parameter without a value: %s", part)
+			return PairingLink{}, fmt.Errorf("%s parameter without a value: %s", what, part)
 		}
 		if _, dup := params[key]; dup {
-			return PairingLink{}, fmt.Errorf("pairing link repeats %s", key)
+			return PairingLink{}, fmt.Errorf("%s repeats %s", what, key)
 		}
 		v, err := url.PathUnescape(value) // decodeURIComponent: %XX only, '+' stays '+'
-		if err != nil {
-			return PairingLink{}, fmt.Errorf("pairing link: %w", err)
+		if err != nil || !utf8.ValidString(v) {
+			return PairingLink{}, fmt.Errorf("%s: malformed percent-encoding in %s", what, key)
 		}
 		params[key] = v
 	}
-	if params["v"] != "1" {
-		return PairingLink{}, errors.New("unsupported pairing link version")
+	switch v := params["v"]; {
+	case v == "" && badVersion != "":
+		return PairingLink{}, errors.New(badVersion)
+	case v == "":
+		return PairingLink{}, fmt.Errorf("%s: missing v", what)
+	case v != "1" && badVersion != "":
+		return PairingLink{}, errors.New(badVersion)
+	case v != "1":
+		return PairingLink{}, fmt.Errorf("%s: unknown version %s", what, v)
 	}
 	p := PairingLink{Network: params["n"], CodeID: params["i"], Relay: params["r"]}
+	if p.Network == "" {
+		return PairingLink{}, fmt.Errorf("%s: missing n (the network id)", what)
+	}
 	if !IsNodeID(p.Network) {
-		return PairingLink{}, errors.New("pairing link: bad network id")
+		return PairingLink{}, fmt.Errorf("%s: bad network id", what)
 	}
 	if params["c"] == "" {
-		return PairingLink{}, errors.New("pairing link: missing code")
+		return PairingLink{}, fmt.Errorf("%s: missing c (the code)", what)
 	}
 	if p.CodeID == "" {
-		return PairingLink{}, errors.New("pairing link: missing code id")
+		return PairingLink{}, fmt.Errorf("%s: missing i (the code id)", what)
 	}
-	if _, err := fromB64uLen(p.CodeID, codeIDLength, "pairing link code id"); err != nil {
+	if _, err := fromB64uLen(p.CodeID, codeIDLength, what+" code id"); err != nil {
 		return PairingLink{}, err
 	}
 	if p.Relay == "" {
-		return PairingLink{}, errors.New("pairing link: missing relay")
+		return PairingLink{}, fmt.Errorf("%s: missing r (the relay)", what)
 	}
 	u, err := url.Parse(p.Relay)
 	if err != nil {
-		return PairingLink{}, fmt.Errorf("pairing link: %w", err)
+		return PairingLink{}, fmt.Errorf("%s: %w", what, err)
 	}
 	if s := strings.ToLower(u.Scheme); s != "ws" && s != "wss" {
-		return PairingLink{}, errors.New("pairing link: relay must be a ws:// or wss:// URL")
+		return PairingLink{}, fmt.Errorf("%s: relay must be a ws:// or wss:// URL", what)
 	}
 	code, err := NormalizeCode(params["c"])
 	if err != nil {
@@ -142,6 +152,57 @@ func ParsePairingLink(link string) (PairingLink, error) {
 	}
 	p.Code = code
 	return p, nil
+}
+
+// BuildPairingParams writes the pairing parameters alone (section 5.1):
+// v=1&n=<network>&c=<code>&i=<code id>&r=<relay>, each value percent-encoded. Link defines these,
+// not a scheme: an application wraps them as it likes, in a link's query or an https URL's
+// fragment. It fails invalid for a network that is not a node id, a code id not of 8 bytes, a
+// code that is not one, or a relay that is not a ws:// or wss:// URL (IsRelayURL).
+func BuildPairingParams(p PairingLink) (string, error) {
+	if !IsRelayURL(p.Relay) {
+		return "", invalidError("pairing parameters: relay must be a ws:// or wss:// URL")
+	}
+	s, err := pairingParams(p)
+	if err != nil {
+		return "", invalidError("pairing parameters: " + err.Error())
+	}
+	return s, nil
+}
+
+// ParsePairingParams reads pairing parameters (section 5.1) as BuildPairingParams writes them,
+// in any order; parameters it does not know are ignored, and the code may be in its displayed
+// form. It fails invalid on a missing parameter, an unknown version, a repeated parameter, or a
+// value that is not what its parameter holds.
+func ParsePairingParams(params string) (PairingLink, error) {
+	p, err := readPairingParams(params, "pairing parameters", "")
+	if err != nil {
+		return PairingLink{}, invalidError(err.Error())
+	}
+	if !IsRelayURL(p.Relay) {
+		return PairingLink{}, invalidError("pairing parameters: relay must be a ws:// or wss:// URL")
+	}
+	return p, nil
+}
+
+// BuildPairingLink writes frontier://pair? followed by the pairing parameters: one wrapping of
+// them (section 5.1).
+func BuildPairingLink(p PairingLink) (string, error) {
+	s, err := pairingParams(p)
+	if err != nil {
+		return "", err
+	}
+	return "frontier://pair?" + s, nil
+}
+
+// ParsePairingLink reads a frontier://pair? link: the pairing parameters in that wrapping. The
+// code may be in its displayed form.
+func ParsePairingLink(link string) (PairingLink, error) {
+	const prefix = "frontier://pair?"
+	if !strings.HasPrefix(link, prefix) {
+		return PairingLink{}, errors.New("not a frontier://pair link")
+	}
+	return readPairingParams(link[len(prefix):], "pairing link", "unsupported pairing link version")
 }
 
 // encodeURIComponent is ECMAScript's: every byte of the UTF-8 encoding is percent-encoded

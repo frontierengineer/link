@@ -98,6 +98,8 @@ type would. `spec/vectors/relay.json` holds such documents as text (section 12).
   so that it always fits in one session message. A primary refuses to add a member beyond that,
   and a roster over the limit is invalid everywhere.
 - `networkKey` is the network key's public half (section 2).
+- `relay` is the URL of the relay the network's members dial (section 3.2 says which URLs), or
+  `""`: the network is not placed yet (section 3.2). Validity asks only that it is a string.
 - `members` is sorted by `id`, each id once.
 - `primary` is the node id of the **primary**, the member that holds the network seed; it must
   be the `id` of one of `members`. It has nothing to do with `network`.
@@ -119,7 +121,9 @@ connection: nothing more. A node keeps its own seed, its node id and its connect
 becomes primary or stops being one, and nobody is disconnected when the primary changes.
 
 - **Creating a network.** A node mints a network seed, derives the network key and id, and signs
-  version 1 listing itself alone, and itself as `primary`.
+  version 1 listing itself as `primary`, alongside any other members its application names (by
+  default none). Its `relay` is the relay's URL, or `""` for a network not placed yet (section
+  3.2).
 - **Custody.** The application that runs a node keeps the network seed and gives it to the node
   it wants to be the primary. Link never stores, sends or deletes it: no message of this
   protocol carries it. Whoever holds the seed can make its node the primary, so keeping it to one
@@ -136,6 +140,39 @@ becomes primary or stops being one, and nobody is disconnected when the primary 
 - **The relay** follows the roster: the primary is whichever member its roster names primary,
   and when a newer roster names another, the relay demotes the former primary's connection in
   place (section 4.2).
+
+### 3.2 Placing a network
+
+A network can be made before it has a relay: on a machine that is offline, or that cannot reach
+the relay directory yet. It is placed on a relay the first time its primary can reach the
+directory, and its members connect from then on. There is no mode: the same node, on the same
+code path, makes the network, places it and connects.
+
+- **Unplaced.** A roster whose `relay` is `""` is valid, and its network is **not placed**. No
+  member dials it: a node is started on an unplaced roster only when it is given a relay URL apart
+  from the roster, and otherwise refuses to start, at once, as a caller error (`invalid`), never
+  as a connection that fails or retries. A pairing link from a primary so started names the relay
+  it dials.
+- **Placing.** A network is placed by the next roster version that changes `relay` alone, from
+  `""` to a relay URL: `version` one more, `issuedAt` the later of now and the previous one,
+  every other field (`members`, `primary`, fields this document does not define) as it was, and
+  signed by the network key. Placing needs the roster and the network seed, nothing else: no
+  identity and no connection. A client refuses (`invalid`) to place a roster that is placed
+  already, at a URL that is not a relay URL, or with a seed that does not derive `networkKey`.
+- **A relay URL**, for placing, begins `ws://` or `wss://` in lower case, followed at once by a
+  host (the text before the next `/`, `?` or `#` is not empty), and parses as a URL (the WHATWG
+  URL Standard): `wss://eu.frontierengineer.link/v1` and `ws://127.0.0.1:8080/v1` are;
+  `https://eu.frontierengineer.link/v1`, `wss:///v1`, `ws:/eu.frontierengineer.link` and
+  `WSS://eu.frontierengineer.link/v1` are not.
+- **Once placed**, a network is not placed again, and no roster sets its `relay` back to `""`.
+  Moving a network to another relay is as before: close code `4009` and the client looking the
+  network up again (section 11).
+- **At the relay** a placed roster is an ordinary newer version: presented at registration or
+  pushed, it replaces the version the relay holds (section 4.2). The relay reads `relay` as a
+  string and nothing more, so it neither knows nor minds whether a network is placed.
+- Choosing the relay (a directory timed from the client, and the network's shard, which derives
+  from the network id) is the client's, before it places: an unplaced roster already has its
+  network id.
 
 ## 4. Connecting to the relay
 
@@ -267,8 +304,22 @@ when answering a request. Codes: `forbidden`, `bad_request`, `unreachable`, `rat
 - A code lives 15 minutes and admits one node.
 - Five failed confirmations burn the code. A slot is reserved when an attempt starts; a failed
   confirmation keeps it; a timeout or a dropped connection refunds it.
-- Pairing link: `frontier://pair?v=1&n=<network id>&c=<code>&i=<code id b64u>&r=<relay URL, percent-encoded>`.
-  `c` carries the code without the hyphen; parsers also accept the displayed form.
+- **Pairing parameters.** What a newcomer needs is the string
+  `v=1&n=<network id>&c=<code>&i=<code id b64u>&r=<relay URL>`: parameters separated by `&`, each
+  `name=value`, every value percent-encoded as ECMAScript's `encodeURIComponent` does (its UTF-8
+  bytes, all but `A-Z a-z 0-9 - _ . ! ~ * ' ( )` as `%XX` in upper-case hex). `c` carries the
+  code without the hyphen. A writer writes the five in this order, and refuses a relay that is not
+  a relay URL (section 3.2). A reader takes them in any order, skips empty parts, ignores names it
+  does not know, accepts the code in its displayed form or any spelling the first item allows,
+  and refuses (`invalid`): a part without `=`; a name given twice; a value whose percent-encoding
+  is malformed or does not decode to UTF-8 (`+` stays `+`, not a space); a missing or empty `v`,
+  `n`, `c`, `i` or `r`; a `v` other than `1`; an `n` that is not a network id, a `c` that is not
+  a code, an `i` that is not 8 bytes; an `r` that is not a relay URL.
+- **Wrappings.** Link defines the pairing parameters, not a scheme. An application carries them
+  as it likes, and each form it uses is one wrapping of them, read by taking the parameters back
+  out. The clients write and read one, the **pairing link**
+  `frontier://pair?<pairing parameters>`. Another is an https URL's fragment,
+  `https://<host>/#<pairing parameters>`, which a browser never sends to the host.
 - A malformed pairing message (an invalid point, a wrong length, a P5 that will not open) counts
   as a failed confirmation.
 
@@ -782,7 +833,16 @@ A self-hosted relay defaults every limit to off; the values below are the public
   the identity that is no longer the current one, and it stops rather than fight the new one.
 - A send to a peer that answers `unreachable` fails at once with a typed error. Nothing is queued
   for absent peers.
-- On `4009`, look the network up again and reconnect.
+- On `4009`, look the network up again and reconnect. An answer that is not a URL is ignored,
+  as no answer is: the node keeps the relay URL it had.
+- **Offline.** A node never stops or crashes for want of a network. An unreachable relay
+  (connection refused, a name that does not resolve, no route), a relay that goes away, a lookup
+  that fails, or a WebSocket that cannot be made is a connection that failed: the node says so
+  through its states (`disconnected`, then `connecting` again) and retries as above, and a call
+  that needs the relay (a send, a usage ask, a roster sync) fails with its own error. Nothing is
+  thrown out of a socket's callbacks or a timer, and no promise is left to reject unhandled. Only
+  what its caller gives wrongly at the start (a roster not placed and no relay URL, section 3.2;
+  a relay URL that is not a URL) is refused at once, as a caller error.
 - **A new primary closes nothing.** A node whose roster stops naming it primary, or starts to,
   keeps its connection and its sessions: it neither closes nor reconnects (section 3.1), and the
   relay closes neither (section 4.2).
@@ -836,5 +896,8 @@ profile's); the Noise IK handshake and first transport messages; frame encoding;
 encoding; rosters given as text (`rosterTexts` in `relay.json`), whose validity turns on the
 bytes themselves: repeated names, `12.0`, `1.2e1`, `-0` and `1e309`, escaped lone surrogates,
 nesting; Ed25519 verification (`ed25519` in `relay.json`): small-order, non-canonical and
-mixed-order keys and `R`, `S >= L`, and the order-4 forgery. Every implementation runs all that
-apply to it.
+mixed-order keys and `R`, `S >= L`, and the order-4 forgery; placing a network
+(`roster.placing` in `client.json`: an unplaced version 1 made with a second member listed, its
+placed version 2, placings at other relay URLs, and placings refused); pairing parameters
+(`pairing.params`: built, wrapped as a pairing link and as an https fragment, a non-ASCII relay,
+and cases a reader takes or refuses). Every implementation runs all that apply to it.

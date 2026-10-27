@@ -51,7 +51,10 @@ zeroised on drop and never printed by `Debug`.
 
 **Rosters.** `create_network(&identity, relay, now_ms)` mints a network key and returns it with
 version 1, `identity` alone as the primary; `create_network_with(&identity, &network_key, relay,
-now_ms)` takes a key already minted. `roster.network_key()` / `network_key_b64u()` is
+now_ms)` takes a key already minted. `create_network_with_options(&identity, NetworkOptions {
+relay, members, now_ms, network_seed })` does the same with the relay optional (`""` by default),
+`members` listed in version 1 beside the primary, `now_ms: None` for now and `network_seed: None`
+to mint one; it fails `Invalid` for a member listed twice and `RosterFull` over 65000 bytes. `roster.network_key()` / `network_key_b64u()` is
 `networkKey`, what a member pins; `roster.primary_id()` is `primary`, the node id of the
 member holding the network seed, and `roster.primary()` that member. Members carry `id`,
 `ed25519` and `x25519` (`RosterMember::new(ed25519, x25519)`, `RosterMember::from_identity(&id)`);
@@ -65,6 +68,31 @@ parsed as I-JSON (spec section 1): duplicate names, lone surrogates and nesting 
 levels are refused, and `version`, `issuedAt` and `ts` must be integer literals (`12`, not
 `12.0` or `1.2e1`).
 
+**A network with no relay yet** (section 3.2). With `relay` empty, `create_network_with_options`
+makes a network that is not placed: valid, but no member dials it, so it can be made offline, and placed
+the first time the primary can reach the directory. `roster.is_placed()` says whether a roster names a relay. A member
+or primary on an unplaced roster without `relay_url` fails `Invalid` ("the network has no relay
+yet") at once; with one, it dials that, and its pairing links name it.
+`place_network(&roster, &network_seed, relay, now_ms)` returns the next version with `relay` set
+and nothing else changed (`now_ms: None` for now), signed by the network key; start the primary on
+it and it publishes it at registration. It fails `Invalid` when the roster is placed already, when
+`relay` is not a `ws://` or `wss://` URL (`is_relay_url`), or when the seed does not derive the
+roster's network key. A placed network is not placed again.
+
+**Offline.** A member never stops or crashes for want of a network (section 11): with its relay
+unreachable (refused, a name that does not resolve, no route) or gone mid-session, it says so
+through its states (`disconnected`, then `connecting` again), retries with backoff, and a call
+that needs the relay fails with its own error; a lookup after 4009 that answers something that is
+not a URL is ignored.
+
+```rust
+let opts = NetworkOptions { members: vec![RosterMember::from_identity(&laptop)], ..Default::default() };
+let (roster, network_key) = create_network_with_options(&me, opts)?; // no relay
+// ...later, the first time the directory answers:
+let picked = pick_relay(PickRelayOptions::new(roster.network(), directory)).await?;
+let placed = place_network(&roster, network_key.seed(), &picked.url, None)?; // version 2: persist it
+```
+
 **`Member`** (`Member::connect(opts)` resolves once registered; `Member::new(opts)` starts
 connecting and returns at once; both need a tokio runtime). A `Member` is a cheap handle: clone
 it freely; the member closes when the last clone is dropped.
@@ -72,7 +100,7 @@ it freely; the member closes when the last clone is dropped.
 | `MemberOptions` | |
 |---|---|
 | `identity`, `roster` | required; the newest roster held (`MemberOptions::new(identity, roster)`) |
-| `relay_url` | defaults to the roster's `relay` |
+| `relay_url` | defaults to the roster's `relay`; required on a roster not placed yet |
 | `pinned_network_key` | defaults to the roster's `networkKey` |
 | `network_seed` | the network seed, for a node that is to be the primary; it must derive the roster's `networkKey`. Its custody is the caller's: the client never stores, sends or deletes it |
 | `credit_window` | the receive window granted per session: 1 MiB (every session's initial credit) up to 2^32 - 1, granted as extra credit |
@@ -162,6 +190,10 @@ seed can `resign()`.
 **Pairing.** `pair(PairOptions { target, identity, timeout })` returns `{ roster, pinned_network_key }`,
 or fails with `Pairing`, `Unreachable` (the primary is not connected) or `Timeout`. Codes:
 `generate_code`, `normalize_code`, `format_code`; links: `build_pairing_link`, `parse_pairing_link`.
+Pairing parameters (section 5.1): `build_pairing_params(&parts)` writes `v=1&n=…&c=…&i=…&r=…`
+alone, and `parse_pairing_params(s)` reads it back, failing `Invalid` on a missing parameter, an
+unknown version or a bad value. Link defines the parameters, not a scheme: carry them as you like,
+in an https URL's fragment say. A `frontier://pair?` link is one wrapping of them.
 
 `link_client::wire` exposes the building blocks (encodings, frames, the Noise engine, SPAKE2,
 the pairing state machines) for the vector tests and for tools; applications need none of it.
@@ -185,7 +217,7 @@ and puts the network's shard into that region's template. The shard is `shard_of
 shards)` with that region's `shards`: the first four bytes of SHA-256 of the network id,
 big-endian, modulo `shards`, in lowercase hex padded to the width of `shards - 1` (`00` to `ff`
 for 256). Pass the `url` of the `PickedRelay` it returns to `create_network_with(&identity,
-&network_key, relay, now_ms)`; the roster carries it from then on, so the directory is consulted once, at creation,
+&network_key, relay, now_ms)`, or to `place_network` for a network made before it had one; the roster carries it from then on, so the directory is consulted once, at creation,
 and never on reconnect. It fails with `Unreachable` when no region answers (or the directory
 cannot be fetched) and `Invalid` on a directory it cannot use (`parse_directory` checks one);
 fall back to a relay of your own. The requests are the client's own HTTP/1.1 GETs (http:// and

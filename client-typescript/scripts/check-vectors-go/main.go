@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 
@@ -204,6 +205,52 @@ func main() {
 		want := append([]byte{1, byte(f["type"].(float64))}, h(f["peer"].(string))...)
 		want = append(want, h(f["body"].(string))...)
 		check(hex.EncodeToString(want) == f["frame"], "frame "+f["name"].(string))
+	}
+
+	{
+		// Placing (section 3.2): version 1 names no relay, version 2 sets it and changes nothing
+		// else, and the network key signs both. Their content is ASCII, so encoding/json with
+		// sorted keys is JCS here.
+		pl := v["roster"].(map[string]any)["placing"].(map[string]any)
+		jcs := func(m map[string]any) []byte {
+			var b bytes.Buffer
+			e := json.NewEncoder(&b)
+			e.SetEscapeHTML(false)
+			e.Encode(m)
+			return bytes.TrimSuffix(b.Bytes(), []byte("\n"))
+		}
+		verify := func(r map[string]any) bool {
+			body := map[string]any{}
+			for k, x := range r {
+				if k != "signature" {
+					body[k] = x
+				}
+			}
+			return ed25519.Verify(b64(r["networkKey"].(string)), append([]byte("frontier-link/1/roster"), jcs(body)...), b64(r["signature"].(string)))
+		}
+		un := pl["unplaced"].(map[string]any)
+		pd := pl["placed"].(map[string]any)
+		check(un["relay"] == "" && un["version"].(float64) == 1, "unplaced: version 1, no relay")
+		check(verify(un), "unplaced: signed by the network key")
+		check(pd["relay"] == pl["relay"] && pd["version"].(float64) == 2 && pd["issuedAt"] == pl["placedAt"], "placed: version 2, the relay set")
+		check(verify(pd), "placed: signed by the network key")
+		same := true
+		for k, x := range un {
+			switch k {
+			case "relay", "version", "issuedAt", "signature":
+			default:
+				same = same && bytes.Equal(jcs(map[string]any{"x": x}), jcs(map[string]any{"x": pd[k]}))
+			}
+		}
+		check(same && len(un) == len(pd), "placed: nothing else changed")
+	}
+	{
+		// Pairing parameters (section 5.1): a query string of v, n, c, i and r.
+		q := v["pairing"].(map[string]any)["params"].(map[string]any)
+		vals, err := url.ParseQuery(q["params"].(string))
+		check(err == nil && vals.Get("v") == "1" && vals.Get("n") == q["network"] && vals.Get("c") == q["code"] &&
+			vals.Get("i") == q["codeIdB64u"] && vals.Get("r") == q["relay"], "pairing parameters")
+		check(q["link"] == "frontier://pair?"+q["params"].(string), "the frontier://pair link wraps the parameters")
 	}
 
 	if fails > 0 {

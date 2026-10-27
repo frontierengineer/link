@@ -152,6 +152,7 @@ export async function listen(
   path: string,
   maxMessage: number,
   onSocket: (s: ServerSocket) => void,
+  listenPort = 0,
 ): Promise<WsServer> {
   const sockets = new Set<Duplex>();
   const server = createServer((_req, res) => {
@@ -172,7 +173,7 @@ export async function listen(
     sock.on('close', () => sockets.delete(sock));
     onSocket(new ServerSocket(sock, req, maxMessage));
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve) => server.listen(listenPort, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
   return {
     url: `ws://127.0.0.1:${port}${path}`,

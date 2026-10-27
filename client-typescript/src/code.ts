@@ -1,7 +1,9 @@
 // Pairing codes, code ids and pairing links (section 5.1).
 
 import { fromB64uLen, randomBytes } from './bytes.js';
+import { InvalidError } from './errors.js';
 import { isNodeId } from './identity.js';
+import { isRelayUrl } from './roster.js';
 
 export const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 export const CODE_LENGTH = 8;
@@ -39,6 +41,7 @@ export function generateCodeId(): Uint8Array {
   return randomBytes(CODE_ID_LENGTH);
 }
 
+/** What a pairing code gives a newcomer (section 5.1): the pairing parameters. */
 export interface PairingLink {
   network: string;
   /** Canonical code, no hyphen. */
@@ -48,35 +51,105 @@ export interface PairingLink {
   relay: string;
 }
 
-export function buildPairingLink(p: PairingLink): string {
-  if (!isNodeId(p.network)) throw new Error('network is not a node id');
-  fromB64uLen(p.codeId, CODE_ID_LENGTH, 'code id');
-  return `frontier://pair?v=1&n=${p.network}&c=${normalizeCode(p.code)}&i=${p.codeId}&r=${encodeURIComponent(p.relay)}`;
+/** The pairing parameters (section 5.1), `v=1&n=…&c=…&i=…&r=…`, with no scheme around them. */
+function paramString(p: PairingLink, Err: new (message: string) => Error): string {
+  if (!isNodeId(p.network)) throw new Err('network is not a node id');
+  try {
+    fromB64uLen(p.codeId, CODE_ID_LENGTH, 'code id');
+  } catch (e) {
+    throw new Err((e as Error).message);
+  }
+  let code: string;
+  try {
+    code = normalizeCode(p.code);
+  } catch (e) {
+    throw new Err((e as Error).message);
+  }
+  return `v=1&n=${encodeURIComponent(p.network)}&c=${encodeURIComponent(code)}&i=${encodeURIComponent(p.codeId)}&r=${encodeURIComponent(p.relay)}`;
 }
 
-export function parsePairingLink(link: string): PairingLink {
-  const prefix = 'frontier://pair?';
-  if (!link.startsWith(prefix)) throw new Error('not a frontier://pair link');
+/** Reads pairing parameters (section 5.1); `what` names them in errors. */
+function readParams(s: string, what: string, Err: new (message: string) => Error, versionMessage?: string): PairingLink {
   const params = new Map<string, string>();
-  for (const part of link.slice(prefix.length).split('&')) {
+  for (const part of s.split('&')) {
     if (part === '') continue;
     const eq = part.indexOf('=');
-    if (eq < 0) throw new Error(`pairing link parameter without a value: ${part}`);
+    if (eq < 0) throw new Err(`${what} parameter without a value: ${part}`);
     const key = part.slice(0, eq);
-    if (params.has(key)) throw new Error(`pairing link repeats ${key}`);
-    params.set(key, decodeURIComponent(part.slice(eq + 1)));
+    if (params.has(key)) throw new Err(`${what} repeats ${key}`);
+    let value: string;
+    try {
+      value = decodeURIComponent(part.slice(eq + 1));
+    } catch {
+      throw new Err(`${what}: malformed percent-encoding in ${key}`);
+    }
+    params.set(key, value);
   }
-  if (params.get('v') !== '1') throw new Error('unsupported pairing link version');
+  const v = params.get('v');
+  if (!v) throw new Err(versionMessage ?? `${what}: missing v`);
+  if (v !== '1') throw new Err(versionMessage ?? `${what}: unknown version ${v}`);
   const network = params.get('n');
   const code = params.get('c');
   const codeId = params.get('i');
   const relay = params.get('r');
-  if (!network || !isNodeId(network)) throw new Error('pairing link: bad network id');
-  if (!code) throw new Error('pairing link: missing code');
-  if (!codeId) throw new Error('pairing link: missing code id');
-  fromB64uLen(codeId, CODE_ID_LENGTH, 'pairing link code id');
-  if (!relay) throw new Error('pairing link: missing relay');
-  const proto = new URL(relay).protocol;
-  if (proto !== 'wss:' && proto !== 'ws:') throw new Error('pairing link: relay must be a ws:// or wss:// URL');
-  return { network, code: normalizeCode(code), codeId, relay };
+  if (!network) throw new Err(`${what}: missing n (the network id)`);
+  if (!isNodeId(network)) throw new Err(`${what}: bad network id`);
+  if (!code) throw new Err(`${what}: missing c (the code)`);
+  if (!codeId) throw new Err(`${what}: missing i (the code id)`);
+  try {
+    fromB64uLen(codeId, CODE_ID_LENGTH, `${what} code id`);
+  } catch (e) {
+    throw new Err((e as Error).message);
+  }
+  if (!relay) throw new Err(`${what}: missing r (the relay)`);
+  let proto: string;
+  try {
+    proto = new URL(relay).protocol;
+  } catch {
+    throw new Err(`${what}: relay is not a URL`);
+  }
+  if (proto !== 'wss:' && proto !== 'ws:') throw new Err(`${what}: relay must be a ws:// or wss:// URL`);
+  let canonical: string;
+  try {
+    canonical = normalizeCode(code);
+  } catch (e) {
+    throw new Err((e as Error).message);
+  }
+  return { network, code: canonical, codeId, relay };
+}
+
+/**
+ * The pairing parameters alone (section 5.1): `v=1&n=<network>&c=<code>&i=<code id>&r=<relay>`,
+ * each value percent-encoded. Link defines these, not a scheme: an application wraps them as it
+ * likes, in a link's query or an https URL's fragment. Throws InvalidError for a network that is
+ * not a node id, a code id not of 8 bytes, a code that is not one, or a relay that is not a
+ * ws:// or wss:// URL.
+ */
+export function buildPairingParams(p: PairingLink): string {
+  if (!isRelayUrl(p.relay)) throw new InvalidError('pairing parameters: relay must be a ws:// or wss:// URL');
+  return paramString(p, InvalidError);
+}
+
+/**
+ * Reads pairing parameters (section 5.1), as `buildPairingParams` writes them, in any order;
+ * parameters it does not know are ignored. The code may be in its displayed form. Throws
+ * InvalidError on a missing parameter, an unknown version, a repeated parameter, or a value that
+ * is not what its parameter holds (the relay as `isRelayUrl` says, section 3.2).
+ */
+export function parsePairingParams(params: string): PairingLink {
+  const p = readParams(params, 'pairing parameters', InvalidError);
+  if (!isRelayUrl(p.relay)) throw new InvalidError('pairing parameters: relay must be a ws:// or wss:// URL');
+  return p;
+}
+
+/** `frontier://pair?` followed by the pairing parameters: one wrapping of them (section 5.1). */
+export function buildPairingLink(p: PairingLink): string {
+  return `frontier://pair?${paramString(p, Error)}`;
+}
+
+/** Reads a `frontier://pair?` link: the pairing parameters in that wrapping (section 5.1). */
+export function parsePairingLink(link: string): PairingLink {
+  const prefix = 'frontier://pair?';
+  if (!link.startsWith(prefix)) throw new Error('not a frontier://pair link');
+  return readParams(link.slice(prefix.length), 'pairing link', Error, 'unsupported pairing link version');
 }

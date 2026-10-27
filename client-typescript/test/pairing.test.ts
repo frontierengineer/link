@@ -7,13 +7,16 @@ import { b64u, EMPTY, fromHex, toHex, utf8 } from '../src/bytes.js';
 import { hkdf, open } from '../src/crypto.js';
 import {
   buildPairingLink,
+  buildPairingParams,
   CROCKFORD,
   formatCode,
   generateCode,
   generateCodeId,
   normalizeCode,
   parsePairingLink,
+  parsePairingParams,
 } from '../src/code.js';
+import { InvalidError } from '../src/errors.js';
 import { identityFromSeed } from '../src/identity.js';
 import { NewcomerExchange, pairTransportKeys, PrimaryExchange } from '../src/pairing.js';
 import { createNetwork } from '../src/roster.js';
@@ -59,6 +62,42 @@ test('pairing links build and parse', () => {
   assert.throws(() => parsePairingLink(link.replace('i=AQIDBAUGBwg', 'i=AQID')));
   assert.throws(() => parsePairingLink(link.replace('r=wss', 'r=https')));
   assert.throws(() => parsePairingLink('https://pair?v=1'));
+});
+
+test('pairing parameters: Link defines the parameters, and a link is one wrapping of them', () => {
+  const network = identityFromSeed(new Uint8Array(32).fill(1)).id;
+  const codeId = b64u(fromHex('0102030405060708'));
+  const relay = 'wss://eu.frontierengineer.link:8443/v1?x=1&y=2';
+  const parts = { network, code: '7k2m-9qxz', codeId, relay };
+  const params = buildPairingParams(parts);
+  assert.equal(params, `v=1&n=${network}&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%3A8443%2Fv1%3Fx%3D1%26y%3D2`);
+  assert.equal(buildPairingLink(parts), `frontier://pair?${params}`);
+  const want = { network, code: '7K2M9QXZ', codeId, relay };
+  assert.deepEqual(parsePairingParams(params), want);
+  // As an https URL's fragment carries it, taken out again.
+  assert.deepEqual(parsePairingParams(new URL(`https://frontier.link/#${params}`).hash.slice(1)), want);
+  // Any order, a displayed code, parameters it does not know.
+  assert.deepEqual(parsePairingParams(`r=${encodeURIComponent(relay)}&x=9&i=${codeId}&c=7k2m-9qxz&n=${network}&v=1`), want);
+  const invalid = (s: string, what: RegExp) =>
+    assert.throws(() => parsePairingParams(s), (e: unknown) => e instanceof InvalidError && e.code === 'invalid' && what.test(e.message), s);
+  invalid(params.replace('v=1&', ''), /missing v/);
+  invalid(params.replace('v=1', 'v=2'), /unknown version 2/);
+  for (const [k, name] of [['n', 'network id'], ['c', 'code'], ['i', 'code id'], ['r', 'relay']] as const) {
+    const without = params.split('&').filter((p) => !p.startsWith(`${k}=`)).join('&');
+    invalid(without, new RegExp(`missing ${k} \\(the ${name}\\)`));
+    invalid(params.replace(new RegExp(`${k}=[^&]*`), `${k}=`), new RegExp(`missing ${k} `));
+  }
+  invalid(`${params}&n=${network}`, /repeats n/);
+  invalid(params.replace(`n=${network}`, 'n=nope'), /network id/);
+  invalid(params.replace('i=AQIDBAUGBwg', 'i=AQID'), /code id/);
+  invalid(params.replace('r=wss', 'r=https'), /ws:\/\/ or wss:\/\//);
+  invalid(params.replace('c=7K2M9QXZ', 'c=7K2M9QXU'), /pairing code/);
+  invalid(`${params}&bare`, /without a value/);
+  invalid(params.replace('r=wss', 'r=%E0%A4%A'), /percent-encoding/);
+  assert.throws(() => buildPairingParams({ ...parts, relay: '' }), InvalidError);
+  assert.throws(() => buildPairingParams({ ...parts, network: 'nope' }), InvalidError);
+  assert.throws(() => buildPairingParams({ ...parts, codeId: 'AQID' }), InvalidError);
+  assert.throws(() => buildPairingParams({ ...parts, code: 'U' }), InvalidError);
 });
 
 test('the exchange: P1..P6 between newcomer and primary', () => {

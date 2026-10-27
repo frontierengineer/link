@@ -6,7 +6,7 @@
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { b64u, concat, EMPTY, fromHex, toHex, u32be, u64be, utf8 } from '../src/bytes.js';
-import { buildPairingLink, formatCode, normalizeCode } from '../src/code.js';
+import { buildPairingLink, buildPairingParams, formatCode, normalizeCode, parsePairingParams } from '../src/code.js';
 import { open } from '../src/crypto.js';
 import {
   dataBody,
@@ -23,7 +23,10 @@ import { HandshakeState, PATTERNS } from '../src/noise.js';
 import { NewcomerExchange, pairTransportKeys, PrimaryExchange } from '../src/pairing.js';
 import {
   acceptanceProblem,
+  createNetwork,
+  isPlaced,
   memberFromIdentity,
+  placeNetwork,
   rosterProblem,
   rosterSigningBytes,
   signRoster,
@@ -136,12 +139,58 @@ export function buildVectors(): unknown {
     },
     otherNet,
   );
+  // A network made with no relay, and placed later (section 3.2): version 1 lists the primary
+  // and the second member and names no relay; version 2 sets it, nothing else changed.
+  const createdAt = 1790000000000;
+  const placedAt = 1790000060000;
+  const unplaced = createNetwork({ identity: primary, networkSeed: net.seed, now: createdAt, members: [memberFromIdentity(second)] }).roster;
+  const placed = placeNetwork({ roster: unplaced, networkSeed: net.seed, relay, now: placedAt });
+  if (isPlaced(unplaced) || !isPlaced(placed)) throw new Error('placing vector: isPlaced');
+  const refusedPlacing = [
+    { name: 'already placed', roster: placed, networkSeed: networkSeeds.network, relay: 'wss://elsewhere.example/v1' },
+    { name: 'the seed of another network', roster: unplaced, networkSeed: networkSeeds.other, relay },
+    ...[
+      ['no relay', ''],
+      ['an https URL', 'https://eu.frontierengineer.link/v1'],
+      ['no scheme', 'eu.frontierengineer.link/v1'],
+      ['no host', 'wss:///v1'],
+      ['one slash', 'ws:/eu.frontierengineer.link/v1'],
+      ['an upper-case scheme', 'WSS://eu.frontierengineer.link/v1'],
+      ['a host that is not one', 'wss://eu frontierengineer.link/v1'],
+    ].map(([name, r]) => ({ name: `relay: ${name!}`, roster: unplaced, networkSeed: networkSeeds.network, relay: r! })),
+  ];
+  for (const c of refusedPlacing) {
+    let refused = false;
+    try {
+      placeNetwork({ roster: c.roster, networkSeed: fromHex(c.networkSeed), relay: c.relay, now: placedAt });
+    } catch {
+      refused = true;
+    }
+    if (!refused) throw new Error(`placing vector: ${c.name} is placed`);
+  }
+  const placing = {
+    primarySeed: seeds.primary,
+    networkSeed: networkSeeds.network,
+    members: [memberFromIdentity(second)],
+    createdAt,
+    unplaced,
+    relay,
+    placedAt,
+    placed,
+    placedAccepted: [
+      { name: 'any relay URL of the rule', relay: 'ws://127.0.0.1:8080/v1', roster: placeNetwork({ roster: unplaced, networkSeed: net.seed, relay: 'ws://127.0.0.1:8080/v1', now: placedAt }) },
+      { name: 'a non-ASCII host, a port and a query', relay: 'wss://relé.example:8443/v1?q=ü', roster: placeNetwork({ roster: unplaced, networkSeed: net.seed, relay: 'wss://relé.example:8443/v1?q=ü', now: placedAt }) },
+    ],
+    refused: refusedPlacing,
+  };
+
   const acceptance = [
     { name: 'newer, pinned network key', roster, pinnedNetworkKey: roster.networkKey, heldVersion: 11 },
     { name: 'same version', roster, pinnedNetworkKey: roster.networkKey, heldVersion: 12 },
     { name: 'older version', roster, pinnedNetworkKey: roster.networkKey, heldVersion: 13 },
     { name: 'another primary, the same network key', roster: claimed, pinnedNetworkKey: roster.networkKey, heldVersion: 12 },
     { name: 'valid but signed by another network key', roster: otherNetwork, pinnedNetworkKey: roster.networkKey, heldVersion: 1 },
+    { name: 'placed, over the unplaced version 1', roster: placed, pinnedNetworkKey: placed.networkKey, heldVersion: 1 },
   ].map((c) => ({ ...c, accept: acceptanceProblem(c.roster, c.pinnedNetworkKey, c.heldVersion) === null }));
 
   // ── Registration and resignation ──
@@ -391,6 +440,51 @@ export function buildVectors(): unknown {
     sm('resign', { type: 'resign', json: resignJson }),
   ];
 
+  // ── Pairing parameters (section 5.1): Link's, without a scheme ──
+  const paramParts = { network: net.id, code, codeId: b64u(codeId), relay };
+  const params = buildPairingParams(paramParts);
+  const unicodeParts = { ...paramParts, relay: 'wss://relé.example:8443/v1?q=ü&x=1' };
+  const unicodeParams = buildPairingParams(unicodeParts);
+  const drop = (k: string) => params.split('&').filter((p) => !p.startsWith(`${k}=`)).join('&');
+  const parseCases: { name: string; params: string; valid: boolean; parsed?: unknown }[] = [
+    { name: 'as built', params, valid: true },
+    { name: 'a non-ASCII relay with a port and a query, percent-encoded as UTF-8', params: unicodeParams, valid: true },
+    { name: 'any order, a displayed lower-case code, a parameter it does not know, an empty part', params: `r=${encodeURIComponent(relay)}&&x=9&i=${b64u(codeId)}&c=7k2m-9qxz&n=${net.id}&v=1`, valid: true },
+    { name: 'v missing', params: drop('v'), valid: false },
+    { name: 'an unknown version', params: params.replace('v=1', 'v=2'), valid: false },
+    { name: 'n missing', params: drop('n'), valid: false },
+    { name: 'c missing', params: drop('c'), valid: false },
+    { name: 'i missing', params: drop('i'), valid: false },
+    { name: 'r missing', params: drop('r'), valid: false },
+    { name: 'r empty', params: params.replace(/r=[^&]*/, 'r='), valid: false },
+    { name: 'n repeated', params: `${params}&n=${net.id}`, valid: false },
+    { name: 'a part without =', params: `${params}&x`, valid: false },
+    { name: 'n not a node id', params: params.replace(`n=${net.id}`, 'n=nope'), valid: false },
+    { name: 'c not a code', params: params.replace(`c=${code}`, 'c=7K2M9QXU'), valid: false },
+    { name: 'i not 8 bytes', params: params.replace(`i=${b64u(codeId)}`, 'i=AQID'), valid: false },
+    { name: 'r an https URL', params: params.replace('r=wss', 'r=https'), valid: false },
+    { name: 'r malformed percent-encoding', params: params.replace(/r=[^&]*/, 'r=wss%3A%2F%2Fa%2'), valid: false },
+    { name: 'r percent-encoding that is not UTF-8', params: params.replace(/r=[^&]*/, 'r=wss%3A%2F%2Frel%FF.example%2Fv1'), valid: false },
+  ].map((c) => {
+    try {
+      return { ...c, valid: true, parsed: parsePairingParams(c.params) };
+    } catch {
+      return { ...c, valid: false };
+    }
+  });
+  if (parseCases.slice(0, 3).some((c) => !c.valid) || parseCases.slice(3).some((c) => c.valid)) throw new Error('pairing params vector: a case parses otherwise');
+  const pairingParams = {
+    network: net.id,
+    code,
+    codeIdB64u: b64u(codeId),
+    relay,
+    params,
+    link: `frontier://pair?${params}`,
+    fragment: `https://frontier.link/#${params}`,
+    unicode: { ...unicodeParts, params: unicodeParams },
+    parse: parseCases,
+  };
+
   return {
     description:
       'Link protocol v1 vectors produced by the TypeScript client (client-typescript/scripts/vectors.ts). Byte strings are lowercase hex unless the field name ends in B64u or the spec puts them in JSON as b64u.',
@@ -411,9 +505,12 @@ export function buildVectors(): unknown {
         { name: 'the second member claimed the primary', roster: claimed },
         { name: 'a member carrying a field the protocol does not define (kind): signed, and otherwise ignored', roster: withLabel },
         { name: 'another network', roster: otherNetwork },
+        { name: 'unplaced: version 1 with no relay yet', roster: unplaced },
+        { name: 'placed: version 2 with the relay set', roster: placed },
       ],
       invalid,
       acceptance,
+      placing,
     },
     register,
     resign: resignation,
@@ -425,6 +522,7 @@ export function buildVectors(): unknown {
         relay,
         link: buildPairingLink({ network: net.id, code, codeId: b64u(codeId), relay }),
       },
+      params: pairingParams,
       codeNormalisation: ['7k2m-9qxz', '7K2M9QXZ', ' 7k2m 9qxz ', 'o1l1-i0OK'].map((input) => ({ input, code: normalizeCode(input) })),
     },
     spake2: { rfc9382: rfc, profile },

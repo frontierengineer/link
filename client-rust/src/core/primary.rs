@@ -227,7 +227,8 @@ pub(crate) fn open_pairing_code(
     let now = node.unix_now();
     let mono = node.now();
     let network = node.network().to_owned();
-    let relay = node.roster().relay().to_owned();
+    // A network not placed yet names no relay: the link names the one this primary dials.
+    let relay = if node.roster().is_placed() { node.roster().relay().to_owned() } else { node.url.clone() };
     let lifetime = lifetime_ms.unwrap_or(crate::types::CODE_LIFETIME.as_millis() as u64);
     let st = state(node).ok_or_else(not_primary)?;
     let closed: Vec<String> =

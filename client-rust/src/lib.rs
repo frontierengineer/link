@@ -47,7 +47,8 @@ mod spake2;
 mod types;
 
 pub use crate::code::{
-    PairingLink, build_pairing_link, format_code, generate_code, normalize_code, parse_pairing_link,
+    PairingLink, build_pairing_link, build_pairing_params, format_code, generate_code, normalize_code,
+    parse_pairing_link, parse_pairing_params,
 };
 pub use crate::core::sessions::SessionInfo;
 pub use crate::core::{Observation, close_code};
@@ -63,8 +64,9 @@ pub use crate::json::{Json, JsonError};
 pub use crate::member::{CodeOptions, Member, MemberOptions, Primary, ResolveRelay};
 pub use crate::newcomer::{PairOptions, PairResult, PairTarget, pair};
 pub use crate::roster::{
-    MAX_ROSTER_BYTES, Roster, RosterMember, UnsignedRoster, acceptance_problem, create_network, create_network_with,
-    roster_problem, roster_signing_bytes, sign_roster,
+    MAX_ROSTER_BYTES, NetworkOptions, Roster, RosterMember, UnsignedRoster, acceptance_problem, create_network,
+    create_network_with, create_network_with_options, is_relay_url, place_network, roster_problem,
+    roster_signing_bytes, sign_roster,
 };
 pub use crate::types::*;
 

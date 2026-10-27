@@ -12,6 +12,9 @@ export {
 } from './identity.js';
 export {
   createNetwork,
+  placeNetwork,
+  isPlaced,
+  isRelayUrl,
   signRoster,
   rosterProblem,
   isValidRoster,
@@ -42,6 +45,8 @@ export {
   formatCode,
   buildPairingLink,
   parsePairingLink,
+  buildPairingParams,
+  parsePairingParams,
   type PairingLink,
 } from './code.js';
 export { pair, type PairOptions, type PairTarget, type PairResult } from './newcomer.js';

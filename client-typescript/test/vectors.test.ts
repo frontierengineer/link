@@ -6,8 +6,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { b64u, fromHex, toHex } from '../src/bytes.js';
 import { decodeFrame, decodeSessionMessage, encodeSessionMessage } from '../src/frames.js';
-import { acceptanceProblem, rosterProblem } from '../src/roster.js';
-import { parsePairingLink } from '../src/code.js';
+import { acceptanceProblem, createNetwork, isPlaced, placeNetwork, rosterProblem, type RosterMember } from '../src/roster.js';
+import { buildPairingLink, buildPairingParams, parsePairingLink, parsePairingParams } from '../src/code.js';
+import { canonicalize } from '../src/jcs.js';
+import { InvalidError } from '../src/errors.js';
 import { renderVectors, VECTORS_PATH } from '../scripts/vectors.js';
 import { FrameType, handshakeInitBody } from '../src/frames.js';
 import { identityFromSeed, networkKeyFromSeed } from '../src/identity.js';
@@ -25,7 +27,7 @@ test('roster cases: valid ones validate, invalid ones do not, acceptance as reco
   for (const c of v.roster.invalid) assert.notEqual(rosterProblem(c.roster), null, c.name);
   assert.ok(v.roster.invalid.length >= 10);
   const accepts = v.roster.acceptance.map((c: { accept: boolean }) => c.accept);
-  assert.deepEqual(accepts, [true, false, false, true, false]);
+  assert.deepEqual(accepts, [true, false, false, true, false, true]);
   for (const c of v.roster.acceptance) {
     assert.equal(acceptanceProblem(c.roster, c.pinnedNetworkKey, c.heldVersion) === null, c.accept, c.name);
   }
@@ -56,6 +58,42 @@ test('frames and session messages decode to their recorded parts', () => {
   }
   for (const m of v.sessionMessages) {
     assert.equal(toHex(encodeSessionMessage(decodeSessionMessage(fromHex(m.encoding)))), m.encoding, m.name);
+  }
+});
+
+test('placing: version 1 with no relay, from createNetwork; version 2 from placeNetwork; the refusals', () => {
+  const p = v.roster.placing;
+  const created = createNetwork({
+    identity: identityFromSeed(fromHex(p.primarySeed)),
+    networkSeed: fromHex(p.networkSeed),
+    now: p.createdAt,
+    members: p.members as RosterMember[],
+  }).roster;
+  assert.equal(canonicalize(created), canonicalize(p.unplaced));
+  assert.equal(isPlaced(p.unplaced), false);
+  const placed = placeNetwork({ roster: p.unplaced, networkSeed: fromHex(p.networkSeed), relay: p.relay, now: p.placedAt });
+  assert.equal(canonicalize(placed), canonicalize(p.placed));
+  assert.equal(isPlaced(p.placed), true);
+  for (const c of p.placedAccepted) {
+    assert.equal(canonicalize(placeNetwork({ roster: p.unplaced, networkSeed: fromHex(p.networkSeed), relay: c.relay, now: p.placedAt })), canonicalize(c.roster), c.name);
+  }
+  for (const c of p.refused) {
+    assert.throws(() => placeNetwork({ roster: c.roster, networkSeed: fromHex(c.networkSeed), relay: c.relay, now: p.placedAt }), InvalidError, c.name);
+  }
+});
+
+test('pairing parameters: built, wrapped, and every parse case as recorded', () => {
+  const q = v.pairing.params;
+  const parts = { network: q.network, code: q.code, codeId: q.codeIdB64u, relay: q.relay };
+  assert.equal(buildPairingParams(parts), q.params);
+  assert.equal(buildPairingLink(parts), q.link);
+  assert.deepEqual(parsePairingLink(q.link), parts);
+  assert.deepEqual(parsePairingParams(new URL(q.fragment).hash.slice(1)), parts);
+  const { params: unicodeParams, ...unicodeParts } = q.unicode;
+  assert.equal(buildPairingParams(unicodeParts), unicodeParams);
+  for (const c of q.parse) {
+    if (c.valid) assert.deepEqual(parsePairingParams(c.params), c.parsed, c.name);
+    else assert.throws(() => parsePairingParams(c.params), InvalidError, c.name);
   }
 });
 

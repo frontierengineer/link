@@ -38,6 +38,8 @@ export interface RelayOptions {
   now?: () => number;
   /** What `hello` lists (section 4.1). Default ['control']. */
   features?: string[];
+  /** The port to listen on (default: any free one), to bring a relay back where it was. */
+  port?: number;
 }
 
 export type FrameVerdict = 'pass' | 'drop' | 'unreachable';
@@ -75,7 +77,7 @@ export class TestRelay {
 
   static async start(opts: RelayOptions = {}): Promise<TestRelay> {
     let relay: TestRelay | undefined;
-    const ws = await listen('/v1', 2 * MAX_FRAME, (s) => relay!.accept(s));
+    const ws = await listen('/v1', 2 * MAX_FRAME, (s) => relay!.accept(s), opts.port ?? 0);
     relay = new TestRelay(ws, opts);
     return relay;
   }

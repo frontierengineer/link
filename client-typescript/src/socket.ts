@@ -222,7 +222,12 @@ export class Channel {
     this.ws.onmessage = (ev) => this.receive(ev.data);
     this.ws.onclose = (ev) => this.finish(ev.code, ev.reason);
     this.ws.onerror = () => {
-      // The close event follows with the code; nothing to add here.
+      // After it opened, the close event follows with the code. Before it opened, Node 22's
+      // WebSocket fires no close at all and stays CONNECTING, so the failure is reported here:
+      // closed 1006, the only code a connection that never opened can have, a moment later so a
+      // close event that does follow is the one reported.
+      if (this.ws.readyState === OPEN) return;
+      setTimeout(() => this.finish(1006, 'connection failed'), 0);
     };
     const streamed = this.ws as { ondrain?: (() => void) | null };
     if ('ondrain' in streamed) streamed.ondrain = () => this.drained();

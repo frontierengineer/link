@@ -9,7 +9,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use crate::bytes::from_b64u_array;
-use crate::code::{PairingLink, normalize_code, parse_pairing_link};
+use crate::code::{DEFAULT_CODE_ID, PairingLink, normalize_code, parse_pairing_link};
 use crate::errors::LinkError;
 use crate::frames::{decode_frame, encode_frame, frame_type};
 use crate::identity::Identity;
@@ -22,11 +22,12 @@ use crate::socket::{Ws, close_info, connect};
 #[derive(Clone, Debug)]
 pub enum PairTarget {
     Link(String),
-    /// `code` as typed: `XXXX-XXXX` or any spelling `normalize_code` accepts; `code_id` b64u.
+    /// `code` as typed: `XXXX-XXXX` or any spelling `normalize_code` accepts; `code_id` b64u, or
+    /// `None` for the network's default code.
     Parts {
         network: String,
         code: String,
-        code_id: String,
+        code_id: Option<String>,
         relay: String,
     },
 }
@@ -61,9 +62,12 @@ enum Stage {
 pub async fn pair(opts: PairOptions) -> Result<PairResult, LinkError> {
     let target = match opts.target {
         PairTarget::Link(link) => parse_pairing_link(&link).map_err(LinkError::pairing)?,
-        PairTarget::Parts { network, code, code_id, relay } => {
-            PairingLink { network, code: normalize_code(&code).map_err(LinkError::pairing)?, code_id, relay }
-        }
+        PairTarget::Parts { network, code, code_id, relay } => PairingLink {
+            network,
+            code: normalize_code(&code).map_err(LinkError::pairing)?,
+            code_id: code_id.unwrap_or_else(|| DEFAULT_CODE_ID.to_owned()),
+            relay,
+        },
     };
     let code_id =
         from_b64u_array::<8>(&target.code_id).ok_or_else(|| LinkError::pairing("code id: expected 8 bytes"))?;

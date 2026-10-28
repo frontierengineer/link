@@ -47,7 +47,7 @@ mod spake2;
 mod types;
 
 pub use crate::code::{
-    PairingLink, build_pairing_link, build_pairing_params, format_code, generate_code, normalize_code,
+    DEFAULT_CODE_ID, PairingLink, build_pairing_link, build_pairing_params, format_code, generate_code, normalize_code,
     parse_pairing_link, parse_pairing_params,
 };
 pub use crate::core::sessions::SessionInfo;

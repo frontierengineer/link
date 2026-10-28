@@ -7,7 +7,7 @@
 // it in place when it no longer is: its connection is untouched.
 
 import { b64u, fromB64u, fromB64uLen, randomBytes } from './bytes.js';
-import { buildPairingLink, formatCode, generateCode, generateCodeId, normalizeCode } from './code.js';
+import { buildPairingLink, DEFAULT_CODE_ID, formatCode, generateCode, generateCodeId, normalizeCode } from './code.js';
 import { ClosedError, InvalidError, LinkError, RateLimitedError, RosterFullError, TimeoutError } from './errors.js';
 import { encodeFrame, FrameType } from './frames.js';
 import { nodeIdFromEd25519 } from './identity.js';
@@ -60,9 +60,10 @@ export const REFUSAL_REPLY_BURST = 64;
 export interface PairingCode {
   /** Display form, `XXXX-XXXX`. */
   code: string;
-  /** b64u of the 8-byte code id. */
+  /** b64u of the 8-byte code id: `DEFAULT_CODE_ID` (`AAAAAAAAAAA`) for the default code. */
   codeId: string;
-  /** The `frontier://pair?...` link carrying network, code, code id and relay. */
+  /** The `frontier://pair?...` link carrying network, code, code id (none for the default code)
+   * and relay. */
   link: string;
   /** Unix milliseconds. */
   expiresAt: number;
@@ -143,8 +144,11 @@ interface PairChannel {
 export class PrimaryRole {
   private readonly codes = new Map<string, OpenCode>();
   private readonly channels = new Map<string, PairChannel>();
-  /** Code ids closed here (used, burned, cancelled, expired), oldest first. */
+  /** Code ids closed here (used, burned, cancelled, expired, replaced), oldest first. */
   private readonly closedCodes = new Set<string>();
+  /** A default code has been opened here: its id counts as issued from then on, however many
+   * other codes close after it (section 5.2). */
+  private defaultOpened = false;
   /** When a refusal event was last raised, by code id and reason; when a refusal last went, by issued code id. */
   private readonly refusalEvents = new Map<string, number>();
   private readonly codeReplies = new Map<string, number>();
@@ -158,9 +162,11 @@ export class PrimaryRole {
   /**
    * Opens a code that admits one node for 15 minutes. The code is random unless `code` gives
    * one (any spelling `normalizeCode` accepts): a chosen code is easier to say and easier to
-   * guess, and like every code it burns after five wrong confirmations.
+   * guess, and like every code it burns after five wrong confirmations. Without `separate` it
+   * is the default code (section 5.1), and closes the default code open before it; with
+   * `separate` it has a random id of its own and stands beside the default code.
    */
-  openPairingCode(opts: { lifetimeMs?: number; code?: string } = {}): PairingCode {
+  openPairingCode(opts: { lifetimeMs?: number; code?: string; separate?: boolean } = {}): PairingCode {
     let chosen: string | undefined;
     if (opts.code !== undefined) {
       try {
@@ -174,7 +180,12 @@ export class PrimaryRole {
     if (room > MAX_ROSTER_BYTES) throw new RosterFullError(room);
     this.pruneCodes();
     const code = chosen ?? generateCode();
-    const codeId = b64u(generateCodeId());
+    const codeId = opts.separate ? b64u(generateCodeId()) : DEFAULT_CODE_ID;
+    if (!opts.separate) {
+      const before = this.codes.get(DEFAULT_CODE_ID);
+      if (before) this.withdraw(before);
+      this.defaultOpened = true;
+    }
     const lifetime = opts.lifetimeMs ?? CODE_LIFETIME_MS;
     const expiresAt = this.m.now() + lifetime;
     this.codes.set(codeId, {
@@ -197,11 +208,10 @@ export class PrimaryRole {
     };
   }
 
-  /** Withdraws an open code. */
-  cancelPairingCode(codeId: string): void {
+  /** Withdraws an open code: the default code when `codeId` is not given. */
+  cancelPairingCode(codeId: string = DEFAULT_CODE_ID): void {
     const entry = this.codes.get(codeId);
-    if (entry) entry.burned = true;
-    this.closeCode(codeId);
+    if (entry) this.withdraw(entry);
   }
 
   /** Removes a member and publishes the roster. Returns the new roster. */
@@ -395,6 +405,20 @@ export class PrimaryRole {
     for (const [id, c] of this.codes) if (c.burned || c.deadline <= now) this.closeCode(id);
   }
 
+  /** Closes an open code before its time (cancelled, or a default code opened after it): it
+   * admits nobody from then on, so its pairing channels end too. */
+  private withdraw(entry: OpenCode): void {
+    entry.burned = true;
+    for (const [key, ch] of [...this.channels]) if (ch.entry === entry) this.endChannel(key, 'unknown or expired code', true);
+    this.closeCode(entry.codeId);
+  }
+
+  /** Closes `entry` if it is still the code open under its id: a channel outliving its code (the
+   * default code, expired and opened again since) must not close the code that replaced it. */
+  private closeEntry(entry: OpenCode): void {
+    if (this.codes.get(entry.codeId) === entry) this.closeCode(entry.codeId);
+  }
+
   /** Forgets an open code, remembering that it was one. */
   private closeCode(id: string): void {
     this.codes.delete(id);
@@ -415,7 +439,7 @@ export class PrimaryRole {
    */
   private refusePairing(key: string, codeId: string, reason: string): void {
     const now = this.m.mono();
-    const issued = this.codes.has(codeId) || this.closedCodes.has(codeId);
+    const issued = this.codes.has(codeId) || this.closedCodes.has(codeId) || (codeId === DEFAULT_CODE_ID && this.defaultOpened);
     const reply = issued ? once(this.codeReplies, `${codeId}/${key}`, now, CODE_REPLY_MS) : this.refusalReplies.take(now);
     if (reply) this.m.relay.sendControl({ type: 'pairEnd', channel: key });
     if (issued && once(this.refusalEvents, `${codeId}/${reason}`, now, REFUSAL_EVENT_MS)) this.m.emit('pairingFailed', { codeId, reason });
@@ -500,7 +524,7 @@ export class PrimaryRole {
     this.channels.delete(ch.key);
     ch.entry.inFlight--;
     ch.entry.burned = true;
-    this.closeCode(ch.entry.codeId);
+    this.closeEntry(ch.entry);
     this.sendPair(ch, ch.exchange.p6(next));
     // The newcomer has this roster already (P6): pushing it too would only fail while it
     // reconnects, and be tried again.
@@ -522,7 +546,7 @@ export class PrimaryRole {
     if (ch.claimed) ch.entry.claimed = false;
     if (ch.entry.failed >= CODE_ATTEMPTS) {
       ch.entry.burned = true;
-      this.closeCode(ch.entry.codeId);
+      this.closeEntry(ch.entry);
     }
     this.m.relay.sendControl({ type: 'pairEnd', channel: ch.key });
     this.m.emit('pairingFailed', { codeId: ch.entry.codeId, reason });

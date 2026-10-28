@@ -258,6 +258,14 @@ fn client_pairing_params() {
     assert_eq!(parse_pairing_params(fragment).unwrap(), parts);
     let unicode = q.get("unicode").unwrap();
     assert_eq!(build_pairing_params(&parts_of(unicode, "codeId")).unwrap(), s(unicode, "params"));
+    // The default code: no `i` written, and a missing `i` read as its id.
+    let default = q.get("default").unwrap();
+    let parts = parts_of(default, "codeIdB64u");
+    assert_eq!(parts.code_id, DEFAULT_CODE_ID);
+    assert_eq!(build_pairing_params(&parts).unwrap(), s(default, "params"));
+    assert_eq!(build_pairing_link(&parts).unwrap(), s(default, "link"));
+    assert_eq!(parse_pairing_params(s(default, "params")).unwrap(), parts);
+    assert_eq!(parse_pairing_link(s(default, "link")).unwrap(), parts);
     let cases = arr(q, "parse");
     assert!(cases.len() >= 10);
     for c in cases {

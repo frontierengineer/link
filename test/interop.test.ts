@@ -209,8 +209,8 @@ each('a wrong code fails and counts, five burn the code; expired and cancelled c
     assert.equal((await P.d.waitFor('pairingFailed', (e) => e.codeId === code.codeId)).reason, 'wrong-code');
     assert.equal((await ad.pair({ link: code.link })).roster.version, 2);
 
-    // Five burn it.
-    const burn = await P.d.openPairingCode();
+    // Five burn it. Each code from here has an id of its own, so its events are told apart.
+    const burn = await P.d.openPairingCode({ separate: true });
     for (let i = 0; i < 5; i++) await refusedWith(bd.pair(wrong(burn)), 'pairing');
     await until(() => P.d.seen('pairingFailed').filter((e) => e.codeId === burn.codeId).length === 5, 'five failures at the primary');
     assert.deepEqual(P.d.seen('pairingFailed').filter((e) => e.codeId === burn.codeId).map((e) => e.reason), Array(5).fill('wrong-code'));
@@ -219,11 +219,11 @@ each('a wrong code fails and counts, five burn the code; expired and cancelled c
     assert.equal(P.d.seen('pairingFailed').filter((e) => e.codeId === burn.codeId)[5]!.reason, 'unknown-code');
 
     // An expired code, and a cancelled one.
-    const short = await P.d.openPairingCode({ lifetimeMs: 300 });
+    const short = await P.d.openPairingCode({ lifetimeMs: 300, separate: true });
     await sleep(600);
     await refusedWith(bd.pair({ link: short.link }), 'pairing');
     assert.equal((await P.d.waitFor('pairingFailed', (e) => e.codeId === short.codeId)).reason, 'unknown-code');
-    const cancelled = await P.d.openPairingCode();
+    const cancelled = await P.d.openPairingCode({ separate: true });
     await P.d.cancelPairingCode(cancelled.codeId);
     await refusedWith(bd.pair({ link: cancelled.link }), 'pairing');
     assert.equal((await P.d.waitFor('pairingFailed', (e) => e.codeId === cancelled.codeId)).reason, 'unknown-code');
@@ -232,6 +232,63 @@ each('a wrong code fails and counts, five burn the code; expired and cancelled c
     assert.equal((await P.d.state()).roster.version, 2);
     const fresh = await P.d.openPairingCode();
     assert.equal((await bd.pair({ link: fresh.link })).roster.version, 3);
+  }),
+);
+
+each('the default code: opened again it admits only with the second, a separate code stands beside it, a link with no i pairs, and the default id with none open is refused', ({ p, a, b }) =>
+  scene({}, async (s) => {
+    const P = await s.primary(p);
+    const ad = await s.spawn(a, 'a');
+    const bd = await s.spawn(b, 'b');
+    const cd = await s.spawn(b, 'c');
+    const ZERO = 'AAAAAAAAAAA';
+    const network = P.roster.network;
+    const relay = s.relay.url;
+    const failed = (reason: string, codeId: string, since: number) =>
+      P.d.waitFor('pairingFailed', (e) => e.codeId === codeId && e.reason === reason, 10_000, since);
+
+    // No default code was ever opened: the default id is refused.
+    await refusedWith(bd.pair({ network, code: '7K2M-9QXZ', relay }), 'pairing');
+
+    // Two default codes, one after the other, and a separate code beside them.
+    const first = await P.d.openPairingCode({ code: '7K2M9QXZ' });
+    const second = await P.d.openPairingCode({ code: 'HJKM-NPQR' });
+    const separate = await P.d.openPairingCode({ code: '7K2M9QXZ', separate: true });
+    assert.equal(first.codeId, ZERO);
+    assert.equal(second.codeId, ZERO);
+    assert.notEqual(separate.codeId, ZERO);
+    assert.ok(!/[?&]i=/.test(second.link), `the default code's link names no code id: ${second.link}`);
+    assert.ok(separate.link.includes(`&i=${separate.codeId}&`), separate.link);
+
+    // The first default code admits nobody: the default id names the second now, and the first's
+    // code is a wrong one for it.
+    let mark = P.d.mark();
+    await refusedWith(ad.pair({ link: first.link }), 'pairing');
+    await failed('wrong-code', ZERO, mark);
+
+    // The separate code, the first default code's code under an id of its own, pairs...
+    assert.equal((await bd.pair({ link: separate.link })).roster.version, 2);
+    await P.d.waitFor('paired', (e) => e.node === bd.id && e.codeId === separate.codeId && e.version === 2);
+    // ...and the second default code still does, from its link with no i.
+    assert.equal((await ad.pair({ link: second.link })).roster.version, 3);
+    await P.d.waitFor('paired', (e) => e.node === ad.id && e.codeId === ZERO && e.version === 3);
+
+    // Used, the default code is closed: the default id is refused as one.
+    mark = P.d.mark();
+    await refusedWith(cd.pair({ network, code: second.code, relay }), 'pairing');
+    await failed('unknown-code', ZERO, mark);
+
+    // Cancelling with no id withdraws the default code and leaves a separate one open.
+    const third = await P.d.openPairingCode();
+    const beside = await P.d.openPairingCode({ separate: true });
+    await P.d.cancelPairingCode();
+    await refusedWith(cd.pair({ network, code: third.code, relay }), 'pairing');
+    const fourth = await P.d.openPairingCode();
+    assert.equal((await cd.pair({ network, code: fourth.code, relay })).roster.version, 4);
+    await P.d.waitFor('paired', (e) => e.node === cd.id && e.codeId === ZERO && e.version === 4);
+    const ed = await s.spawn(a, 'e');
+    assert.equal((await ed.pair({ link: beside.link })).roster.version, 5);
+    await P.d.waitFor('paired', (e) => e.node === ed.id && e.codeId === beside.codeId && e.version === 5);
   }),
 );
 
@@ -888,6 +945,8 @@ for (const impl of available) {
       // Primary only, and member only.
       await refusedWith(M.d.openPairingCode(), 'invalid');
       await refusedWith(M.d.cancelPairingCode('AAAAAAAAAAA'), 'invalid');
+      await refusedWith(M.d.cancelPairingCode(), 'invalid');
+      await refusedWith(M.d.openPairingCode({ separate: true }), 'invalid');
       await refusedWith(M.d.revoke(P.id), 'invalid');
       await refusedWith(M.d.usage(), 'invalid');
       await refusedWith(P.d.resign(), 'invalid');

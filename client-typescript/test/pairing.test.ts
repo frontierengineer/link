@@ -9,6 +9,7 @@ import {
   buildPairingLink,
   buildPairingParams,
   CROCKFORD,
+  DEFAULT_CODE_ID,
   formatCode,
   generateCode,
   generateCodeId,
@@ -82,11 +83,14 @@ test('pairing parameters: Link defines the parameters, and a link is one wrappin
     assert.throws(() => parsePairingParams(s), (e: unknown) => e instanceof InvalidError && e.code === 'invalid' && what.test(e.message), s);
   invalid(params.replace('v=1&', ''), /missing v/);
   invalid(params.replace('v=1', 'v=2'), /unknown version 2/);
-  for (const [k, name] of [['n', 'network id'], ['c', 'code'], ['i', 'code id'], ['r', 'relay']] as const) {
+  for (const [k, name] of [['n', 'network id'], ['c', 'code'], ['r', 'relay']] as const) {
     const without = params.split('&').filter((p) => !p.startsWith(`${k}=`)).join('&');
     invalid(without, new RegExp(`missing ${k} \\(the ${name}\\)`));
     invalid(params.replace(new RegExp(`${k}=[^&]*`), `${k}=`), new RegExp(`missing ${k} `));
   }
+  // No `i` is the default code; an empty one is refused.
+  assert.deepEqual(parsePairingParams(params.replace('&i=AQIDBAUGBwg', '')), { ...want, codeId: DEFAULT_CODE_ID });
+  invalid(params.replace('i=AQIDBAUGBwg', 'i='), /empty i \(the code id\)/);
   invalid(`${params}&n=${network}`, /repeats n/);
   invalid(params.replace(`n=${network}`, 'n=nope'), /network id/);
   invalid(params.replace('i=AQIDBAUGBwg', 'i=AQID'), /code id/);
@@ -98,6 +102,12 @@ test('pairing parameters: Link defines the parameters, and a link is one wrappin
   assert.throws(() => buildPairingParams({ ...parts, network: 'nope' }), InvalidError);
   assert.throws(() => buildPairingParams({ ...parts, codeId: 'AQID' }), InvalidError);
   assert.throws(() => buildPairingParams({ ...parts, code: 'U' }), InvalidError);
+  // The default code's parameters leave its id out, whether it is given or not.
+  const defaultParams = `v=1&n=${network}&c=7K2M9QXZ&r=wss%3A%2F%2Feu.frontierengineer.link%3A8443%2Fv1%3Fx%3D1%26y%3D2`;
+  assert.equal(buildPairingParams({ network, code: '7K2M9QXZ', relay }), defaultParams);
+  assert.equal(buildPairingParams({ ...parts, codeId: DEFAULT_CODE_ID }), defaultParams);
+  assert.equal(buildPairingLink({ network, code: '7K2M9QXZ', relay }), `frontier://pair?${defaultParams}`);
+  assert.deepEqual(parsePairingLink(`frontier://pair?${defaultParams}`), { ...want, codeId: DEFAULT_CODE_ID });
 });
 
 test('the exchange: P1..P6 between newcomer and primary', () => {

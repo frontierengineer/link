@@ -18,6 +18,10 @@ const (
 	codeIDLength = 8
 )
 
+// DefaultCodeID is the id of a network's default code (section 5.1): 8 zero bytes. A primary
+// holds at most one default code, and pairing parameters leave its id out.
+const DefaultCodeID = "AAAAAAAAAAA"
+
 // GenerateCode returns a fresh code in its canonical form: 8 Crockford characters, no hyphen.
 func GenerateCode() string {
 	b := make([]byte, codeLength)
@@ -69,24 +73,29 @@ func FormatCode(code string) (string, error) {
 type PairingLink struct {
 	Network string
 	Code    string // canonical, no hyphen
-	CodeID  string // b64u of the 8-byte code id
+	CodeID  string // b64u of the 8-byte code id; DefaultCodeID (or "" when writing) for the default code
 	Relay   string
 }
 
 // pairingParams writes the pairing parameters, v=1&n=<network>&c=<code>&i=<code id>&r=<relay>,
-// each value percent-encoded as ECMAScript's encodeURIComponent does.
+// each value percent-encoded as ECMAScript's encodeURIComponent does, with no i for the
+// default code.
 func pairingParams(p PairingLink) (string, error) {
 	if !IsNodeID(p.Network) {
 		return "", errors.New("network is not a node id")
 	}
-	if _, err := fromB64uLen(p.CodeID, codeIDLength, "code id"); err != nil {
-		return "", err
+	id := ""
+	if p.CodeID != "" && p.CodeID != DefaultCodeID {
+		if _, err := fromB64uLen(p.CodeID, codeIDLength, "code id"); err != nil {
+			return "", err
+		}
+		id = "&i=" + encodeURIComponent(p.CodeID)
 	}
 	code, err := NormalizeCode(p.Code)
 	if err != nil {
 		return "", err
 	}
-	return "v=1&n=" + encodeURIComponent(p.Network) + "&c=" + encodeURIComponent(code) + "&i=" + encodeURIComponent(p.CodeID) + "&r=" + encodeURIComponent(p.Relay), nil
+	return "v=1&n=" + encodeURIComponent(p.Network) + "&c=" + encodeURIComponent(code) + id + "&r=" + encodeURIComponent(p.Relay), nil
 }
 
 // readPairingParams reads pairing parameters; what names them in errors, and badVersion, when
@@ -130,8 +139,10 @@ func readPairingParams(s, what, badVersion string) (PairingLink, error) {
 	if params["c"] == "" {
 		return PairingLink{}, fmt.Errorf("%s: missing c (the code)", what)
 	}
-	if p.CodeID == "" {
-		return PairingLink{}, fmt.Errorf("%s: missing i (the code id)", what)
+	if i, given := params["i"]; !given {
+		p.CodeID = DefaultCodeID // no i: the network's default code
+	} else if i == "" {
+		return PairingLink{}, fmt.Errorf("%s: empty i (the code id)", what)
 	}
 	if _, err := fromB64uLen(p.CodeID, codeIDLength, what+" code id"); err != nil {
 		return PairingLink{}, err
@@ -155,10 +166,11 @@ func readPairingParams(s, what, badVersion string) (PairingLink, error) {
 }
 
 // BuildPairingParams writes the pairing parameters alone (section 5.1):
-// v=1&n=<network>&c=<code>&i=<code id>&r=<relay>, each value percent-encoded. Link defines these,
-// not a scheme: an application wraps them as it likes, in a link's query or an https URL's
-// fragment. It fails invalid for a network that is not a node id, a code id not of 8 bytes, a
-// code that is not one, or a relay that is not a ws:// or wss:// URL (IsRelayURL).
+// v=1&n=<network>&c=<code>&i=<code id>&r=<relay>, each value percent-encoded, and no i for the
+// default code (CodeID DefaultCodeID or ""). Link defines these, not a scheme: an application
+// wraps them as it likes, in a link's query or an https URL's fragment. It fails invalid for a
+// network that is not a node id, a code id not of 8 bytes, a code that is not one, or a relay
+// that is not a ws:// or wss:// URL (IsRelayURL).
 func BuildPairingParams(p PairingLink) (string, error) {
 	if !IsRelayURL(p.Relay) {
 		return "", invalidError("pairing parameters: relay must be a ws:// or wss:// URL")
@@ -171,9 +183,9 @@ func BuildPairingParams(p PairingLink) (string, error) {
 }
 
 // ParsePairingParams reads pairing parameters (section 5.1) as BuildPairingParams writes them,
-// in any order; parameters it does not know are ignored, and the code may be in its displayed
-// form. It fails invalid on a missing parameter, an unknown version, a repeated parameter, or a
-// value that is not what its parameter holds.
+// in any order; parameters it does not know are ignored, the code may be in its displayed form,
+// and a missing i reads as DefaultCodeID. It fails invalid on a missing parameter, an empty i, an
+// unknown version, a repeated parameter, or a value that is not what its parameter holds.
 func ParsePairingParams(params string) (PairingLink, error) {
 	p, err := readPairingParams(params, "pairing parameters", "")
 	if err != nil {

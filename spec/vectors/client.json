@@ -1267,6 +1267,14 @@
       "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
       "link": "frontier://pair?v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
       "fragment": "https://frontier.link/#v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AQIDBAUGBwg&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+      "default": {
+        "network": "326jkitmrebtxmtl33rtlpr2nq",
+        "code": "7K2M9QXZ",
+        "codeIdB64u": "AAAAAAAAAAA",
+        "relay": "wss://eu.frontierengineer.link/v1",
+        "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+        "link": "frontier://pair?v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1"
+      },
       "unicode": {
         "network": "326jkitmrebtxmtl33rtlpr2nq",
         "code": "7K2M9QXZ",
@@ -1329,8 +1337,30 @@
           "valid": false
         },
         {
-          "name": "i missing",
+          "name": "i missing: the network's default code",
           "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+          "valid": true,
+          "parsed": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "code": "7K2M9QXZ",
+            "codeId": "AAAAAAAAAAA",
+            "relay": "wss://eu.frontierengineer.link/v1"
+          }
+        },
+        {
+          "name": "i given as the default code's id, which a writer leaves out",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=AAAAAAAAAAA&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
+          "valid": true,
+          "parsed": {
+            "network": "326jkitmrebtxmtl33rtlpr2nq",
+            "code": "7K2M9QXZ",
+            "codeId": "AAAAAAAAAAA",
+            "relay": "wss://eu.frontierengineer.link/v1"
+          }
+        },
+        {
+          "name": "i empty",
+          "params": "v=1&n=326jkitmrebtxmtl33rtlpr2nq&c=7K2M9QXZ&i=&r=wss%3A%2F%2Feu.frontierengineer.link%2Fv1",
           "valid": false
         },
         {

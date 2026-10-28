@@ -1305,7 +1305,7 @@ fn the_primary_runs_pairing_and_burns_a_code_after_five_failures() {
     p.connect();
     p.take();
     p.events();
-    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, None, None, false).unwrap();
     let wrong = if code.code == "AAAA-AAAA" { "BBBBBBBB" } else { "AAAAAAAA" };
     for n in 1..=4 {
         assert!(attempt(&mut p, n, wrong, &code.code_id).is_none());
@@ -1330,7 +1330,7 @@ fn a_pairing_channel_left_hanging_times_out_and_refunds_its_slot() {
     p.connect();
     p.take();
     p.events();
-    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, None, None, false).unwrap();
     let wrong = if code.code == "AAAA-AAAA" { "BBBBBBBB" } else { "AAAAAAAA" };
     for n in 1..=4 {
         assert!(attempt(&mut p, n, wrong, &code.code_id).is_none());
@@ -1724,7 +1724,7 @@ fn a_relay_streaming_pairings_for_unknown_codes_raises_no_events_and_few_answers
 fn refusals_for_a_closed_code_raise_one_event_a_second() {
     let w = world();
     let mut p = primary_node(&w);
-    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, None, None, true).unwrap();
     primary::cancel_pairing_code(&mut p.node, &code.code_id);
     let conn = p.conn;
     for _ in 0..1000 {
@@ -1737,7 +1737,7 @@ fn refusals_for_a_closed_code_raise_one_event_a_second() {
     p.node.on_text(conn, &pairing_msg(&channel, &code.code_id));
     assert_eq!(failures(&mut p), ["unknown-code"]);
     // An expired code is refused with its event too.
-    let short = primary::open_pairing_code(&mut p.node, Some(10), None).unwrap();
+    let short = primary::open_pairing_code(&mut p.node, Some(10), None, true).unwrap();
     w.clock.advance(20);
     p.node.on_text(conn, &pairing_msg(&[3; 16], &short.code_id));
     assert_eq!(failures(&mut p), ["unknown-code"]);
@@ -1831,8 +1831,8 @@ fn an_empty_fragment_saying_more_follow_ends_the_session() {
 fn refusals_for_issued_codes_are_answered_whatever_made_up_ids_used() {
     let w = world();
     let mut p = primary_node(&w);
-    let expired = primary::open_pairing_code(&mut p.node, Some(10), None).unwrap();
-    let cancelled = primary::open_pairing_code(&mut p.node, None, None).unwrap();
+    let expired = primary::open_pairing_code(&mut p.node, Some(10), None, true).unwrap();
+    let cancelled = primary::open_pairing_code(&mut p.node, None, None, true).unwrap();
     primary::cancel_pairing_code(&mut p.node, &cancelled.code_id);
     w.clock.advance(20);
     let conn = p.conn;
@@ -1858,7 +1858,7 @@ fn refusals_for_issued_codes_are_answered_whatever_made_up_ids_used() {
 fn someone_holding_a_code_id_cannot_use_up_another_newcomers_answer() {
     let w = world();
     let mut p = primary_node(&w);
-    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, None, None, true).unwrap();
     primary::cancel_pairing_code(&mut p.node, &code.code_id);
     let conn = p.conn;
     // Someone with the code id refuses itself over and over on its channel...
@@ -1869,6 +1869,125 @@ fn someone_holding_a_code_id_cannot_use_up_another_newcomers_answer() {
     // ...and the newcomer on its own channel is answered at once all the same.
     p.node.on_text(conn, &pairing_msg(&[8; 16], &code.code_id));
     assert_eq!(pair_ends(&p), 1);
+}
+
+#[test]
+fn a_newer_default_code_closes_the_one_before_it_and_separate_codes_sit_beside_it() {
+    use crate::code::DEFAULT_CODE_ID;
+    let w = world();
+    let mut p = primary_node(&w);
+    let conn = p.conn;
+    // Until a default code is opened its id is one never issued: refused with no event.
+    p.node.on_text(conn, &pairing_msg(&[1; 16], DEFAULT_CODE_ID));
+    assert_eq!(pair_ends(&p), 1);
+    assert!(failures(&mut p).is_empty());
+    let first = primary::open_pairing_code(&mut p.node, None, Some("AAAAAAAA"), false).unwrap();
+    assert_eq!(first.code_id, DEFAULT_CODE_ID);
+    assert!(!first.link.contains("&i="), "no i for the default code: {}", first.link);
+    let beside = primary::open_pairing_code(&mut p.node, None, None, true).unwrap();
+    assert_ne!(beside.code_id, DEFAULT_CODE_ID);
+    assert!(beside.link.contains(&format!("&i={}&", beside.code_id)));
+    // A newcomer is midway through the first default code when a second one opens: its
+    // channel ends, and the first code admits nobody from then on.
+    p.node.on_text(conn, &pairing_msg(&[2; 16], DEFAULT_CODE_ID));
+    let mut a = crate::pairing::NewcomerExchange::new("AAAAAAAA", &[0; 8], None).unwrap();
+    p.deliver_pair(&[2; 16], &a.p1());
+    let p2 = p.binaries().pop().unwrap();
+    let second = primary::open_pairing_code(&mut p.node, None, Some("BBBBBBBB"), false).unwrap();
+    assert_eq!(second.code_id, DEFAULT_CODE_ID);
+    assert_eq!(pair_ends(&p), 1, "the first default code's channel ends");
+    assert_eq!(failures(&mut p), ["unknown-code"]);
+    p.deliver_pair(&[2; 16], &a.on_p2(&p2[18..]).unwrap());
+    assert!(p.binaries().is_empty(), "nothing answers on the ended channel");
+    assert!(attempt(&mut p, 3, "AAAAAAAA", DEFAULT_CODE_ID).is_none());
+    assert_eq!(failures(&mut p), ["wrong-code"], "the default code is the second one now");
+    // The separate code and the default code each admit one node, and say which they were.
+    assert!(attempt(&mut p, 4, &beside.code.replace('-', ""), &beside.code_id).is_some());
+    assert!(attempt(&mut p, 5, "BBBBBBBB", DEFAULT_CODE_ID).is_some());
+    let paired: Vec<String> = p
+        .events()
+        .into_iter()
+        .filter_map(|e| if let Event::Paired { code_id, .. } = e { Some(code_id) } else { None })
+        .collect();
+    assert_eq!(paired, [beside.code_id.clone(), DEFAULT_CODE_ID.to_owned()]);
+    // A cancelled code's channels end with it.
+    let third = primary::open_pairing_code(&mut p.node, None, None, false).unwrap();
+    p.texts();
+    p.node.on_text(conn, &pairing_msg(&[7; 16], DEFAULT_CODE_ID));
+    assert_eq!(pair_ends(&p), 0);
+    w.clock.advance(1000);
+    primary::cancel_pairing_code(&mut p.node, &third.code_id);
+    assert_eq!(pair_ends(&p), 1, "the cancelled code's channel ends");
+    assert_eq!(failures(&mut p), ["unknown-code"]);
+    // With no default code open, its id is refused as a closed code: answered, with an event.
+    w.clock.advance(1000);
+    p.node.on_text(conn, &pairing_msg(&[6; 16], DEFAULT_CODE_ID));
+    assert_eq!(pair_ends(&p), 1);
+    assert_eq!(failures(&mut p), ["unknown-code"]);
+}
+
+/// A newcomer on channel `[n; 16]` that has sent P1 and holds P2, ready to send P3.
+fn midway(p: &mut T, n: u8, code_text: &str, code_id: &str) -> (crate::pairing::NewcomerExchange, Vec<u8>) {
+    let id: [u8; 8] = crate::bytes::from_b64u_array(code_id).unwrap();
+    let conn = p.conn;
+    p.node.on_text(conn, &pairing_msg(&[n; 16], code_id));
+    let a = crate::pairing::NewcomerExchange::new(code_text, &id, None).unwrap();
+    p.deliver_pair(&[n; 16], &a.p1());
+    let p2 = p.binaries().pop().expect("P2");
+    (a, p2)
+}
+
+#[test]
+fn a_cancelled_code_ends_its_pairing_channels_at_once() {
+    let w = world();
+    let mut p = primary_node(&w);
+    let code = primary::open_pairing_code(&mut p.node, None, Some("CCCCCCCC"), true).unwrap();
+    let (mut a, p2) = midway(&mut p, 1, "CCCCCCCC", &code.code_id);
+    primary::cancel_pairing_code(&mut p.node, &code.code_id);
+    let ends: Vec<String> = p
+        .texts()
+        .iter()
+        .filter(|t| t.get("type").and_then(Json::as_str) == Some("pairEnd"))
+        .filter_map(|t| t.get("channel").and_then(Json::as_str).map(str::to_owned))
+        .collect();
+    assert_eq!(ends, [crate::bytes::b64u(&[1; 16])]);
+    assert_eq!(failures(&mut p), ["unknown-code"]);
+    // The right code on that channel goes unanswered, and the roster is unchanged.
+    let version = p.node.roster().version();
+    p.deliver_pair(&[1; 16], &a.on_p2(&p2[18..]).unwrap());
+    assert!(p.binaries().is_empty());
+    assert_eq!(p.node.roster().version(), version);
+}
+
+#[test]
+fn a_stale_channel_on_an_expired_default_code_never_touches_the_default_code_after_it() {
+    use crate::code::DEFAULT_CODE_ID;
+    let w = world();
+    let mut p = primary_node(&w);
+    // The first default code: four wrong attempts, then two newcomers midway, one with the
+    // right code and one with a wrong one (its last attempt).
+    primary::open_pairing_code(&mut p.node, Some(10_000), Some("AAAAAAAA"), false).unwrap();
+    for n in 1..=3 {
+        assert!(attempt(&mut p, n, "ZZZZZZZZ", DEFAULT_CODE_ID).is_none());
+    }
+    let (mut right, right_p2) = midway(&mut p, 4, "AAAAAAAA", DEFAULT_CODE_ID);
+    let (mut wrong, wrong_p2) = midway(&mut p, 5, "ZZZZZZZZ", DEFAULT_CODE_ID);
+    // It expires, and a second default code opens under the same id.
+    w.clock.advance(10_000);
+    primary::open_pairing_code(&mut p.node, None, Some("BBBBBBBB"), false).unwrap();
+    assert_eq!(pair_ends(&p), 2, "both stale channels end");
+    p.events();
+    // Whatever the stale channels send now, the second code neither closes nor burns...
+    p.deliver_pair(&[5; 16], &wrong.on_p2(&wrong_p2[18..]).unwrap());
+    p.deliver_pair(&[4; 16], &right.on_p2(&right_p2[18..]).unwrap());
+    assert!(p.binaries().is_empty(), "no P4 for a stale channel");
+    assert!(p.events().iter().all(|e| !matches!(e, Event::Paired { .. })));
+    // ...and still admits one node, with its own five attempts.
+    for n in 6..=9 {
+        assert!(attempt(&mut p, n, "ZZZZZZZZ", DEFAULT_CODE_ID).is_none());
+    }
+    let roster = Roster::from_json(attempt(&mut p, 10, "BBBBBBBB", DEFAULT_CODE_ID).unwrap()).unwrap();
+    assert!(roster.member(Identity::from_seed(&[10; 32]).id()).is_some());
 }
 
 /// An init in `named`'s name, on a static key that is not `named`'s (as a relay could forge, or
@@ -2122,7 +2241,7 @@ fn hints_that_bring_no_newer_roster_back_off_to_five_minutes() {
 fn pairing_channel_setups_per_code_have_a_budget_and_ended_channels_few_events() {
     let w = world();
     let mut p = primary_node(&w);
-    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, None, None, false).unwrap();
     let conn = p.conn;
     // A relay sets channels up on an open code and ends each at once: the ending refunds the
     // attempt, so only the setup budget stops it.
@@ -2175,7 +2294,7 @@ fn pairing_channel_setups_per_code_have_a_budget_and_ended_channels_few_events()
 fn a_wall_clock_stepped_back_strands_no_budget_and_extends_no_code() {
     let w = world();
     let mut p = primary_node(&w);
-    let code = primary::open_pairing_code(&mut p.node, Some(10_000), None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, Some(10_000), None, true).unwrap();
     let mut b = target(&w);
     let mut r = Rogue::handshake(&w.a, &mut b, &w.net, 3).unwrap();
     b.take();
@@ -2762,7 +2881,7 @@ fn a_push_owed_ends_when_the_member_shows_it_holds_the_roster() {
 fn the_roster_made_by_a_pairing_is_pushed_to_the_others_not_the_newcomer() {
     let w = world();
     let mut p = primary_node(&w);
-    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, None, None, false).unwrap();
     assert!(attempt(&mut p, 33, &code.code.replace('-', ""), &code.code_id).is_some());
     let newcomer = Identity::from_seed(&[33; 32]);
     assert!(p.node.roster().member(newcomer.id()).is_some());
@@ -2836,7 +2955,7 @@ fn a_node_started_with_the_seed_claims_the_network_at_its_first_registration() {
     assert_eq!(claimed.network(), named.network(), "the same network");
     assert_eq!(p.node.roster().version(), 5);
     assert!(p.node.is_primary());
-    assert!(primary::open_pairing_code(&mut p.node, None, None).is_ok());
+    assert!(primary::open_pairing_code(&mut p.node, None, None, false).is_ok());
     // And to every member: alice takes it, and is not the primary.
     p.node.poll();
     route(&mut [&mut p, &mut a]);
@@ -2854,7 +2973,7 @@ fn a_node_claims_only_at_start_and_stops_being_the_primary_in_place_after() {
     assert!(p.node.is_primary());
     let (tx, mut rx) = oneshot::channel();
     primary::usage_begin(&mut p.node, "u1", tx);
-    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, None, None, false).unwrap();
 
     // A newer roster names alice primary: this node stops being the primary in place.
     let later = worker_primary_roster(&w, 4);
@@ -2862,7 +2981,7 @@ fn a_node_claims_only_at_start_and_stops_being_the_primary_in_place_after() {
     assert!(!p.node.is_primary());
     assert!(p.node.holds_network_seed(), "the caller's seed is not touched");
     assert_eq!(rx.try_recv().unwrap().unwrap_err().code(), ErrorCode::Invalid, "the usage ask fails");
-    assert!(primary::open_pairing_code(&mut p.node, None, None).is_err());
+    assert!(primary::open_pairing_code(&mut p.node, None, None, false).is_err());
     let pairing = Json::object([
         ("type", Json::str("pairing")),
         ("channel", Json::str(b64u(&[7u8; 16]))),
@@ -2892,7 +3011,7 @@ fn a_primary_that_a_newer_roster_does_not_name_ends_its_pairing_channels() {
     p.connect();
     p.take();
     p.events();
-    let code = primary::open_pairing_code(&mut p.node, None, None).unwrap();
+    let code = primary::open_pairing_code(&mut p.node, None, None, false).unwrap();
     let channel = b64u(&[7u8; 16]);
     let pairing = Json::object([
         ("type", Json::str("pairing")),

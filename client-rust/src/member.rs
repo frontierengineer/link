@@ -18,6 +18,7 @@ use futures_util::StreamExt;
 use tokio::sync::{Notify, broadcast, oneshot, watch};
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::code::DEFAULT_CODE_ID;
 use crate::core::sessions::{Ctl, SessionInfo};
 use crate::core::{Clock, Node, NodeConfig, Observation, Outputs, close_code, primary};
 use crate::errors::LinkError;
@@ -376,16 +377,18 @@ impl Member {
         self.shared().lock().holds_network_seed()
     }
 
-    /// Opens a code that admits one node. Fails with
-    /// `roster-full` when no further member fits under the roster limit, and `invalid` unless
-    /// this member is the primary.
+    /// Opens a code that admits one node: the network's default code, closing the default code
+    /// open before it, unless `opts.separate` opens one beside it. Fails with `roster-full` when
+    /// no further member fits under the roster limit, and `invalid` unless this member is the
+    /// primary.
     pub fn open_pairing_code(&self, opts: CodeOptions) -> Result<PairingCode, LinkError> {
         let lifetime = opts.lifetime.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-        self.shared().with(|c| primary::open_pairing_code(c, lifetime, opts.code.as_deref()))
+        self.shared().with(|c| primary::open_pairing_code(c, lifetime, opts.code.as_deref(), opts.separate))
     }
 
-    /// Withdraws an open code.
-    pub fn cancel_pairing_code(&self, code_id: &str) {
+    /// Withdraws an open code: the one `code_id` names, or with `None` the default code.
+    pub fn cancel_pairing_code(&self, code_id: Option<&str>) {
+        let code_id = code_id.unwrap_or(DEFAULT_CODE_ID);
         self.shared().with(|c| primary::cancel_pairing_code(c, code_id));
     }
 
@@ -546,6 +549,9 @@ pub struct CodeOptions {
     /// A chosen code instead of a random one: 8 Crockford characters. A word is easier to say
     /// and easier to guess; like every code it burns after five wrong confirmations.
     pub code: Option<String>,
+    /// Open a code with an id of its own, beside the default code. Without it the code is the
+    /// network's default code ([`DEFAULT_CODE_ID`]), and the default code open before it closes.
+    pub separate: bool,
 }
 
 impl Primary {

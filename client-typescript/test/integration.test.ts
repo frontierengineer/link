@@ -3,9 +3,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canonicalize, createIdentity, createNetwork, createNetworkSeed, MAX_ROSTER_BYTES, Member, primaryOf, memberFromIdentity, networkKeyFromSeed, nodeIdFromEd25519, pair, Primary, RateLimitedError, RosterFullError, rosterSize, signRoster, type Roster } from '../src/index.js';
+import { canonicalize, createIdentity, createNetwork, createNetworkSeed, DEFAULT_CODE_ID, MAX_ROSTER_BYTES, Member, primaryOf, memberFromIdentity, networkKeyFromSeed, nodeIdFromEd25519, pair, Primary, RateLimitedError, RosterFullError, rosterSize, signRoster, type Roster } from '../src/index.js';
 import { b64u, fromB64u, randomBytes } from '../src/bytes.js';
-import { encodeFrame, FrameType } from '../src/frames.js';
+import { decodeFrame, encodeFrame, FrameType } from '../src/frames.js';
 import { NewcomerExchange } from '../src/pairing.js';
 import { FAST, bytesOf, inbox, startNetwork, textOf, until } from './support/network.js';
 import { TestRelay } from './support/relay.js';
@@ -479,7 +479,9 @@ test('pairing: wrong codes burn after five, expired and unknown codes fail, abse
     const code = net.primary.openPairingCode();
     const link = new URL(code.link.replace('frontier://', 'http://'));
     const wrong = { network: net.primary.network, code: code.code === 'AAAA-AAAA' ? 'BBBB-BBBB' : 'AAAA-AAAA', codeId: code.codeId, relay: net.relay.url };
-    assert.equal(link.searchParams.get('i'), code.codeId);
+    // The default code: its link names no code id.
+    assert.equal(code.codeId, DEFAULT_CODE_ID);
+    assert.equal(link.searchParams.get('i'), null);
     for (let i = 0; i < 5; i++) {
       await assert.rejects(pair({ link: wrong, identity: createIdentity() }), { code: 'pairing' });
     }
@@ -502,6 +504,54 @@ test('pairing: wrong codes burn after five, expired and unknown codes fail, abse
     net.primary.close();
     await until(() => !net.relay.isConnected(net.primary.network, net.primary.id), 'primary gone');
     await assert.rejects(pair({ link: after.link, identity: createIdentity() }), { code: 'unreachable' });
+  } finally {
+    await net.close();
+  }
+});
+
+test('pairing: a default code opened again closes the one before, a separate code stands beside it, and the default id with none open is refused', async () => {
+  const net = await startNetwork();
+  try {
+    const events: { kind: string; codeId: string; reason?: string }[] = [];
+    net.primary.on('paired', (p) => events.push({ kind: 'paired', codeId: p.codeId }));
+    net.primary.on('pairingFailed', (f) => events.push({ kind: 'failed', codeId: f.codeId, reason: f.reason }));
+    const target = { network: net.primary.network, relay: net.relay.url };
+
+    // Before any default code: the zero id is one this primary never issued (no event).
+    await assert.rejects(pair({ link: { ...target, code: '7K2M9QXZ' }, identity: createIdentity() }), { code: 'pairing' });
+    assert.deepEqual(events, []);
+
+    const first = net.primary.openPairingCode({ code: '7K2M9QXZ' });
+    const second = net.primary.openPairingCode({ code: 'HJKMNPQR' });
+    const separate = net.primary.openPairingCode({ code: '7K2M9QXZ', separate: true });
+    assert.equal(first.codeId, DEFAULT_CODE_ID);
+    assert.equal(second.codeId, DEFAULT_CODE_ID);
+    assert.notEqual(separate.codeId, DEFAULT_CODE_ID);
+    assert.equal(new URL(separate.link.replace('frontier://', 'http://')).searchParams.get('i'), separate.codeId);
+
+    // The first default code admits nobody now: its id names the second, so its code is a wrong one.
+    await assert.rejects(pair({ link: first.link, identity: createIdentity() }), { code: 'pairing' });
+    assert.deepEqual(events, [{ kind: 'failed', codeId: DEFAULT_CODE_ID, reason: 'wrong code' }]);
+
+    // The separate code, the same code under its own id, pairs beside the default code...
+    const a = await pair({ link: separate.link, identity: createIdentity() });
+    assert.equal(a.roster.version, 2);
+    // ...and the second default code pairs by its parts with no code id.
+    const b = await pair({ link: { ...target, code: 'hjkm-npqr' }, identity: createIdentity() });
+    assert.equal(b.roster.version, 3);
+    assert.deepEqual(events.slice(1), [
+      { kind: 'paired', codeId: separate.codeId },
+      { kind: 'paired', codeId: DEFAULT_CODE_ID },
+    ]);
+
+    // Cancelling with no id withdraws the default code and leaves a separate one open.
+    const third = net.primary.openPairingCode();
+    const other = net.primary.openPairingCode({ separate: true });
+    net.primary.cancelPairingCode();
+    await assert.rejects(pair({ link: third.link, identity: createIdentity() }), { code: 'pairing' });
+    // Now no default code is open: the default id is refused as a closed code.
+    assert.deepEqual(events.at(-1), { kind: 'failed', codeId: DEFAULT_CODE_ID, reason: 'unknown or expired code' });
+    assert.equal((await pair({ link: other.link, identity: createIdentity() })).roster.version, 4);
   } finally {
     await net.close();
   }
@@ -555,6 +605,22 @@ test('slots: a failed confirmation keeps its slot, an attempt in flight holds on
   }
 });
 
+test('a default code opened again ends the pairing channels of the one before', async () => {
+  const net = await startNetwork();
+  try {
+    const first = net.primary.openPairingCode();
+    const stalled = await startStalledAttempt(net.relay.url, net.primary.network, first.codeId);
+    const reasons: string[] = [];
+    net.primary.on('pairingFailed', (f) => reasons.push(f.reason));
+    const second = net.primary.openPairingCode();
+    assert.deepEqual(reasons, ['unknown or expired code']);
+    stalled.close();
+    assert.equal((await pair({ link: second.link, identity: createIdentity() })).roster.version, 2);
+  } finally {
+    await net.close();
+  }
+});
+
 /** A newcomer that sends a well-formed P1, waits for P2, and then goes quiet. */
 async function startStalledAttempt(url: string, network: string, codeId: string): Promise<{ close(): void }> {
   const ws = new WebSocket(url);
@@ -575,6 +641,83 @@ async function startStalledAttempt(url: string, network: string, codeId: string)
   ws.onclose = null;
   return { close: () => ws.close() };
 }
+
+/** A newcomer that sends P1, receives P2, and waits until `resume` to go on with `code`;
+ * `resume` resolves true when it is admitted (P6), false when the primary ends the channel. */
+async function startPausedAttempt(url: string, network: string, codeId: string, code: string): Promise<{ resume(): Promise<boolean> }> {
+  const ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+  const id = createIdentity();
+  const exchange = new NewcomerExchange(code, fromB64u(codeId));
+  let channel: Uint8Array | undefined;
+  const send = (body: Uint8Array) => ws.send(encodeFrame(FrameType.Pair, channel!, body) as Uint8Array<ArrayBuffer>);
+  const p2 = await new Promise<Uint8Array>((resolve, reject) => {
+    ws.onmessage = (ev) => {
+      if (typeof ev.data === 'string') {
+        const msg = JSON.parse(ev.data) as { type: string; channel?: string };
+        if (msg.type === 'hello') ws.send(JSON.stringify({ type: 'pair', network, code: codeId }));
+        if (msg.type === 'pairing') {
+          channel = fromB64u(msg.channel!);
+          send(exchange.p1());
+        }
+      } else {
+        resolve(decodeFrame(new Uint8Array(ev.data as ArrayBuffer)).body);
+      }
+    };
+    ws.onclose = () => reject(new Error('closed early'));
+  });
+  return {
+    resume: () =>
+      new Promise<boolean>((resolve) => {
+        let stage: 'p4' | 'p6' = 'p4';
+        ws.onmessage = (ev) => {
+          if (typeof ev.data === 'string') {
+            if ((JSON.parse(ev.data) as { type: string }).type === 'pairEnd') {
+              ws.close();
+              resolve(false);
+            }
+            return;
+          }
+          const body = decodeFrame(new Uint8Array(ev.data as ArrayBuffer)).body;
+          if (stage === 'p4') {
+            stage = 'p6';
+            send(exchange.onP4(body, { ed25519: id.ed25519.pub, x25519: id.x25519.pub }));
+          } else {
+            exchange.onP6(body);
+            ws.close();
+            resolve(true);
+          }
+        };
+        ws.onclose = () => resolve(false);
+        send(exchange.onP2(p2));
+      }),
+  };
+}
+
+test('a channel outliving an expired default code, admitted or burning its last attempt, leaves the default code opened since open', async () => {
+  const net = await startNetwork();
+  try {
+    // Admitted: the channel confirmed the expired code's own code.
+    const expired = net.primary.openPairingCode({ code: '7K2M9QXZ', lifetimeMs: 300 });
+    const admitted = await startPausedAttempt(net.relay.url, net.primary.network, expired.codeId, '7K2M9QXZ');
+    await new Promise((r) => setTimeout(r, expired.expiresAt - Date.now() + 100));
+    const next = net.primary.openPairingCode();
+    assert.equal(await admitted.resume(), true);
+    assert.equal((await pair({ link: next.link, identity: createIdentity() })).roster.version, 3);
+
+    // Burned: the expired code's fifth wrong confirmation.
+    const burning = net.primary.openPairingCode({ code: '7K2M9QXZ', lifetimeMs: 3000 });
+    const wrong = { network: net.primary.network, code: 'HJKMNPQR', relay: net.relay.url };
+    for (let i = 0; i < 4; i++) await assert.rejects(pair({ link: wrong, identity: createIdentity() }), { code: 'pairing' });
+    const last = await startPausedAttempt(net.relay.url, net.primary.network, burning.codeId, 'HJKMNPQR');
+    await new Promise((r) => setTimeout(r, burning.expiresAt - Date.now() + 100));
+    const after = net.primary.openPairingCode();
+    assert.equal(await last.resume(), false);
+    assert.equal((await pair({ link: after.link, identity: createIdentity() })).roster.version, 4);
+  } finally {
+    await net.close();
+  }
+});
 
 test('handshake timeout and idle expiry', async () => {
   const timing = { ...FAST, handshakeTimeoutMs: 200, idleMs: 200 };
@@ -731,7 +874,7 @@ test('a roster near 65000 bytes travels in one session message; the primary refu
   const primary = await Primary.connect({ identity: id, roster, networkSeed, timing: FAST });
   const failures: string[] = [];
   primary.on('pairingFailed', (f) => failures.push(f.reason));
-  const codes = { alice: primary.openPairingCode(), bob: primary.openPairingCode(), carol: primary.openPairingCode() };
+  const codes = { alice: primary.openPairingCode({ separate: true }), bob: primary.openPairingCode({ separate: true }), carol: primary.openPairingCode({ separate: true }) };
   const joined: Member[] = [];
   try {
     const wId = createIdentity();

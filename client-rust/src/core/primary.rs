@@ -13,7 +13,9 @@ use zeroize::Zeroizing;
 use super::Node;
 use super::sessions::{self, Bucket, Ctl, FailAction};
 use crate::bytes::{b64u, from_b64u_array};
-use crate::code::{PairingLink, build_pairing_link, format_code, generate_code, generate_code_id, normalize_code};
+use crate::code::{
+    DEFAULT_CODE_ID, PairingLink, build_pairing_link, format_code, generate_code, generate_code_id, normalize_code,
+};
 use crate::errors::{ErrorCode, LinkError};
 use crate::frames::{encode_frame, frame_type};
 use crate::identity::node_id_from_ed25519;
@@ -32,6 +34,9 @@ struct OpenCode {
     /// The code itself is the secret SPAKE2 proves: wiped when the code goes.
     code: Zeroizing<String>,
     code_id: [u8; 8],
+    /// Which opening of `code_id` this is: the default code's id names each default code in
+    /// turn, and a channel acts only on the code it was opened for.
+    serial: u64,
     /// The same moment on the monotonic clock, which is what is checked: `expires_at` (Unix
     /// milliseconds) is only shown.
     deadline: u64,
@@ -54,6 +59,8 @@ enum Stage {
 struct PairChannel {
     channel: [u8; 16],
     code_id: String,
+    /// The `serial` of the code this channel was opened for.
+    serial: u64,
     exchange: PrimaryExchange,
     stage: Stage,
     claimed: bool,
@@ -91,6 +98,11 @@ pub(crate) struct PrimaryState {
     /// used), newest last, at most CLOSED_CODES: a `pairing` for one is refused with an event.
     /// A `pairing` for an id never opened here (which only a relay can make up) raises none.
     closed_codes: VecDeque<String>,
+    /// Whether a default code has been opened: from then on its id counts as issued, and a
+    /// `pairing` for it while none is open is refused as for a closed code.
+    default_opened: bool,
+    /// The `serial` of the next code opened.
+    next_serial: u64,
     /// When a refusal event was last raised, by code id and reason (at most one a second).
     refusal_events: HashMap<(String, PairingFailure), u64>,
     /// The `pairEnd` answers to refused `pairing`s for code ids this primary never issued, all
@@ -166,6 +178,26 @@ impl PrimaryState {
         true
     }
 
+    /// The open code a channel was opened for: `None` once it is closed, even while another
+    /// code (a newer default code) is open under the same id.
+    fn code_of(&mut self, code_id: &str, serial: u64) -> Option<&mut OpenCode> {
+        self.codes.get_mut(code_id).filter(|e| e.serial == serial)
+    }
+
+    /// Closes the code a channel was opened for, if it is still the one open under its id.
+    fn close_code_of(&mut self, code_id: &str, serial: u64) {
+        if self.code_of(code_id, serial).is_some() {
+            self.close_code(code_id);
+        }
+    }
+
+    /// Whether `code_id` is a code this primary issued, open or closed.
+    fn issued(&self, code_id: &str) -> bool {
+        self.codes.contains_key(code_id)
+            || (self.default_opened && code_id == DEFAULT_CODE_ID)
+            || self.closed_codes.iter().any(|c| c == code_id)
+    }
+
     pub(crate) fn next_deadline(&self) -> Option<u64> {
         self.channels
             .values()
@@ -204,11 +236,14 @@ pub(crate) fn stop(node: &mut Node) {
 // ── Pairing codes ──
 
 /// Opens a code that admits one node for `lifetime_ms` (15 minutes by default). The
-/// code is random unless `code` gives one (any spelling `normalize_code` accepts).
+/// code is random unless `code` gives one (any spelling `normalize_code` accepts). Unless
+/// `separate`, it is the default code (section 5.1), and the default code open before it closes,
+/// its pairing channels ended; a separate code has a random id of its own.
 pub(crate) fn open_pairing_code(
     node: &mut Node,
     lifetime_ms: Option<u64>,
     code: Option<&str>,
+    separate: bool,
 ) -> Result<PairingCode, LinkError> {
     if node.primary.is_none() {
         return Err(not_primary());
@@ -237,17 +272,27 @@ pub(crate) fn open_pairing_code(
         st.close_code(&id);
     }
     let code = chosen.unwrap_or_else(generate_code);
-    let code_id_bytes = generate_code_id();
+    let code_id_bytes = if separate { generate_code_id() } else { [0; 8] };
     let code_id = b64u(&code_id_bytes);
     let expires_at = now.saturating_add(lifetime);
     let link = build_pairing_link(&PairingLink { network, code: code.clone(), code_id: code_id.clone(), relay })
         .map_err(LinkError::invalid)?;
     let display = format_code(&code).map_err(LinkError::invalid)?;
+    if !separate {
+        // The default code before this one admits nobody from now on: a channel opened for it
+        // must not go on to claim this one, which has the same id.
+        st.default_opened = true;
+        withdraw(node, DEFAULT_CODE_ID);
+    }
+    let st = state(node).ok_or_else(not_primary)?;
+    let serial = st.next_serial;
+    st.next_serial += 1;
     st.codes.insert(
         code_id.clone(),
         OpenCode {
             code: Zeroizing::new(code),
             code_id: code_id_bytes,
+            serial,
             deadline: mono.saturating_add(lifetime),
             setups: Bucket::default(),
             failed: 0,
@@ -259,12 +304,23 @@ pub(crate) fn open_pairing_code(
     Ok(PairingCode { code: display, code_id, link, expires_at })
 }
 
-/// Withdraws an open code.
+/// Withdraws an open code: the default code when `code_id` is `DEFAULT_CODE_ID`.
 pub(crate) fn cancel_pairing_code(node: &mut Node, code_id: &str) {
-    if let Some(st) = state(node)
-        && st.codes.contains_key(code_id)
-    {
+    withdraw(node, code_id);
+}
+
+/// Closes the code `code_id` before its time (cancelled, or a default code opened after it): it
+/// admits nobody from then on, so the pairing channels opened for it end too.
+fn withdraw(node: &mut Node, code_id: &str) {
+    let Some(st) = state(node) else {
+        return;
+    };
+    if st.codes.contains_key(code_id) {
         st.close_code(code_id);
+    }
+    let keys: Vec<String> = st.channels.iter().filter(|(_, c)| c.code_id == code_id).map(|(k, _)| k.clone()).collect();
+    for k in keys {
+        end_channel(node, &k, PairingFailure::UnknownCode, "unknown or expired code", true);
     }
 }
 
@@ -590,15 +646,15 @@ fn on_pairing(node: &mut Node, msg: &Json) {
             .then_some((PairingFailure::NoAttempts, "too many attempts at once; try again")),
     };
     let exchange = match (refusal, st.codes.get(code_id)) {
-        (None, Some(e)) => PrimaryExchange::new(&e.code, &e.code_id, None).ok(),
+        (None, Some(e)) => PrimaryExchange::new(&e.code, &e.code_id, None).ok().map(|x| (x, e.serial)),
         _ => None,
     };
-    let Some(exchange) = exchange else {
+    let Some((exchange, serial)) = exchange else {
         // Refused. A relay can send these as fast as it likes, so the answers are rate-limited
         // and the events are too: none for a code id this primary never opened, and at most one
         // a second per code and reason otherwise.
         let (reason, message) = refusal.unwrap_or((PairingFailure::UnknownCode, "unknown or expired code"));
-        let ours = st.codes.contains_key(code_id) || st.closed_codes.iter().any(|c| c == code_id);
+        let ours = st.issued(code_id);
         let event = ours && st.refusal_event(code_id, reason, mono);
         let reply = if ours {
             st.code_reply(code_id, key, mono)
@@ -618,7 +674,15 @@ fn on_pairing(node: &mut Node, msg: &Json) {
     }
     st.channels.insert(
         key.to_owned(),
-        PairChannel { channel, code_id: code_id.to_owned(), exchange, stage: Stage::P1, claimed: false, deadline },
+        PairChannel {
+            channel,
+            code_id: code_id.to_owned(),
+            serial,
+            exchange,
+            stage: Stage::P1,
+            claimed: false,
+            deadline,
+        },
     );
 }
 
@@ -643,8 +707,9 @@ pub(crate) fn on_pair_frame(node: &mut Node, channel: &[u8; 16], body: &[u8]) {
         Stage::P3 => match ch.exchange.on_p3(body) {
             Ok(false) => fail_attempt(node, &key, PairingFailure::WrongCode, "wrong code"),
             Ok(true) => {
-                let code_id = ch.code_id.clone();
-                let gone = st.codes.get(&code_id).is_none_or(|e| e.claimed || e.burned);
+                let (code_id, serial) = (ch.code_id.clone(), ch.serial);
+                // `ch` holds `st.channels`, so the code is looked up through `st.codes` directly.
+                let gone = st.codes.get(&code_id).filter(|e| e.serial == serial).is_none_or(|e| e.claimed || e.burned);
                 if gone {
                     return end_channel(node, &key, PairingFailure::Used, "code already used", true);
                 }
@@ -654,7 +719,7 @@ pub(crate) fn on_pair_frame(node: &mut Node, channel: &[u8; 16], body: &[u8]) {
                 ch.claimed = true;
                 ch.stage = Stage::P5;
                 let c = ch.channel;
-                if let Some(e) = st.codes.get_mut(&code_id) {
+                if let Some(e) = st.codes.get_mut(&code_id).filter(|e| e.serial == serial) {
                     e.claimed = true;
                 }
                 send_pair(node, &c, &p4);
@@ -692,11 +757,11 @@ fn complete_pairing(node: &mut Node, key: &str, body: &[u8]) {
     let Some(mut ch) = st.channels.remove(key) else {
         return;
     };
-    if let Some(e) = st.codes.get_mut(&ch.code_id) {
+    if let Some(e) = st.code_of(&ch.code_id, ch.serial) {
         e.in_flight = e.in_flight.saturating_sub(1);
         e.burned = true;
     }
-    st.close_code(&ch.code_id);
+    st.close_code_of(&ch.code_id, ch.serial);
     match ch.exchange.p6(next.json()) {
         Ok(p6) => send_pair(node, &ch.channel, &p6),
         Err(e) => {
@@ -723,7 +788,7 @@ fn fail_attempt(node: &mut Node, key: &str, reason: PairingFailure, message: &st
     let Some(ch) = st.channels.remove(key) else {
         return;
     };
-    if let Some(e) = st.codes.get_mut(&ch.code_id) {
+    if let Some(e) = st.code_of(&ch.code_id, ch.serial) {
         e.in_flight = e.in_flight.saturating_sub(1);
         e.failed += 1;
         if ch.claimed {
@@ -733,7 +798,7 @@ fn fail_attempt(node: &mut Node, key: &str, reason: PairingFailure, message: &st
             e.burned = true;
         }
     }
-    if st.codes.get(&ch.code_id).is_some_and(|e| e.burned) {
+    if st.code_of(&ch.code_id, ch.serial).is_some_and(|e| e.burned) {
         st.close_code(&ch.code_id);
     }
     node.send_control_text(&Json::object([("type", Json::str("pairEnd")), ("channel", Json::str(key))]));
@@ -748,7 +813,7 @@ fn end_channel(node: &mut Node, key: &str, reason: PairingFailure, message: &str
     let Some(ch) = st.channels.remove(key) else {
         return;
     };
-    if let Some(e) = st.codes.get_mut(&ch.code_id) {
+    if let Some(e) = st.code_of(&ch.code_id, ch.serial) {
         e.in_flight = e.in_flight.saturating_sub(1);
         if ch.claimed {
             e.claimed = false;

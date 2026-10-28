@@ -42,16 +42,17 @@ async fn a_primary_pairs_a_worker_and_a_surface_and_sessions_run_every_way() {
     assert_eq!(alice.state(), MemberState::Connected);
 
     // The second node pairs from the code's parts, typed as a person might: lower case, O for
-    // 0 and l for 1.
+    // 0 and l for 1. It is the network's default code, so the code alone is enough.
     let sid = Identity::generate();
     let code = primary.open_pairing_code(CodeOptions::default()).unwrap();
     assert!(code.code.len() == 9 && code.code.as_bytes()[4] == b'-');
+    assert_eq!(code.code_id, DEFAULT_CODE_ID);
     let typed = code.code.to_lowercase().replace('0', "o").replace('1', "l");
     let r = pair(PairOptions {
         target: PairTarget::Parts {
             network: primary.network(),
             code: typed,
-            code_id: code.code_id,
+            code_id: None,
             relay: net.relay.url.clone(),
         },
         identity: sid.clone(),
@@ -68,10 +69,10 @@ async fn a_primary_pairs_a_worker_and_a_surface_and_sessions_run_every_way() {
             paired.push((member.id().to_owned(), code_id));
         }
     }
-    // Each new member with the code it used.
+    // Each new member with the code it used: the default code, each time.
     assert_eq!(paired.len(), 2);
     assert_eq!(paired[1].0, bob.id());
-    assert!(paired.iter().all(|(_, c)| !c.is_empty()) && paired[0].1 != paired[1].1);
+    assert!(paired.iter().all(|(_, c)| c == DEFAULT_CODE_ID));
     // The primary pushed v3 to alice over their session.
     until(|| alice.roster().version() == 3, "alice to receive v3").await;
     assert!(alice.roster().member(bob.id()).is_some());
@@ -150,7 +151,7 @@ fn wrong_parts(net: &Net, code: &PairingCode) -> PairTarget {
     PairTarget::Parts {
         network: net.primary.network(),
         code: wrong.into(),
-        code_id: code.code_id.clone(),
+        code_id: Some(code.code_id.clone()),
         relay: net.relay.url.clone(),
     }
 }
@@ -178,7 +179,7 @@ async fn wrong_codes_burn_after_five_a_used_code_admits_one_node_an_absent_prima
     assert_eq!(chosen.code, "W0RD-C0DE");
     assert_eq!(pair_with(PairTarget::Link(chosen.link)).await.unwrap().roster.version(), 3);
     let cancelled = net.primary.open_pairing_code(CodeOptions::default()).unwrap();
-    net.primary.cancel_pairing_code(&cancelled.code_id);
+    net.primary.cancel_pairing_code(Some(&cancelled.code_id));
     assert_eq!(pair_with(PairTarget::Link(cancelled.link)).await.unwrap_err().code(), ErrorCode::Pairing);
     let expired =
         net.primary.open_pairing_code(CodeOptions { lifetime: Some(Duration::from_millis(1)), ..Default::default() });
@@ -189,6 +190,45 @@ async fn wrong_codes_burn_after_five_a_used_code_admits_one_node_an_absent_prima
     net.primary.close();
     sleep_ms(100).await;
     assert_eq!(pair_with(PairTarget::Link(later.link)).await.unwrap_err().code(), ErrorCode::Unreachable);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_newer_default_code_closes_the_one_before_it_and_a_separate_code_sits_beside_them() {
+    let net = Net::start(&[], fast()).await;
+    let mut events = net.primary.events();
+    let parts = |code: &PairingCode, code_id: Option<String>| PairTarget::Parts {
+        network: net.primary.network(),
+        code: code.code.clone(),
+        code_id,
+        relay: net.relay.url.clone(),
+    };
+    let beside = net.primary.open_pairing_code(CodeOptions { separate: true, ..Default::default() }).unwrap();
+    assert_ne!(beside.code_id, DEFAULT_CODE_ID);
+    assert_eq!(parse_pairing_link(&beside.link).unwrap().code_id, beside.code_id);
+    let first = net.primary.open_pairing_code(CodeOptions::default()).unwrap();
+    let second = net.primary.open_pairing_code(CodeOptions::default()).unwrap();
+    assert_eq!((first.code_id.as_str(), second.code_id.as_str()), (DEFAULT_CODE_ID, DEFAULT_CODE_ID));
+    assert!(!second.link.contains("&i="), "no i for the default code: {}", second.link);
+    if first.code != second.code {
+        let e = pair_with(PairTarget::Link(first.link)).await.unwrap_err();
+        assert_eq!(e.code(), ErrorCode::Pairing, "the first default code admits nobody now");
+    }
+    assert_eq!(pair_with(parts(&second, None)).await.unwrap().roster.version(), 2);
+    assert_eq!(pair_with(parts(&beside, Some(beside.code_id.clone()))).await.unwrap().roster.version(), 3);
+    let mut paired = Vec::new();
+    while let Ok(e) = events.try_recv() {
+        if let Event::Paired { code_id, .. } = e {
+            paired.push(code_id);
+        }
+    }
+    assert_eq!(paired, [DEFAULT_CODE_ID.to_owned(), beside.code_id.clone()]);
+
+    // Cancelling with no id cancels the default code, and leaves a separate one open.
+    let other = net.primary.open_pairing_code(CodeOptions { separate: true, ..Default::default() }).unwrap();
+    let third = net.primary.open_pairing_code(CodeOptions::default()).unwrap();
+    net.primary.cancel_pairing_code(None);
+    assert_eq!(pair_with(parts(&third, None)).await.unwrap_err().code(), ErrorCode::Pairing);
+    assert_eq!(pair_with(PairTarget::Link(other.link)).await.unwrap().roster.version(), 4);
 }
 
 /// The generator of P-256, uncompressed: a valid point, so the primary answers it with P2.
@@ -286,7 +326,7 @@ async fn a_pairing_newcomer_times_out_when_the_relay_says_nothing() {
     let target = PairTarget::Parts {
         network: Identity::generate().id().into(),
         code: "7K2M9QXZ".into(),
-        code_id: "AQIDBAUGBwg".into(),
+        code_id: Some("AQIDBAUGBwg".into()),
         relay: format!("ws://{addr}/v1"),
     };
     let r =

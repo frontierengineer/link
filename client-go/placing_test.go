@@ -102,7 +102,10 @@ func TestClientVectorsPairingParams(t *testing.T) {
 		Pairing struct {
 			Params struct {
 				Network, Code, CodeIDB64u, Relay, Params, Link, Fragment string
-				Unicode                                                  struct {
+				Default                                                  struct {
+					Network, Code, CodeIDB64u, Relay, Params, Link string
+				}
+				Unicode struct {
 					Network, Code, CodeID, Relay, Params string
 				}
 				Parse []struct {
@@ -128,6 +131,28 @@ func TestClientVectorsPairingParams(t *testing.T) {
 	_, fragment, _ := strings.Cut(q.Fragment, "#")
 	if p, err := ParsePairingParams(fragment); err != nil || p != parts {
 		t.Errorf("fragment parsed %+v %v", p, err)
+	}
+	// The default code: no i written, a missing i read as its id, and no id at all written alike.
+	dc := PairingLink{Network: q.Default.Network, Code: q.Default.Code, CodeID: q.Default.CodeIDB64u, Relay: q.Default.Relay}
+	if dc.CodeID != DefaultCodeID {
+		t.Fatalf("the default vector's code id is %q", dc.CodeID)
+	}
+	if s, err := BuildPairingParams(dc); err != nil || s != q.Default.Params {
+		t.Errorf("default params %q %v", s, err)
+	}
+	if s, err := BuildPairingLink(dc); err != nil || s != q.Default.Link {
+		t.Errorf("default link %q %v", s, err)
+	}
+	if p, err := ParsePairingLink(q.Default.Link); err != nil || p != dc {
+		t.Errorf("default link parsed %+v %v", p, err)
+	}
+	if p, err := ParsePairingParams(q.Default.Params); err != nil || p != dc {
+		t.Errorf("default params parsed %+v %v", p, err)
+	}
+	noID := dc
+	noID.CodeID = ""
+	if s, err := BuildPairingParams(noID); err != nil || s != q.Default.Params {
+		t.Errorf("params without a code id %q %v", s, err)
 	}
 	uc := PairingLink{Network: q.Unicode.Network, Code: q.Unicode.Code, CodeID: q.Unicode.CodeID, Relay: q.Unicode.Relay}
 	if s, err := BuildPairingParams(uc); err != nil || s != q.Unicode.Params {

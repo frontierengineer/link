@@ -19,19 +19,28 @@ const { roster, networkSeed } = createNetwork({ identity: me, relay: 'wss://fron
 const primary = await Primary.connect({ identity: me, roster, networkSeed });
 primary.on('roster', (r) => save(r));                         // every accepted roster: persist it
 
-// Invite a node. Show the code or the link; it admits one node for 15 minutes.
+// Invite a node. Show the code or the link; it admits one node for 15 minutes. This is the
+// network's default code: opening another closes it. `{ separate: true }` opens one beside it.
 const { code, codeId, link, expiresAt } = primary.openPairingCode();
 primary.on('paired', ({ member, codeId }) => label(member.id, codeId)); // your own categories, by code
 
 // The newcomer: pair once, then connect as a member from then on.
 const id = identityFromSeed(savedSeed);
-const { roster: r } = await pair({ link, identity: id });     // or { network, code, codeId, relay }
+const { roster: r } = await pair({ link, identity: id });     // or { network, code, codeId?, relay }
 const member = await Member.connect({ identity: id, roster: r });
 
 await member.send(peerId, bytes);                              // Uint8Array, up to 64 MiB
 member.onMessage(({ from, bytes }) => { /* ... */ });          // or: for await (const m of member.messages)
 member.close();
 ```
+
+## 1.5.0
+
+`openPairingCode()` opens the network's default code, so opening a second code closes the first.
+Pass `{ separate: true }` to keep several codes open at once, as every code was before 1.5.0.
+Pairing links of the default code carry no `i`, and a reader takes a missing `i` as the default
+code's id (`DEFAULT_CODE_ID`) where earlier versions refused it; `cancelPairingCode()` with no id
+withdraws the default code.
 
 ## API
 
@@ -140,11 +149,17 @@ receives the newer one in `registered` and accepts it (a `roster` event) before 
 
 **The primary.** `isPrimary` says whether a member is the primary now: it holds the network seed
 and its roster names it. Only then do these work (each throws `InvalidError` otherwise):
-`openPairingCode({ lifetimeMs?, code? })`
+`openPairingCode({ lifetimeMs?, code?, separate? })`
 returning `{ code, codeId, link, expiresAt }` (`code` chooses the code instead of a random one;
-it must still be 8 Crockford characters, and a word is easier to guess than a random code), `cancelPairingCode(codeId)`,
+it must still be 8 Crockford characters, and a word is easier to guess than a random code), `cancelPairingCode(codeId?)`,
 `revoke(nodeId)` returning the new roster, `usage()`; events `paired` (`{ member, codeId, roster }`:
-the new member and the code that admitted it) and `pairingFailed`. `Primary`
+the new member and the code that admitted it) and `pairingFailed`. A primary holds at most one
+**default code** (section 5.1): its id is `DEFAULT_CODE_ID` (`AAAAAAAAAAA`, 8 zero bytes) and its
+link carries no id. `openPairingCode()` without `separate` opens the default code and closes the
+default code open before it, which admits nobody from then on (its pairing channels in flight
+end too); with `separate: true` the code has a random id of its own and stands beside the default
+code and any other separate code. `cancelPairingCode()` with no id withdraws the default code.
+Events name the default code by `DEFAULT_CODE_ID`. `Primary`
 extends `Member` and requires `networkSeed`: `Primary.connect(options)`.
 `usage()` asks the relay (request-only: the relay never pushes these figures) and resolves
 `{ network: { bytesHour, connections, limits: { rateBps, quotaBytesHour, trickleBps }, quotaUsed, slowed } }`,
@@ -156,10 +171,13 @@ within a second however busy the network. The relay allows one ask per `USAGE_IN
 
 **Pairing.** `pair({ link, identity, WebSocket?, timeoutMs? })` returns
 `{ roster, pinnedNetworkKey }`, or rejects with `PairingError`, `UnreachableError` (the primary is
-not connected) or `TimeoutError`. Codes: `generateCode`, `normalizeCode`, `formatCode`;
-pairing parameters (section 5.1): `buildPairingParams(parts)` writes
-`v=1&n=…&c=…&i=…&r=…` alone, and `parsePairingParams(string)` reads it back, throwing
-`InvalidError` on a missing parameter, an unknown version or a bad value. Link defines the
+not connected) or `TimeoutError`. `link` is a link or its parts `{ network, code, codeId?, relay }`;
+with no `codeId` the newcomer pairs with the network's default code. Codes: `generateCode`,
+`normalizeCode`, `formatCode`; pairing parameters (section 5.1): `buildPairingParams(parts)` writes
+`v=1&n=…&c=…&i=…&r=…` alone, with no `i` for the default code (no `codeId`, or
+`DEFAULT_CODE_ID`), and `parsePairingParams(string)` reads it back, reading a missing `i` as
+`DEFAULT_CODE_ID` and throwing `InvalidError` on a missing parameter, an empty one, an unknown
+version or a bad value. Link defines the
 parameters, not a scheme: carry them as you like, in an https URL's fragment say
 (`https://example.com/#${buildPairingParams(parts)}`). `buildPairingLink` and `parsePairingLink`
 are one wrapping of them, `frontier://pair?<parameters>`.

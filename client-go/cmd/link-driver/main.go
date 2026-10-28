@@ -110,6 +110,7 @@ type command struct {
 	Fill             *int64          `json:"fill"`
 	Count            *int            `json:"count"`
 	LifetimeMs       int64           `json:"lifetimeMs"`
+	Separate         bool            `json:"separate"`
 	Node             string          `json:"node"`
 	Members          *[]rosterMember `json:"members"`
 	Now              *int64          `json:"now"`
@@ -513,7 +514,7 @@ func (d *driver) run(c command) (*link.Member, result, error) {
 			return m, nil, err
 		}
 		pc, err := m.OpenPairingCode(link.PairingCodeOptions{
-			Lifetime: time.Duration(c.LifetimeMs) * time.Millisecond, Code: c.Code,
+			Lifetime: time.Duration(c.LifetimeMs) * time.Millisecond, Code: c.Code, Separate: c.Separate,
 		})
 		if err != nil {
 			return m, nil, err

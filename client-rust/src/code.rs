@@ -11,6 +11,9 @@ use crate::roster::is_relay_url;
 pub const CROCKFORD: &str = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 pub const CODE_LENGTH: usize = 8;
 pub const CODE_ID_LENGTH: usize = 8;
+/// The default code's id (section 5.1): 8 zero bytes. A primary holds at most one default code,
+/// and pairing parameters leave `i` out for it.
+pub const DEFAULT_CODE_ID: &str = "AAAAAAAAAAA";
 
 /// A fresh code in its canonical form: 8 Crockford characters, no hyphen.
 pub fn generate_code() -> String {
@@ -45,8 +48,14 @@ pub fn format_code(code: &str) -> Result<String, String> {
     Ok(format!("{}-{}", &c[..4], &c[4..]))
 }
 
+/// A separate code's id: 8 random bytes, never the default code's 8 zero bytes.
 pub fn generate_code_id() -> [u8; CODE_ID_LENGTH] {
-    random_array::<CODE_ID_LENGTH>()
+    loop {
+        let id = random_array::<CODE_ID_LENGTH>();
+        if id != [0; CODE_ID_LENGTH] {
+            return id;
+        }
+    }
 }
 
 /// What a pairing code gives a newcomer (section 5.1): the pairing parameters, whatever wraps
@@ -56,22 +65,23 @@ pub struct PairingLink {
     pub network: String,
     /// Canonical code, no hyphen.
     pub code: String,
-    /// b64u of the 8-byte code id.
+    /// b64u of the 8-byte code id; [`DEFAULT_CODE_ID`] for the default code.
     pub code_id: String,
     pub relay: String,
 }
 
-/// `v=1&n=<network>&c=<code>&i=<code id>&r=<relay>`, each value percent-encoded.
+/// `v=1&n=<network>&c=<code>&i=<code id>&r=<relay>`, each value percent-encoded, with no `i` for
+/// the default code.
 fn param_string(p: &PairingLink) -> Result<String, String> {
     if !is_node_id(&p.network) {
         return Err("network is not a node id".into());
     }
-    from_b64u_array::<CODE_ID_LENGTH>(&p.code_id).ok_or("code id: expected 8 bytes")?;
+    let id = from_b64u_array::<CODE_ID_LENGTH>(&p.code_id).ok_or("code id: expected 8 bytes")?;
+    let i = if id == [0; CODE_ID_LENGTH] { String::new() } else { format!("&i={}", encode_uri_component(&p.code_id)) };
     Ok(format!(
-        "v=1&n={}&c={}&i={}&r={}",
+        "v=1&n={}&c={}{i}&r={}",
         encode_uri_component(&p.network),
         encode_uri_component(&normalize_code(&p.code)?),
-        encode_uri_component(&p.code_id),
         encode_uri_component(&p.relay)
     ))
 }
@@ -92,7 +102,8 @@ fn read_params(s: &str, what: &str, bad_version: Option<&str>) -> Result<Pairing
             decode_uri_component(value).ok_or_else(|| format!("{what}: malformed percent-encoding in {key}"))?;
         params.push((key.to_owned(), value));
     }
-    let get = |k: &str| params.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str()).filter(|v| !v.is_empty());
+    let given = |k: &str| params.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+    let get = |k: &str| given(k).filter(|v| !v.is_empty());
     match (get("v"), bad_version) {
         (Some("1"), _) => {}
         (_, Some(e)) => return Err(e.into()),
@@ -104,7 +115,8 @@ fn read_params(s: &str, what: &str, bad_version: Option<&str>) -> Result<Pairing
         return Err(format!("{what}: bad network id"));
     }
     let code = get("c").ok_or_else(|| format!("{what}: missing c (the code)"))?;
-    let code_id = get("i").ok_or_else(|| format!("{what}: missing i (the code id)"))?;
+    // No `i` is the default code; an empty one is not 8 bytes.
+    let code_id = given("i").unwrap_or(DEFAULT_CODE_ID);
     from_b64u_array::<CODE_ID_LENGTH>(code_id).ok_or_else(|| format!("{what} code id: expected 8 bytes"))?;
     let relay = get("r").ok_or_else(|| format!("{what}: missing r (the relay)"))?;
     let scheme = Url::parse(relay).map_err(|e| format!("{what}: relay is not a URL: {e}"))?;
@@ -120,7 +132,7 @@ fn read_params(s: &str, what: &str, bad_version: Option<&str>) -> Result<Pairing
 }
 
 /// The pairing parameters alone (section 5.1): `v=1&n=<network>&c=<code>&i=<code id>&r=<relay>`,
-/// each value percent-encoded. Link defines these, not a scheme: an application wraps them as it
+/// each value percent-encoded, with no `i` for the default code ([`DEFAULT_CODE_ID`]). Link defines these, not a scheme: an application wraps them as it
 /// likes, in a link's query or an https URL's fragment. Fails `Invalid` for a network that is not
 /// a node id, a code id not of 8 bytes, a code that is not one, or a relay that is not a ws:// or
 /// wss:// URL ([`is_relay_url`](crate::is_relay_url)).
@@ -132,8 +144,8 @@ pub fn build_pairing_params(p: &PairingLink) -> Result<String, LinkError> {
 }
 
 /// Reads pairing parameters (section 5.1) as [`build_pairing_params`] writes them, in any order;
-/// parameters it does not know are ignored, and the code may be in its displayed form. Fails
-/// `Invalid` on a missing parameter, an unknown version, a repeated parameter, or a value that is
+/// parameters it does not know are ignored, the code may be in its displayed form, and a missing
+/// `i` is the default code ([`DEFAULT_CODE_ID`]). Fails `Invalid` on a missing parameter, an unknown version, a repeated parameter, or a value that is
 /// not what its parameter holds.
 pub fn parse_pairing_params(params: &str) -> Result<PairingLink, LinkError> {
     let p = read_params(params, "pairing parameters", None).map_err(LinkError::invalid)?;
@@ -215,5 +227,17 @@ mod tests {
         assert!(parse_pairing_link(&ok.replace("%3A%2F", "%E0%2F")).is_err(), "invalid UTF-8");
         assert!(parse_pairing_link(&ok.replace("%3A%2F", "%3")).is_err());
         assert_eq!(encode_uri_component("a b/é~"), "a%20b%2F%C3%A9~");
+    }
+
+    #[test]
+    fn the_default_code() {
+        let ok = "frontier://pair?v=1&n=ixldtk3yi32p4qs53iko7652ae&c=7K2M9QXZ&r=ws%3A%2F%2F127.0.0.1%3A9%2Fv1";
+        let l = parse_pairing_link(ok).unwrap();
+        assert_eq!(l.code_id, DEFAULT_CODE_ID);
+        assert_eq!(build_pairing_link(&l).unwrap(), ok, "no i for the default code");
+        assert!(parse_pairing_link(&ok.replace("&r=", "&i=&r=")).is_err(), "an empty i");
+        for _ in 0..50 {
+            assert_ne!(generate_code_id(), [0; CODE_ID_LENGTH]);
+        }
     }
 }

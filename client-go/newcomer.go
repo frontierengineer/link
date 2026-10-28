@@ -15,7 +15,7 @@ import (
 // PairOptions configures Pair. Give Link, or Target.
 type PairOptions struct {
 	Link     string       // a frontier://pair?... link
-	Target   *PairingLink // or its parts; the code in any spelling NormalizeCode accepts
+	Target   *PairingLink // or its parts; the code in any spelling NormalizeCode accepts, no CodeID for the default code
 	Identity *Identity
 	// Timeout bounds the whole exchange (60 s, the relay's channel lifetime).
 	Timeout time.Duration
@@ -47,6 +47,9 @@ func Pair(ctx context.Context, opts PairOptions) (*PairResult, error) {
 	case opts.Target != nil:
 		target = *opts.Target
 		target.Code, err = NormalizeCode(target.Code)
+		if target.CodeID == "" {
+			target.CodeID = DefaultCodeID // a code and no id: the network's default code
+		}
 	default:
 		err = fmt.Errorf("a link or a target is required")
 	}

@@ -251,6 +251,12 @@ func main() {
 		check(err == nil && vals.Get("v") == "1" && vals.Get("n") == q["network"] && vals.Get("c") == q["code"] &&
 			vals.Get("i") == q["codeIdB64u"] && vals.Get("r") == q["relay"], "pairing parameters")
 		check(q["link"] == "frontier://pair?"+q["params"].(string), "the frontier://pair link wraps the parameters")
+		// The default code (id 8 zero bytes): written without i.
+		d := q["default"].(map[string]any)
+		dv, err := url.ParseQuery(d["params"].(string))
+		check(err == nil && d["codeIdB64u"] == base64.RawURLEncoding.EncodeToString(make([]byte, 8)) && !dv.Has("i") && dv.Get("v") == "1" &&
+			dv.Get("n") == d["network"] && dv.Get("c") == d["code"] && dv.Get("r") == d["relay"], "the default code's parameters carry no i")
+		check(d["link"] == "frontier://pair?"+d["params"].(string), "the default code's link wraps its parameters")
 	}
 
 	if fails > 0 {

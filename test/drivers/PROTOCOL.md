@@ -54,7 +54,7 @@ peer's roster does not list this node).
 | `identity` | `seed?` (base64, 32 bytes; random when absent) | `seed`, `node` (the node id), `ed25519`, `x25519` |
 | `createNetwork` | `relay?` (URL; default `""`, a network not placed yet), `members?` (roster member entries `{id, ed25519, x25519}`) | `roster`: version 1, this identity as primary and `members` beside it, signed with a network key minted for it; `networkSeed` (base64, 32 bytes); `placed` (whether `roster.relay` names a relay) |
 | `placeNetwork` | `roster`, `networkSeed` (base64), `relay` (URL), `now?` (Unix milliseconds; default now) | `roster`: the next version with `relay` set, nothing else changed (spec section 3.2); `placed` |
-| `pair` | `link`, or `network`+`code`+`codeId`+`relay`; `timeoutMs?` (default 60000, the whole exchange) | `roster`, `pinnedNetworkKey` (`roster.networkKey`) |
+| `pair` | `link`, or `network`+`code`+`codeId?`+`relay` (no `codeId` for the default code); `timeoutMs?` (default 60000, the whole exchange) | `roster`, `pinnedNetworkKey` (`roster.networkKey`) |
 | `connect` | `role` (`member` or `primary`), `roster`, `networkSeed?` (base64), `pinnedNetworkKey?`, `relayUrl?`, `creditWindow?`, `timing?`, `autoTake?` (default `true`), `timeoutMs?` | `{}` once registered |
 | `start` | as `connect`, without `timeoutMs` | `{}` at once; the node connects in the background |
 | `waitConnected` | `timeoutMs?` | `{}` once registered |
@@ -66,8 +66,8 @@ peer's roster does not list this node).
 | `resign` | | `{}` once the relay closed this node (`revoked`) |
 | `traffic` | | the traffic report, below |
 | `resetTraffic` | | `{}` |
-| `openPairingCode` | `lifetimeMs?` (default 900000), `code?` | `code`, `codeId`, `link`, `expiresAt` |
-| `cancelPairingCode` | `codeId` | `{}` |
+| `openPairingCode` | `lifetimeMs?` (default 900000), `code?`, `separate?` (default `false`) | `code`, `codeId`, `link`, `expiresAt` |
+| `cancelPairingCode` | `codeId?` (none: the default code) | `{}` |
 | `revoke` | `node` | `roster`: the new roster, already published |
 | `usage` | | the usage report, below |
 | `close` | | `{}`; the node stops and does not reconnect |
@@ -134,8 +134,12 @@ replaced sessions kept for their grace (spec section 7.2). A handshake still in 
 listed. So for a session both sides hold, one side's `localIndex` is the other's `remoteIndex`.
 
 **`openPairingCode`.** A code admits one node. `code` chooses the code instead of a random one:
-8 Crockford base32 characters in any spelling spec section 5.1 accepts (`invalid` otherwise). The result's `code` is the display form `XXXX-XXXX`, `codeId` the code id (b64u),
-`link` the pairing link (spec section 5.1), `expiresAt` Unix milliseconds. When no further
+8 Crockford base32 characters in any spelling spec section 5.1 accepts (`invalid` otherwise).
+Without `separate` it opens the default code (spec section 5.1), closing the default code open
+before it; with `separate` it opens a code with an id of its own, beside the default code. The
+result's `code` is the display form `XXXX-XXXX`, `codeId` the code id (b64u; `AAAAAAAAAAA` for
+the default code), `link` the pairing link (spec section 5.1; no `i` for the default code),
+`expiresAt` Unix milliseconds. When no further
 member fits under the roster limit it fails `roster-full`.
 
 **`revoke`** fails `invalid` for the primary itself or a node not on the roster.

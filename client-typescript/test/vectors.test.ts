@@ -7,7 +7,7 @@ import { readFileSync } from 'node:fs';
 import { b64u, fromHex, toHex } from '../src/bytes.js';
 import { decodeFrame, decodeSessionMessage, encodeSessionMessage } from '../src/frames.js';
 import { acceptanceProblem, createNetwork, isPlaced, placeNetwork, rosterProblem, type RosterMember } from '../src/roster.js';
-import { buildPairingLink, buildPairingParams, parsePairingLink, parsePairingParams } from '../src/code.js';
+import { buildPairingLink, buildPairingParams, DEFAULT_CODE_ID, parsePairingLink, parsePairingParams } from '../src/code.js';
 import { canonicalize } from '../src/jcs.js';
 import { InvalidError } from '../src/errors.js';
 import { renderVectors, VECTORS_PATH } from '../scripts/vectors.js';
@@ -91,6 +91,15 @@ test('pairing parameters: built, wrapped, and every parse case as recorded', () 
   assert.deepEqual(parsePairingParams(new URL(q.fragment).hash.slice(1)), parts);
   const { params: unicodeParams, ...unicodeParts } = q.unicode;
   assert.equal(buildPairingParams(unicodeParts), unicodeParams);
+  // The default code: its id left out when written, given back when read.
+  const d = q.default;
+  const defaultParts = { network: d.network, code: d.code, codeId: d.codeIdB64u, relay: d.relay };
+  assert.equal(d.codeIdB64u, DEFAULT_CODE_ID);
+  assert.equal(buildPairingParams(defaultParts), d.params);
+  assert.equal(buildPairingParams({ network: d.network, code: d.code, relay: d.relay }), d.params);
+  assert.equal(buildPairingLink(defaultParts), d.link);
+  assert.deepEqual(parsePairingParams(d.params), defaultParts);
+  assert.deepEqual(parsePairingLink(d.link), defaultParts);
   for (const c of q.parse) {
     if (c.valid) assert.deepEqual(parsePairingParams(c.params), c.parsed, c.name);
     else assert.throws(() => parsePairingParams(c.params), InvalidError, c.name);

@@ -41,7 +41,8 @@ Playwright's Chromium at the version `package.json` pins (`npx playwright instal
   implementation (below): a network made with no relay (refused a connection without a relay
   URL), placed alike by every implementation, then registered and paired; pairing by link and by
   code fields; wrong, burned, expired and
-  cancelled codes; small and several-MiB messages both ways (sha256); flow control with a
+  cancelled codes; the default code (opened again, it admits only with the second; a separate
+  code beside it; a link with no code id; the default id refused while none is open); small and several-MiB messages both ways (sha256); flow control with a
   receiver that does not take; rekeying on a timer and on a message count, seen through
   `sessions` and counted from the traffic report; reset after a peer restarts from its seed; unreachable peers; refusal by a
   member whose roster is behind; revocation; resignation; a revocation spreading member to

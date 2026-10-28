@@ -213,13 +213,30 @@ func TestDriverAgainstTheRelay(t *testing.T) {
 	if r := pr.call("connect", map[string]any{"role": "primary", "roster": roster, "networkSeed": netSeed}); r["error"].(map[string]any)["code"] != "invalid" {
 		t.Fatalf("a second node: %v", r)
 	}
-	code := pr.ok("openPairingCode", nil)
-	if !strings.HasPrefix(code["link"].(string), "frontier://pair?") || code["expiresAt"].(float64) < float64(time.Now().UnixMilli()) {
-		t.Fatalf("code %v", code)
-	}
-
 	wk := spawn(t, bin)
 	wk.ok("identity", nil)
+	// The default code (no separate): id 8 zero bytes, none in its link. A separate code has
+	// an id of its own. Cancelled with no codeId, the default code is refused as closed.
+	const defaultID = "AAAAAAAAAAA"
+	dropped := pr.ok("openPairingCode", nil)
+	if dropped["codeId"] != defaultID || strings.Contains(dropped["link"].(string), "i=") {
+		t.Fatalf("default code %v", dropped)
+	}
+	sep := pr.ok("openPairingCode", map[string]any{"separate": true})
+	if sep["codeId"] == defaultID || !strings.Contains(sep["link"].(string), "&i="+sep["codeId"].(string)+"&") {
+		t.Fatalf("separate code %v", sep)
+	}
+	pr.ok("cancelPairingCode", nil)
+	if r := wk.call("pair", map[string]any{"link": dropped["link"]}); r["error"].(map[string]any)["code"] != "pairing" {
+		t.Fatalf("a cancelled default code: %v", r)
+	}
+	pr.event("pairingFailed", func(v map[string]any) bool { return v["reason"] == "unknown-code" && v["codeId"] == defaultID })
+	pr.ok("cancelPairingCode", map[string]any{"codeId": sep["codeId"]})
+
+	code := pr.ok("openPairingCode", nil)
+	if !strings.HasPrefix(code["link"].(string), "frontier://pair?") || code["expiresAt"].(float64) < float64(time.Now().UnixMilli()) || code["codeId"] != defaultID {
+		t.Fatalf("code %v", code)
+	}
 	// A wrong code: a failed attempt, reported by its reason code.
 	l := code["link"].(string)
 	wrong := l[:strings.Index(l, "&c=")+3] + "00000000" + l[strings.Index(l, "&c=")+11:]
@@ -227,7 +244,8 @@ func TestDriverAgainstTheRelay(t *testing.T) {
 		t.Fatalf("wrong code: %v", r)
 	}
 	pr.event("pairingFailed", func(v map[string]any) bool { return v["reason"] == "wrong-code" && v["codeId"] == code["codeId"] })
-	paired := wk.ok("pair", map[string]any{"link": code["link"]})
+	// Its parts with no codeId pair with the default code.
+	paired := wk.ok("pair", map[string]any{"network": roster.(map[string]any)["network"], "code": code["code"], "relay": relay})
 	if paired["pinnedNetworkKey"] != roster.(map[string]any)["networkKey"] {
 		t.Fatalf("pinned %v, network key %v", paired["pinnedNetworkKey"], roster.(map[string]any)["networkKey"])
 	}

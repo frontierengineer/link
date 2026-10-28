@@ -47,7 +47,9 @@ export {
   parsePairingLink,
   buildPairingParams,
   parsePairingParams,
+  DEFAULT_CODE_ID,
   type PairingLink,
+  type PairingParts,
 } from './code.js';
 export { pair, type PairOptions, type PairTarget, type PairResult } from './newcomer.js';
 export {

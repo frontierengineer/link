@@ -696,9 +696,9 @@ func TestLiveRosterAtTheLimitTravelsEverywhere(t *testing.T) {
 	}
 	defer p.Close()
 	pLog := record(p.Member)
-	codes := make([]PairingCode, 3)
+	codes := make([]PairingCode, 3) // three open at once: each with an id of its own
 	for k := range codes {
-		if codes[k], err = p.OpenPairingCode(PairingCodeOptions{}); err != nil {
+		if codes[k], err = p.OpenPairingCode(PairingCodeOptions{Separate: true}); err != nil {
 			t.Fatal(err)
 		}
 	}

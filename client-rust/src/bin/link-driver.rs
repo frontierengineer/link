@@ -413,7 +413,7 @@ async fn command(driver: &Arc<Driver>, cmd: &str, args: &Json) -> Reply {
                 None => PairTarget::Parts {
                     network: str_arg(args, "network")?.to_owned(),
                     code: str_arg(args, "code")?.to_owned(),
-                    code_id: str_arg(args, "codeId")?.to_owned(),
+                    code_id: opt_str(args, "codeId")?.map(str::to_owned),
                     relay: str_arg(args, "relay")?.to_owned(),
                 },
             };
@@ -529,6 +529,10 @@ async fn command(driver: &Arc<Driver>, cmd: &str, args: &Json) -> Reply {
             let opts = link_client::CodeOptions {
                 lifetime: opt_ms(args, "lifetimeMs")?,
                 code: opt_str(args, "code")?.map(str::to_owned),
+                separate: match args.get("separate") {
+                    None => false,
+                    Some(v) => v.as_bool().ok_or_else(|| invalid("separate must be a boolean"))?,
+                },
             };
             let c = p.open_pairing_code(opts)?;
             Ok(obj(vec![
@@ -539,7 +543,7 @@ async fn command(driver: &Arc<Driver>, cmd: &str, args: &Json) -> Reply {
             ]))
         }
         "cancelPairingCode" => {
-            driver.primary()?.cancel_pairing_code(str_arg(args, "codeId")?);
+            driver.primary()?.cancel_pairing_code(opt_str(args, "codeId")?);
             Ok(obj(vec![]))
         }
         "revoke" => {

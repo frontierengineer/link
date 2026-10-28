@@ -3,7 +3,7 @@
 // receive the roster that includes it.
 
 import { b64u, fromB64uLen } from './bytes.js';
-import { normalizeCode, parsePairingLink } from './code.js';
+import { DEFAULT_CODE_ID, normalizeCode, parsePairingLink, type PairingLink } from './code.js';
 import { PairingError, TimeoutError, UnreachableError, type LinkError } from './errors.js';
 import { decodeFrame, encodeFrame, FrameType } from './frames.js';
 import type { Identity } from './identity.js';
@@ -15,8 +15,8 @@ export interface PairTarget {
   network: string;
   /** As typed: `XXXX-XXXX` or any spelling `normalizeCode` accepts. */
   code: string;
-  /** b64u of the 8-byte code id. */
-  codeId: string;
+  /** b64u of the 8-byte code id; none (or `DEFAULT_CODE_ID`) for the network's default code. */
+  codeId?: string;
   /** The relay URL, e.g. `wss://eu.frontierengineer.link/v1`. */
   relay: string;
 }
@@ -39,15 +39,19 @@ export interface PairResult {
 
 /** Pairs `identity` into the network the link names. */
 export function pair(opts: PairOptions): Promise<PairResult> {
-  let target: PairTarget;
+  let target: PairingLink;
+  let codeId: Uint8Array;
   try {
-    target = typeof opts.link === 'string' ? parsePairingLink(opts.link) : { ...opts.link, code: normalizeCode(opts.link.code) };
+    target =
+      typeof opts.link === 'string'
+        ? parsePairingLink(opts.link)
+        : { ...opts.link, code: normalizeCode(opts.link.code), codeId: opts.link.codeId ?? DEFAULT_CODE_ID };
+    codeId = fromB64uLen(target.codeId, 8, 'code id');
   } catch (e) {
     return Promise.reject(new PairingError((e as Error).message));
   }
   const WS = opts.WebSocket ?? defaultWebSocket();
   const id = opts.identity;
-  const codeId = fromB64uLen(target.codeId, 8, 'code id');
   const exchange = new NewcomerExchange(target.code, codeId);
 
   return new Promise<PairResult>((resolve, reject) => {

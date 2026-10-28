@@ -332,14 +332,17 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
   /**
    * Opens a code that admits one node for 15 minutes. The code is random unless `code` gives
    * one (any spelling `normalizeCode` accepts): a chosen code is easier to say and easier to
-   * guess, and like every code it burns after five wrong confirmations.
+   * guess, and like every code it burns after five wrong confirmations. Without `separate` it
+   * is the network's default code (id `DEFAULT_CODE_ID`, and no `i` in its link), and closes
+   * the default code open before it; with `separate` it has a random id of its own and stands
+   * beside the default code and any other separate code.
    */
-  openPairingCode(opts: { lifetimeMs?: number; code?: string } = {}): PairingCode {
+  openPairingCode(opts: { lifetimeMs?: number; code?: string; separate?: boolean } = {}): PairingCode {
     return this.requirePrimary().openPairingCode(opts);
   }
 
-  /** Withdraws an open code. */
-  cancelPairingCode(codeId: string): void {
+  /** Withdraws an open code: the default code when `codeId` is not given. */
+  cancelPairingCode(codeId?: string): void {
     this.prim?.cancelPairingCode(codeId);
   }
 

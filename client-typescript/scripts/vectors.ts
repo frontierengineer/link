@@ -6,7 +6,7 @@
 import { writeFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { b64u, concat, EMPTY, fromHex, toHex, u32be, u64be, utf8 } from '../src/bytes.js';
-import { buildPairingLink, buildPairingParams, formatCode, normalizeCode, parsePairingParams } from '../src/code.js';
+import { buildPairingLink, buildPairingParams, DEFAULT_CODE_ID, formatCode, normalizeCode, parsePairingParams } from '../src/code.js';
 import { open } from '../src/crypto.js';
 import {
   dataBody,
@@ -443,10 +443,12 @@ export function buildVectors(): unknown {
   // ── Pairing parameters (section 5.1): Link's, without a scheme ──
   const paramParts = { network: net.id, code, codeId: b64u(codeId), relay };
   const params = buildPairingParams(paramParts);
+  const defaultParts = { ...paramParts, codeId: DEFAULT_CODE_ID };
+  const defaultParams = buildPairingParams(defaultParts);
   const unicodeParts = { ...paramParts, relay: 'wss://relé.example:8443/v1?q=ü&x=1' };
   const unicodeParams = buildPairingParams(unicodeParts);
   const drop = (k: string) => params.split('&').filter((p) => !p.startsWith(`${k}=`)).join('&');
-  const parseCases: { name: string; params: string; valid: boolean; parsed?: unknown }[] = [
+  const cases: { name: string; params: string; valid: boolean }[] = [
     { name: 'as built', params, valid: true },
     { name: 'a non-ASCII relay with a port and a query, percent-encoded as UTF-8', params: unicodeParams, valid: true },
     { name: 'any order, a displayed lower-case code, a parameter it does not know, an empty part', params: `r=${encodeURIComponent(relay)}&&x=9&i=${b64u(codeId)}&c=7k2m-9qxz&n=${net.id}&v=1`, valid: true },
@@ -454,7 +456,9 @@ export function buildVectors(): unknown {
     { name: 'an unknown version', params: params.replace('v=1', 'v=2'), valid: false },
     { name: 'n missing', params: drop('n'), valid: false },
     { name: 'c missing', params: drop('c'), valid: false },
-    { name: 'i missing', params: drop('i'), valid: false },
+    { name: "i missing: the network's default code", params: drop('i'), valid: true },
+    { name: "i given as the default code's id, which a writer leaves out", params: params.replace(`i=${b64u(codeId)}`, `i=${DEFAULT_CODE_ID}`), valid: true },
+    { name: 'i empty', params: params.replace(`i=${b64u(codeId)}`, 'i='), valid: false },
     { name: 'r missing', params: drop('r'), valid: false },
     { name: 'r empty', params: params.replace(/r=[^&]*/, 'r='), valid: false },
     { name: 'n repeated', params: `${params}&n=${net.id}`, valid: false },
@@ -465,14 +469,16 @@ export function buildVectors(): unknown {
     { name: 'r an https URL', params: params.replace('r=wss', 'r=https'), valid: false },
     { name: 'r malformed percent-encoding', params: params.replace(/r=[^&]*/, 'r=wss%3A%2F%2Fa%2'), valid: false },
     { name: 'r percent-encoding that is not UTF-8', params: params.replace(/r=[^&]*/, 'r=wss%3A%2F%2Frel%FF.example%2Fv1'), valid: false },
-  ].map((c) => {
+  ];
+  const parseCases: { name: string; params: string; valid: boolean; parsed?: unknown }[] = cases.map((c) => {
     try {
       return { ...c, valid: true, parsed: parsePairingParams(c.params) };
     } catch {
       return { ...c, valid: false };
     }
   });
-  if (parseCases.slice(0, 3).some((c) => !c.valid) || parseCases.slice(3).some((c) => c.valid)) throw new Error('pairing params vector: a case parses otherwise');
+  const otherwise = parseCases.find((c, i) => c.valid !== cases[i]!.valid);
+  if (otherwise) throw new Error(`pairing params vector: ${otherwise.name} parses otherwise`);
   const pairingParams = {
     network: net.id,
     code,
@@ -481,6 +487,7 @@ export function buildVectors(): unknown {
     params,
     link: `frontier://pair?${params}`,
     fragment: `https://frontier.link/#${params}`,
+    default: { network: net.id, code, codeIdB64u: DEFAULT_CODE_ID, relay, params: defaultParams, link: `frontier://pair?${defaultParams}` },
     unicode: { ...unicodeParts, params: unicodeParams },
     parse: parseCases,
   };

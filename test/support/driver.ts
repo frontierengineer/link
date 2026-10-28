@@ -182,6 +182,7 @@ export interface PairArgs {
   link?: string;
   network?: string;
   code?: string;
+  /** None for the default code. */
   codeId?: string;
   relay?: string;
   timeoutMs?: number;
@@ -490,11 +491,13 @@ export class Driver {
   async resetTraffic(): Promise<void> {
     await this.call('resetTraffic');
   }
-  openPairingCode(opts: { lifetimeMs?: number; code?: string } = {}): Promise<PairingCodeResult> {
+  /** Without `separate`, the default code, which closes the default code open before it. */
+  openPairingCode(opts: { lifetimeMs?: number; code?: string; separate?: boolean } = {}): Promise<PairingCodeResult> {
     return this.call('openPairingCode', { ...opts });
   }
-  async cancelPairingCode(codeId: string): Promise<void> {
-    await this.call('cancelPairingCode', { codeId });
+  /** No `codeId`: the default code. */
+  async cancelPairingCode(codeId?: string): Promise<void> {
+    await this.call('cancelPairingCode', codeId === undefined ? {} : { codeId });
   }
   async revoke(node: string): Promise<Roster> {
     return (await this.call<{ roster: Roster }>('revoke', { node })).roster;

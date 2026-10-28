@@ -24,7 +24,8 @@ opts.network_seed = Some(*network_key.seed());                  // the network's
 let primary = Primary::connect(opts).await?;
 let mut events = primary.events();                              // Event::Roster(r): persist r
 
-// Invite a node. Show the code or the link; it admits one node for 15 minutes.
+// Invite a node. Show the code or the link; it admits one node for 15 minutes. It is the
+// network's default code: opening another closes it, unless that one is `separate`.
 let code = primary.open_pairing_code(CodeOptions::default())?;
 
 // The newcomer: pair once, then connect as a member from then on.
@@ -167,9 +168,10 @@ and accepts it (an `Event::Roster`) before it is connected.
 **The primary.** Being primary is a trait of a member (section 3.1): `is_primary()` is true while
 it holds the network seed and its roster names it primary, and `holds_network_seed()` says
 whether it holds the seed. The primary's calls are `Member`'s, and fail with `Invalid` on a
-member that is not the primary now: `open_pairing_code(CodeOptions { lifetime, code })`
+member that is not the primary now: `open_pairing_code(CodeOptions { lifetime, code, separate })`
 returning `{ code, code_id, link, expires_at }` (`code` chooses the code instead of a random
-one), `cancel_pairing_code(code_id)`, `revoke(node_id)` returning the new roster, `usage()`. The
+one; codes below), `cancel_pairing_code(code_id)` (`None` cancels the default code),
+`revoke(node_id)` returning the new roster, `usage()`. The
 relay allows one ask per `USAGE_INTERVAL` (10 s) per network, with no burst (`USAGE_BURST` is
 1); an ask sooner fails at once with `RateLimited`. An ask within it is answered at once, however
 busy the network. Whether the network is slowed is `shaping()`, which needs no ask. When no further member fits under the roster limit,
@@ -187,12 +189,26 @@ connection and sessions are untouched, and the seed its caller gave it stays. Th
 keeps that node's connection: nobody is disconnected. Neither the primary nor a node given the
 seed can `resign()`.
 
+**Default and separate codes** (section 5.1). A primary holds at most one default code, whose
+id is 8 zero bytes, `DEFAULT_CODE_ID` (`AAAAAAAAAAA`). Since 0.5.0, `open_pairing_code` opens
+the default code unless `separate` is set, so **opening a second code closes the first unless
+it is `separate`**: the default code open before it admits nobody from then on, and a newcomer
+midway through it is turned away, as one midway through a cancelled code is. A `separate` code gets a random id of its own (never all
+zeros), and any number of them stay open beside the default code. The default code's pairing
+link and parameters carry no `i`, so the code alone pairs: a newcomer given no code id pairs
+with the default code. `Paired` and `PairingFailed` name the default code by `DEFAULT_CODE_ID`.
+Once a default code has been opened, a pairing for its id while none is open is refused as
+for a closed code.
+
 **Pairing.** `pair(PairOptions { target, identity, timeout })` returns `{ roster, pinned_network_key }`,
-or fails with `Pairing`, `Unreachable` (the primary is not connected) or `Timeout`. Codes:
+or fails with `Pairing`, `Unreachable` (the primary is not connected) or `Timeout`. The target
+is `PairTarget::Link(link)` or `PairTarget::Parts { network, code, code_id, relay }`, `code_id`
+`None` for the default code. Codes:
 `generate_code`, `normalize_code`, `format_code`; links: `build_pairing_link`, `parse_pairing_link`.
 Pairing parameters (section 5.1): `build_pairing_params(&parts)` writes `v=1&n=…&c=…&i=…&r=…`
-alone, and `parse_pairing_params(s)` reads it back, failing `Invalid` on a missing parameter, an
-unknown version or a bad value. Link defines the parameters, not a scheme: carry them as you like,
+alone, leaving `i` out when `parts.code_id` is `DEFAULT_CODE_ID`, and `parse_pairing_params(s)`
+reads it back, taking a missing `i` as `DEFAULT_CODE_ID` and failing `Invalid` on a missing `v`,
+`n`, `c` or `r`, an empty `i`, an unknown version or a bad value. Link defines the parameters, not a scheme: carry them as you like,
 in an https URL's fragment say. A `frontier://pair?` link is one wrapping of them.
 
 `link_client::wire` exposes the building blocks (encodings, frames, the Noise engine, SPAKE2,

@@ -25,7 +25,8 @@ primary, _ := link.ConnectPrimary(ctx, link.MemberOptions{Identity: me, Roster: 
 		}
 	}})
 
-// Invite a node. Show the code or the link; it admits one node for 15 minutes.
+// Invite a node. Show the code or the link; it admits one node for 15 minutes. It is the
+// network's default code: opening another closes it, unless that one is Separate.
 code, _ := primary.OpenPairingCode(link.PairingCodeOptions{})
 
 // The newcomer: pair once, then connect as a member from then on.
@@ -155,9 +156,10 @@ member that registers with an older roster than the relay holds receives the new
 meant to be the primary (they need `NetworkSeed`) and return a `*Primary`, which embeds
 `*Member`. The primary capabilities are the `Member`'s, and
 fail `invalid` on a member that is not the primary now:
-`OpenPairingCode(PairingCodeOptions{Lifetime, Code})` returning
-`{Code, CodeID, Link, ExpiresAt}` (`Code` chooses the code instead of a random one),
-`CancelPairingCode(codeID)`, `Revoke(nodeID)` returning the new roster, and `Usage(ctx)`, which
+`OpenPairingCode(PairingCodeOptions{Lifetime, Code, Separate})` returning
+`{Code, CodeID, Link, ExpiresAt}` (`Code` chooses the code instead of a random one; codes
+below), `CancelPairingCode(codeID)` (`""` cancels the default code; a newcomer midway through a
+cancelled code is turned away), `Revoke(nodeID)` returning the new roster, and `Usage(ctx)`, which
 asks the relay (request-only) for `{Network: {BytesHour, Connections, Limits, QuotaUsed, Slowed}}`;
 the relay allows one ask per `UsageInterval` (10 s) per network, with no burst (`UsageBurst`
 is 1), and refuses one sooner at once: it fails `rate-limited`. Whether the network is slowed is
@@ -166,6 +168,17 @@ is 1), and refuses one sooner at once: it fails `rate-limited`. Whether the netw
 events: `PairedEvent` (`Member`, `CodeID`: the code it paired with, `Roster`), `PairingFailedEvent` (its `Code` one of the `Fail*` constants:
 `wrong-code`, `malformed`, `unknown-code`, `used`, `no-attempts`, `newcomer-left`, `timeout`,
 `relay-lost`, `already-member`, `roster-full`, and the one below).
+
+**Default and separate codes** (section 5.1). A primary holds at most one default code, whose
+id is 8 zero bytes, `DefaultCodeID` (`AAAAAAAAAAA`). Since 0.6.0, `OpenPairingCode` opens the
+default code unless `Separate` is set, so **opening a second code closes the first unless it is
+`Separate`**: the default code open before it admits nobody from then on, and a newcomer midway
+through it is turned away. A `Separate` code gets a random id of its own (never all zeros), and
+any number of them stay open beside the default code. The default code's pairing link and
+parameters carry no `i`, so the code alone pairs: a newcomer given no code id pairs with the
+default code. `PairedEvent` and `PairingFailedEvent` name the default code by `DefaultCodeID`.
+Once a default code has been opened, a pairing for its id while none is open is refused as for
+a closed code (`FailUnknownCode`), however many codes close after it.
 
 **Becoming the primary.** A node started with `NetworkSeed` whose roster names another member
 primary claims the primary once registered (section 3.1): it signs the next roster naming
@@ -179,11 +192,12 @@ it, so nobody disconnects.
 
 **Pairing.** `Pair(ctx, PairOptions{Link | Target, Identity, Timeout})` returns
 `{Roster, PinnedNetworkKey}`, or fails with `pairing`, `unreachable` (the primary is not
-connected) or `timeout`. Codes: `GenerateCode`, `NormalizeCode`, `FormatCode`; links:
+connected) or `timeout`. A `Target` with no `CodeID` pairs with the default code. Codes: `GenerateCode`, `NormalizeCode`, `FormatCode`; links:
 `BuildPairingLink`, `ParsePairingLink`. Pairing parameters (section 5.1):
-`BuildPairingParams(PairingLink)` writes `v=1&n=…&c=…&i=…&r=…` alone, and
-`ParsePairingParams(string)` reads it back, failing `invalid` on a missing parameter, an unknown
-version or a bad value. Link defines the parameters, not a scheme: carry them as you like, in an
+`BuildPairingParams(PairingLink)` writes `v=1&n=…&c=…&i=…&r=…` alone, leaving `i` out when
+`CodeID` is `DefaultCodeID` or `""`, and `ParsePairingParams(string)` reads it back, taking a
+missing `i` as `DefaultCodeID` and failing `invalid` on a missing `v`, `n`, `c` or `r`, an empty
+`i`, an unknown version or a bad value. Link defines the parameters, not a scheme: carry them as you like, in an
 https URL's fragment say. A `frontier://pair?` link is one wrapping of them.
 
 ## Choosing a relay

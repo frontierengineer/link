@@ -300,21 +300,30 @@ when answering a request. Codes: `forbidden`, `bad_request`, `unreachable`, `rat
 - A pairing code is 8 characters from Crockford's base32 alphabet
   (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`), displayed as `XXXX-XXXX`. The hyphen is not part of the
   code; input is upper-cased, and `I`/`L` read as `1`, `O` as `0`.
-- Each code has a **code id**: 8 random bytes, `b64u` in links and JSON.
+- Each code has a **code id**: 8 bytes, `b64u` in links and JSON. A primary holds at most one
+  **default code**, whose id is 8 zero bytes (`AAAAAAAAAAA`): opening a default code closes the
+  default code open before it, which admits nobody from then on. Every other code's id is 8
+  random bytes, never 8 zero bytes, and any number of them may be open beside the default code.
+  A newcomer that holds a code and no id is pairing with the default code. An id is public: it
+  says which open code a newcomer holds, so that the primary builds its SPAKE2 messages from that
+  code, and is never derived from the code, which would let anyone who sees it try every code
+  offline.
 - A code lives 15 minutes and admits one node.
 - Five failed confirmations burn the code. A slot is reserved when an attempt starts; a failed
   confirmation keeps it; a timeout or a dropped connection refunds it.
 - **Pairing parameters.** What a newcomer needs is the string
-  `v=1&n=<network id>&c=<code>&i=<code id b64u>&r=<relay URL>`: parameters separated by `&`, each
-  `name=value`, every value percent-encoded as ECMAScript's `encodeURIComponent` does (its UTF-8
-  bytes, all but `A-Z a-z 0-9 - _ . ! ~ * ' ( )` as `%XX` in upper-case hex). `c` carries the
-  code without the hyphen. A writer writes the five in this order, and refuses a relay that is not
-  a relay URL (section 3.2). A reader takes them in any order, skips empty parts, ignores names it
-  does not know, accepts the code in its displayed form or any spelling the first item allows,
-  and refuses (`invalid`): a part without `=`; a name given twice; a value whose percent-encoding
-  is malformed or does not decode to UTF-8 (`+` stays `+`, not a space); a missing or empty `v`,
-  `n`, `c`, `i` or `r`; a `v` other than `1`; an `n` that is not a network id, a `c` that is not
-  a code, an `i` that is not 8 bytes; an `r` that is not a relay URL.
+  `v=1&n=<network id>&c=<code>&i=<code id b64u>&r=<relay URL>`, with no `i` for the default
+  code: parameters separated by `&`, each `name=value`, every value percent-encoded as
+  ECMAScript's `encodeURIComponent` does (its UTF-8 bytes, all but `A-Z a-z 0-9 - _ . ! ~ * ' ( )`
+  as `%XX` in upper-case hex). `c` carries the code without the hyphen. A writer writes them in
+  this order, leaves `i` out for the default code, and refuses a relay that is not a relay URL
+  (section 3.2). A reader takes them in any order, skips empty parts, ignores names it does not
+  know, accepts the code in its displayed form or any spelling the first item allows, reads a
+  missing `i` as the default code's id, and refuses (`invalid`): a part without `=`; a
+  name given twice; a value whose percent-encoding is malformed or does not decode to UTF-8 (`+`
+  stays `+`, not a space); a missing or empty `v`, `n`, `c` or `r`; an empty `i`; a `v` other
+  than `1`; an `n` that is not a network id, a `c` that is not a code, an `i` that is not 8
+  bytes; an `r` that is not a relay URL.
 - **Wrappings.** Link defines the pairing parameters, not a scheme. An application carries them
   as it likes, and each form it uses is one wrapping of them, read by taking the parameters back
   out. The clients write and read one, the **pairing link**
@@ -347,7 +356,8 @@ when answering a request. Codes: `forbidden`, `bad_request`, `unreachable`, `rat
 6. The primary refuses a `pairing` it cannot serve with `pairEnd`, and a relay can stream
    such `pairing`s, so neither answers nor events are one per message:
    - for a code it issued (now closed, expired, used or out of attempts, remembered for the
-     last 1024 codes closed), a `pairEnd` for the first refusal on each pairing channel, and
+     last 1024 codes closed; the default code's id counts as issued once a default code has been
+     opened, and is refused as closed while none is open), a `pairEnd` for the first refusal on each pairing channel, and
      for repeats on that channel at most once a second per code and channel; an event for its
      application at most once a second per code and reason. These are kept apart from the
      budget below, and the repeats are counted per channel, not per code, so that neither

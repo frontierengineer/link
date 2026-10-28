@@ -69,6 +69,13 @@ function optInt(args: Json, key: string): number | undefined {
   return v;
 }
 
+function optBool(args: Json, key: string): boolean | undefined {
+  const v = args[key];
+  if (v === undefined) return undefined;
+  if (typeof v !== 'boolean') throw invalid(`${key} must be a boolean`);
+  return v;
+}
+
 function base64(args: Json, key: string): Uint8Array {
   const s = str(args, key);
   if (!/^[A-Za-z0-9+/]*={0,2}$/.test(s) || s.length % 4 !== 0) throw invalid(`${key} must be standard base64`);
@@ -265,7 +272,7 @@ const commands: Record<string, (args: Json) => Promise<Json> | Json> = {
     const link =
       args.link !== undefined
         ? str(args, 'link')
-        : { network: str(args, 'network'), code: str(args, 'code'), codeId: str(args, 'codeId'), relay: str(args, 'relay') };
+        : { network: str(args, 'network'), code: str(args, 'code'), codeId: optStr(args, 'codeId'), relay: str(args, 'relay') };
     const timeoutMs = optInt(args, 'timeoutMs');
     const r = await pair({ link, identity: id, ...(timeoutMs !== undefined ? { timeoutMs } : {}) });
     return { roster: r.roster, pinnedNetworkKey: r.pinnedNetworkKey };
@@ -353,16 +360,18 @@ const commands: Record<string, (args: Json) => Promise<Json> | Json> = {
   openPairingCode(args) {
     const lifetimeMs = optInt(args, 'lifetimeMs');
     const code = optStr(args, 'code');
+    const separate = optBool(args, 'separate');
     return {
       ...needPrimary().openPairingCode({
         ...(lifetimeMs !== undefined ? { lifetimeMs } : {}),
         ...(code !== undefined ? { code } : {}),
+        ...(separate !== undefined ? { separate } : {}),
       }),
     };
   },
 
   cancelPairingCode(args) {
-    needPrimary().cancelPairingCode(str(args, 'codeId'));
+    needPrimary().cancelPairingCode(optStr(args, 'codeId'));
     return {};
   },
 

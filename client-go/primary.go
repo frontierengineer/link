@@ -36,8 +36,8 @@ const (
 // PairingCode is an open code.
 type PairingCode struct {
 	Code      string // display form, XXXX-XXXX
-	CodeID    string // b64u of the 8-byte code id
-	Link      string // frontier://pair?... carrying network, code, code id and relay
+	CodeID    string // b64u of the 8-byte code id; DefaultCodeID for the default code
+	Link      string // frontier://pair?... carrying network, code, code id (none for the default code) and relay
 	ExpiresAt time.Time
 }
 
@@ -48,6 +48,10 @@ type PairingCodeOptions struct {
 	// chosen code is easier to say and easier to guess; like every code it burns after five
 	// wrong confirmations.
 	Code string
+	// Separate opens a code with a random id of its own, beside the default code. Without it
+	// the code is the network's default code (DefaultCodeID, section 5.1), and opening it
+	// closes the default code open before it.
+	Separate bool
 }
 
 // UsageLimits are the relay's limits for the network.
@@ -210,8 +214,9 @@ func placeholderMember() RosterMember {
 	return RosterMember{ID: strings.Repeat("a", 26), Ed25519: strings.Repeat("A", 43), X25519: strings.Repeat("A", 43)}
 }
 
-// OpenPairingCode opens a code that admits one node for 15 minutes. When no further member
-// fits under the roster limit it fails with roster-full.
+// OpenPairingCode opens a code that admits one node for 15 minutes: the default code, closing
+// the default code open before it, or with Separate a code beside it. When no further member
+// fits under the roster limit it fails with roster-full, and the default code open stays open.
 func (m *Member) OpenPairingCode(opts PairingCodeOptions) (PairingCode, error) {
 	m.lock()
 	defer m.unlock()
@@ -240,11 +245,15 @@ func (m *Member) OpenPairingCode(opts PairingCodeOptions) (PairingCode, error) {
 	if code == "" {
 		code = GenerateCode()
 	}
-	idBytes := make([]byte, codeIDLength)
-	if _, err := rand.Read(idBytes); err != nil {
-		return PairingCode{}, err
+	codeID := DefaultCodeID
+	for opts.Separate && codeID == DefaultCodeID {
+		// Never 8 zero bytes: that id is the default code's.
+		idBytes := make([]byte, codeIDLength)
+		if _, err := rand.Read(idBytes); err != nil {
+			return PairingCode{}, err
+		}
+		codeID = b64u(idBytes)
 	}
-	codeID := b64u(idBytes)
 	lifetime := opts.Lifetime
 	if lifetime <= 0 {
 		lifetime = CodeLifetime
@@ -259,24 +268,44 @@ func (m *Member) OpenPairingCode(opts PairingCodeOptions) (PairingCode, error) {
 	if err != nil {
 		return PairingCode{}, err
 	}
+	if old := ps.codes[codeID]; old != nil {
+		// A default code replaces the one open before it, which admits nobody from now on.
+		ps.withdraw(old)
+	}
 	ps.codes[codeID] = &openCode{code: code, codeID: codeID, expiresAt: m.mono().Add(lifetime)}
-	ps.issued[codeID] = &issuedCode{told: map[string]time.Time{}}
+	if ps.issued[codeID] == nil {
+		ps.issued[codeID] = &issuedCode{told: map[string]time.Time{}}
+	}
 	display, _ := FormatCode(code)
 	return PairingCode{Code: display, CodeID: codeID, Link: link, ExpiresAt: expires}, nil
 }
 
-// CancelPairingCode withdraws an open code. On a member that is not the primary it does
-// nothing: it holds no codes.
+// CancelPairingCode withdraws an open code; an empty codeID is the default code. On a member
+// that is not the primary it does nothing: it holds no codes.
 func (m *Member) CancelPairingCode(codeID string) {
 	m.lock()
 	defer m.unlock()
 	if m.prim == nil {
 		return
 	}
-	if e := m.prim.codes[codeID]; e != nil {
-		e.burned = true
+	if codeID == "" {
+		codeID = DefaultCodeID
 	}
-	m.prim.closeCode(codeID)
+	if e := m.prim.codes[codeID]; e != nil {
+		m.prim.withdraw(e)
+	}
+}
+
+// withdraw closes an open code before its time (cancelled, or a default code opened after it):
+// it admits nobody from then on, so its pairing channels end too.
+func (ps *primaryState) withdraw(e *openCode) {
+	e.burned = true
+	for key, ch := range ps.channels {
+		if ch.entry == e {
+			ps.endChannel(key, FailUnknownCode, "the code was withdrawn", true)
+		}
+	}
+	ps.closeEntry(e)
 }
 
 // Revoke removes a member and publishes the roster. It returns the new roster.
@@ -710,12 +739,25 @@ func (ps *primaryState) onPairing(msg controlMessage) {
 // newcomer) (section 5.2): 32 a second, bursts of 64.
 const refusalRate, refusalBurst = 32, 64
 
-// closeCode closes an open code; refusals go on naming it among the last closedCodes.
+// closeEntry closes e if it is still the code open under its id: a channel of a default code
+// that expired must not close the default code opened since.
+func (ps *primaryState) closeEntry(e *openCode) {
+	if ps.codes[e.codeID] == e {
+		ps.closeCode(e.codeID)
+	}
+}
+
+// closeCode closes an open code; refusals go on naming it among the last closedCodes. The
+// default code's id is not among them: once a default code has been opened, refusals name it
+// for good (section 5.2).
 func (ps *primaryState) closeCode(codeID string) {
 	if _, open := ps.codes[codeID]; !open {
 		return
 	}
 	delete(ps.codes, codeID)
+	if codeID == DefaultCodeID {
+		return
+	}
 	ps.closed = append(ps.closed, codeID)
 	for len(ps.closed) > closedCodes {
 		old := ps.closed[0]
@@ -810,7 +852,7 @@ func (ps *primaryState) completePairing(ch *pairChannel, body []byte) error {
 	delete(ps.channels, ch.key)
 	ch.entry.inFlight--
 	ch.entry.burned = true
-	ps.closeCode(ch.entry.codeID)
+	ps.closeEntry(ch.entry)
 	ps.sendPair(ch, p6)
 	m.publish(next, id)
 	m.relay.sendControl(pairEndMessage(ch.key))
@@ -835,7 +877,7 @@ func (ps *primaryState) failAttempt(ch *pairChannel, code, reason string) {
 	}
 	if ch.entry.failed >= CodeAttempts {
 		ch.entry.burned = true
-		ps.closeCode(ch.entry.codeID)
+		ps.closeEntry(ch.entry)
 	}
 	ps.m.relay.sendControl(pairEndMessage(ch.key))
 	ps.m.emitDroppable(PairingFailedEvent{CodeID: ch.entry.codeID, Code: code, Reason: reason})

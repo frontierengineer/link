@@ -221,7 +221,7 @@ async fn pairing_with_the_relay_unreachable_fails_with_its_error() {
         let target = PairTarget::Parts {
             network: n.roster.network().into(),
             code: "7K2M9QXZ".into(),
-            code_id: "AQIDBAUGBwg".into(),
+            code_id: Some("AQIDBAUGBwg".into()),
             relay: relay.clone(),
         };
         let r =

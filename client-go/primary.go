@@ -308,6 +308,38 @@ func (ps *primaryState) withdraw(e *openCode) {
 	ps.closeEntry(e)
 }
 
+// Admit adds a member whose public keys reached the primary over a channel it already trusts,
+// rather than a pairing code (section 5.4), and publishes the roster. It needs no relay. The
+// newcomer made its own seed; only its public keys are handed over. It returns the new roster.
+func (m *Member) Admit(ed25519, x25519 string) (*Roster, error) {
+	m.lock()
+	defer m.unlock()
+	if m.prim == nil {
+		return nil, notPrimary()
+	}
+	ed, err := fromB64uLen(ed25519, 32, "ed25519")
+	if err != nil {
+		return nil, invalidError("not a member's public keys: " + err.Error())
+	}
+	x, err := fromB64uLen(x25519, 32, "x25519")
+	if err != nil {
+		return nil, invalidError("not a member's public keys: " + err.Error())
+	}
+	if !canonicalEd25519(ed) || smallOrderEd25519(ed) {
+		return nil, invalidError("the member's ed25519 key is not usable")
+	}
+	id := NodeIDFromEd25519(ed)
+	if m.roster.member(id) != nil {
+		return nil, invalidError(id + " is already a member")
+	}
+	next, err := m.nextRoster(append(slices.Clone(m.roster.Members), RosterMember{ID: id, Ed25519: b64u(ed), X25519: b64u(x)}))
+	if err != nil {
+		return nil, err
+	}
+	m.publish(next, "")
+	return next.Clone(), nil
+}
+
 // Revoke removes a member and publishes the roster. It returns the new roster.
 func (m *Member) Revoke(nodeID string) (*Roster, error) {
 	m.lock()

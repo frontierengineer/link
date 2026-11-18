@@ -214,6 +214,26 @@ export class PrimaryRole {
     if (entry) this.withdraw(entry);
   }
 
+  /**
+   * Adds a member whose public keys reached the primary by a channel it already trusts rather
+   * than a pairing code (section 5.4), and publishes the roster, offline included. Returns the
+   * new roster. The newcomer made its own seed; only its public keys are handed over.
+   */
+  admit(keys: { ed25519: string; x25519: string }): Roster {
+    let ed25519: Uint8Array;
+    let x25519: Uint8Array;
+    try {
+      ed25519 = fromB64uLen(keys.ed25519, 32, 'ed25519');
+      x25519 = fromB64uLen(keys.x25519, 32, 'x25519');
+    } catch (e) {
+      throw new InvalidError(`not a member's public keys: ${(e as Error).message}`);
+    }
+    const id = nodeIdFromEd25519(ed25519);
+    if (findMember(this.m.roster(), id)) throw new InvalidError(`${id} is already a member`);
+    const member: RosterMember = { id, ed25519: b64u(ed25519), x25519: b64u(x25519) };
+    return this.publish(this.nextRoster([...this.m.roster().members, member]));
+  }
+
   /** Removes a member and publishes the roster. Returns the new roster. */
   revoke(nodeId: string): Roster {
     if (nodeId === this.m.id) throw new InvalidError('the primary cannot revoke itself');

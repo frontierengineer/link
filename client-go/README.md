@@ -159,7 +159,8 @@ fail `invalid` on a member that is not the primary now:
 `OpenPairingCode(PairingCodeOptions{Lifetime, Code, Separate})` returning
 `{Code, CodeID, Link, ExpiresAt}` (`Code` chooses the code instead of a random one; codes
 below), `CancelPairingCode(codeID)` (`""` cancels the default code; a newcomer midway through a
-cancelled code is turned away), `Revoke(nodeID)` returning the new roster, and `Usage(ctx)`, which
+cancelled code is turned away), `Admit(ed25519, x25519)` (a member handed over by its public keys,
+with no code and no relay, section 5.4) and `Revoke(nodeID)`, each returning the new roster, and `Usage(ctx)`, which
 asks the relay (request-only) for `{Network: {BytesHour, Connections, Limits, QuotaUsed, Slowed}}`;
 the relay allows one ask per `UsageInterval` (10 s) per network, with no burst (`UsageBurst`
 is 1), and refuses one sooner at once: it fails `rate-limited`. Whether the network is slowed is

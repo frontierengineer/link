@@ -340,3 +340,31 @@ async fn a_pairing_newcomer_times_out_when_the_relay_says_nothing() {
     .await;
     assert_eq!(bad.unwrap_err().code(), ErrorCode::Pairing);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_member_admitted_by_its_public_keys_joins_with_the_roster_it_is_handed() {
+    let net = Net::start(&[], fast()).await;
+    let alice = net.add(&[]).await;
+    let newcomer = Identity::generate();
+    let ed25519 = wire::b64u(&newcomer.ed25519_public());
+    let x25519 = wire::b64u(&newcomer.x25519_public());
+    let before = net.primary.roster().version();
+    let roster = net.primary.admit(&ed25519, &x25519).unwrap();
+    assert_eq!(roster.version(), before + 1);
+    for _ in 0..200 {
+        if alice.roster().version() == roster.version() {
+            break;
+        }
+        sleep_ms(25).await;
+    }
+    assert_eq!(alice.roster().version(), roster.version(), "alice learns the admission");
+    let joined = Member::new(opts(newcomer, roster)).unwrap();
+    joined.wait_connected(Some(SECS(10))).await.unwrap();
+    joined.send(alice.id(), &b"admitted"[..]).await.unwrap();
+    let got = recv_within(&alice, SECS(5)).await;
+    assert_eq!(got.from, joined.id());
+    assert_eq!(net.primary.admit(&ed25519, &x25519).unwrap_err().code(), ErrorCode::Invalid);
+    assert_eq!(net.primary.admit("short", "short").unwrap_err().code(), ErrorCode::Invalid);
+    let other = Identity::generate();
+    assert!(alice.admit(&wire::b64u(&other.ed25519_public()), &wire::b64u(&other.x25519_public())).is_err());
+}

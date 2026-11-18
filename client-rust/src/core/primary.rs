@@ -461,6 +461,24 @@ fn retry_pushes(node: &mut Node, now: u64) {
 }
 
 /// Removes a member and publishes the roster. Returns the new roster.
+pub(crate) fn admit(node: &mut Node, ed25519: &str, x25519: &str) -> Result<Roster, LinkError> {
+    if node.primary.is_none() {
+        return Err(not_primary());
+    }
+    let (Some(ed), Some(x)) = (from_b64u_array::<32>(ed25519), from_b64u_array::<32>(x25519)) else {
+        return Err(LinkError::invalid("not a member's public keys: each is 32 bytes of base64url"));
+    };
+    let member = RosterMember::new(ed, x);
+    if node.roster().member(member.id()).is_some() {
+        return Err(LinkError::invalid(format!("{} is already a member", member.id())));
+    }
+    let mut members = node.roster().members().to_vec();
+    members.push(member);
+    let next = next_roster(node, members)?;
+    publish(node, next.clone());
+    Ok(next)
+}
+
 pub(crate) fn revoke(node: &mut Node, id: &str) -> Result<Roster, LinkError> {
     if node.primary.is_none() {
         return Err(not_primary());

@@ -392,6 +392,13 @@ impl Member {
         self.shared().with(|c| primary::cancel_pairing_code(c, code_id));
     }
 
+    /// Adds a member whose public keys reached the primary over a channel it already trusts,
+    /// rather than a pairing code (section 5.4), and publishes the roster. It needs no relay.
+    /// Returns the new roster. Primary only.
+    pub fn admit(&self, ed25519: &str, x25519: &str) -> Result<Roster, LinkError> {
+        self.shared().with(|c| primary::admit(c, ed25519, x25519))
+    }
+
     /// Removes a member and publishes the roster. Returns the new roster. Primary only.
     pub fn revoke(&self, node_id: &str) -> Result<Roster, LinkError> {
         self.shared().with(|c| primary::revoke(c, node_id))

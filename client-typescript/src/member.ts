@@ -346,6 +346,14 @@ export class Member<E extends MemberEvents = MemberEvents> extends Emitter<E> {
     this.prim?.cancelPairingCode(codeId);
   }
 
+  /**
+   * Adds a member by its public keys, handed over by a channel the primary already trusts
+   * rather than a pairing code (section 5.4), and publishes the roster. Returns the new roster.
+   */
+  admit(keys: { ed25519: string; x25519: string }): Roster {
+    return this.requirePrimary().admit(keys);
+  }
+
   /** Removes a member and publishes the roster. Returns the new roster. */
   revoke(nodeId: string): Roster {
     return this.requirePrimary().revoke(nodeId);

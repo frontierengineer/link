@@ -1077,3 +1077,46 @@ test("a network seed must be the roster's, and the primary needs one", () => {
   assert.throws(() => new Member({ identity: id, roster, networkSeed: createNetworkSeed() }), { code: 'invalid' });
   assert.throws(() => new Primary({ identity: id, roster }), { code: 'invalid' });
 });
+
+test('admission: a member the primary is handed by its public keys joins with the roster it gets back, and the others learn it', async () => {
+  const net = await startNetwork();
+  try {
+    const alice = await net.add();
+    const newcomer = createIdentity();
+    const before = net.primary.roster.version;
+    const r = net.primary.admit(memberFromIdentity(newcomer));
+    assert.equal(r.version, before + 1);
+    assert.ok(r.members.some((m) => m.id === newcomer.id));
+    await until(() => alice.roster.version === r.version, 'alice learns the admission');
+    const joined = await Member.connect({ identity: newcomer, roster: r, timing: FAST });
+    try {
+      const wIn = inbox(alice);
+      await joined.send(alice.id, bytesOf('hello'));
+      const [got] = await wIn.next();
+      assert.equal(got?.from, newcomer.id);
+    } finally {
+      joined.close();
+    }
+    assert.throws(() => net.primary.admit(memberFromIdentity(newcomer)), { code: 'invalid' });
+    assert.throws(() => net.primary.admit({ ed25519: 'short', x25519: 'short' }), { code: 'invalid' });
+    assert.throws(() => alice.admit(memberFromIdentity(createIdentity())), { code: 'invalid' });
+  } finally {
+    await net.close();
+  }
+});
+
+test('admission needs no relay: a primary that has never reached one admits a member and signs the roster', async () => {
+  const me = createIdentity();
+  const networkSeed = createNetworkSeed();
+  const { roster } = createNetwork({ identity: me, relay: 'ws://127.0.0.1:9/v1', networkSeed });
+  const primary = new Primary({ identity: me, roster, networkSeed, timing: FAST });
+  try {
+    const newcomer = createIdentity();
+    const r = primary.admit(memberFromIdentity(newcomer));
+    assert.equal(r.version, roster.version + 1);
+    assert.deepEqual(r.members.map((m) => m.id).sort(), [me.id, newcomer.id].sort());
+    assert.equal(primary.roster.version, r.version);
+  } finally {
+    primary.close();
+  }
+});

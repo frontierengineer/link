@@ -423,6 +423,21 @@ labels its members does so by the code it opened for each. The newcomer pins
 A primary that stops being one (section 3.1) closes every code it opened and ends every pairing
 channel it holds; the relay ends them too.
 
+### 5.4 Admission by public key
+
+- A primary MAY add a member whose public keys reached it over a channel it already trusts
+  instead of a pairing code: a process on the primary's own machine is the case it serves,
+  where the operating system's account is the trust boundary and no relay need be reachable.
+- The newcomer makes its own seed, as for pairing, and hands over only `ed25519` and
+  `x25519`. The primary derives the id from `ed25519` (section 2), refuses a node already on
+  the roster, and publishes the next roster with the member added, as after pairing: signed,
+  pushed to the relay and to every member, each push tried again until it goes (section 8).
+  It needs no relay connection; the pushes go once one is reached.
+- The result is exactly a pairing's: one roster member and the network's signature over the
+  roster. The newcomer is handed that roster over the same trusted channel and connects as a
+  member with it. Nothing on the wire changes; a relay cannot tell an admitted member from a
+  paired one.
+
 ## 6. Routed frames
 
 Every binary WebSocket frame:

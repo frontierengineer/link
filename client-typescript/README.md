@@ -34,6 +34,12 @@ member.onMessage(({ from, bytes }) => { /* ... */ });          // or: for await 
 member.close();
 ```
 
+## 1.6.0
+
+`admit({ ed25519, x25519 })` adds a member the primary is handed by its public keys over a
+channel it already trusts, such as a process on its own machine, with no code and no relay
+(protocol section 5.4). It signs and publishes the next roster as pairing does.
+
 ## 1.5.0
 
 `openPairingCode()` opens the network's default code, so opening a second code closes the first.
@@ -152,7 +158,8 @@ and its roster names it. Only then do these work (each throws `InvalidError` oth
 `openPairingCode({ lifetimeMs?, code?, separate? })`
 returning `{ code, codeId, link, expiresAt }` (`code` chooses the code instead of a random one;
 it must still be 8 Crockford characters, and a word is easier to guess than a random code), `cancelPairingCode(codeId?)`,
-`revoke(nodeId)` returning the new roster, `usage()`; events `paired` (`{ member, codeId, roster }`:
+`admit({ ed25519, x25519 })` (a member handed over by its public keys, with no code and no relay needed, section 5.4) and
+`revoke(nodeId)`, each returning the new roster, `usage()`; events `paired` (`{ member, codeId, roster }`:
 the new member and the code that admitted it) and `pairingFailed`. A primary holds at most one
 **default code** (section 5.1): its id is `DEFAULT_CODE_ID` (`AAAAAAAAAAA`, 8 zero bytes) and its
 link carries no id. `openPairingCode()` without `separate` opens the default code and closes the

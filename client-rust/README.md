@@ -171,7 +171,8 @@ whether it holds the seed. The primary's calls are `Member`'s, and fail with `In
 member that is not the primary now: `open_pairing_code(CodeOptions { lifetime, code, separate })`
 returning `{ code, code_id, link, expires_at }` (`code` chooses the code instead of a random
 one; codes below), `cancel_pairing_code(code_id)` (`None` cancels the default code),
-`revoke(node_id)` returning the new roster, `usage()`. The
+`admit(ed25519, x25519)` (a member handed over by its public keys, with no code and no relay,
+section 5.4) and `revoke(node_id)`, each returning the new roster, `usage()`. The
 relay allows one ask per `USAGE_INTERVAL` (10 s) per network, with no burst (`USAGE_BURST` is
 1); an ask sooner fails at once with `RateLimited`. An ask within it is answered at once, however
 busy the network. Whether the network is slowed is `shaping()`, which needs no ask. When no further member fits under the roster limit,

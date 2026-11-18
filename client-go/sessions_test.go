@@ -1608,3 +1608,36 @@ func TestAnUndeliveredPreRemovalInitIsRefusedLaterStill(t *testing.T) {
 		t.Fatal("an init from before the removal accepted an hour after the re-admission")
 	}
 }
+
+func TestAdmit(t *testing.T) {
+	tn := newTestNet(t, 2)
+	pm := tn.start(0)
+	a := tn.start(1)
+	newcomer, err := NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := MemberFromIdentity(newcomer)
+	r, err := pm.Admit(keys.Ed25519, keys.X25519)
+	if err != nil || r.Version != 3 || r.member(newcomer.ID()) == nil {
+		t.Fatalf("admit: %v", err)
+	}
+	eventually(t, "a to receive v3", func() bool { return a.Roster().Version == 3 })
+	tn.ids = append(tn.ids, newcomer)
+	joined := tn.start(2, func(o *MemberOptions) { o.Roster = r })
+	if err := send(t, joined, a.ID(), []byte("admitted")); err != nil {
+		t.Fatal(err)
+	}
+	recv(t, a)
+	if _, err := pm.Admit(keys.Ed25519, keys.X25519); CodeOf(err) != CodeInvalid {
+		t.Fatalf("admitted twice: %v", err)
+	}
+	if _, err := pm.Admit("short", "short"); CodeOf(err) != CodeInvalid {
+		t.Fatalf("admitted a bad key: %v", err)
+	}
+	other, _ := NewIdentity()
+	otherKeys := MemberFromIdentity(other)
+	if _, err := a.Admit(otherKeys.Ed25519, otherKeys.X25519); err == nil {
+		t.Fatal("a member that is not the primary admitted")
+	}
+}
